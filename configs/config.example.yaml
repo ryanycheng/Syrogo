@@ -1,0 +1,11 @@
+server:
+  listen: ":8080"
+
+routing:
+  default_provider: "mock"
+  model_providers:
+    default: "mock"
+
+providers:
+  - name: "mock"
+    type: "mock"

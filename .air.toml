@@ -1,0 +1,16 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+cmd = "go build -o ./tmp/syrogo ./cmd/syrogo"
+bin = "./tmp/syrogo"
+full_bin = "./tmp/syrogo -config ./configs/config.yaml"
+include_ext = ["go", "yaml", "yml"]
+exclude_dir = ["tmp", "vendor", ".git", ".claude"]
+delay = 300
+stop_on_error = true
+send_interrupt = true
+kill_delay = 500
+
+[log]
+time = true

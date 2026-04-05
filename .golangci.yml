@@ -1,0 +1,21 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+env:
+  - CGO_ENABLED=0
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
