@@ -5,6 +5,7 @@ import (
 
 	"syrogo/internal/config"
 	"syrogo/internal/provider"
+	"syrogo/internal/runtime"
 )
 
 type Router struct {
@@ -25,14 +26,26 @@ func New(cfg config.RoutingConfig, providers map[string]provider.Provider) (*Rou
 	}, nil
 }
 
-func (r *Router) Resolve(model string) (provider.Provider, error) {
-	if name, ok := r.modelProviders[model]; ok {
-		p, exists := r.providers[name]
-		if !exists {
-			return nil, fmt.Errorf("provider %q not found for model %q", name, model)
-		}
-		return p, nil
+func (r *Router) Plan(ctx runtime.RouteContext) (runtime.ExecutionPlan, error) {
+	providerName := r.defaultProvider
+	if name, ok := r.modelProviders[ctx.Request.Model]; ok {
+		providerName = name
 	}
 
-	return r.providers[r.defaultProvider], nil
+	p, exists := r.providers[providerName]
+	if !exists {
+		return runtime.ExecutionPlan{}, fmt.Errorf("provider %q not found for model %q", providerName, ctx.Request.Model)
+	}
+
+	return runtime.ExecutionPlan{
+		MatchedRoute: providerName,
+		Steps: []runtime.ExecutionStep{
+			{
+				Type:           runtime.StepTypeOutbound,
+				ProviderName:   providerName,
+				ProviderTarget: p,
+				Model:          ctx.Request.Model,
+			},
+		},
+	}, nil
 }

@@ -4,16 +4,19 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"syrogo/internal/execution"
 	"syrogo/internal/provider"
 	"syrogo/internal/router"
+	"syrogo/internal/runtime"
 )
 
 type Handler struct {
-	router *router.Router
+	router     *router.Router
+	dispatcher *execution.Dispatcher
 }
 
-func New(r *router.Router) *Handler {
-	return &Handler{router: r}
+func New(r *router.Router, dispatcher *execution.Dispatcher) *Handler {
+	return &Handler{router: r, dispatcher: dispatcher}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -45,13 +48,17 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	p, err := h.router.Resolve(req.Model)
+	internalReq := runtime.InternalRequest{
+		Model:    req.Model,
+		Messages: req.Messages,
+	}
+	plan, err := h.router.Plan(runtime.RouteContext{Request: internalReq})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	resp, err := p.ChatCompletion(r.Context(), req)
+	resp, err := h.dispatcher.Dispatch(r.Context(), internalReq, plan)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"syrogo/internal/config"
+	"syrogo/internal/execution"
 	"syrogo/internal/gateway"
 	"syrogo/internal/provider"
 	"syrogo/internal/router"
@@ -31,8 +32,9 @@ func New(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
+	dispatcher := execution.NewDispatcher()
 	mux := http.NewServeMux()
-	gateway.New(r).Register(mux)
+	gateway.New(r, dispatcher).Register(mux)
 
 	return &App{
 		Server: server.New(cfg.Server.Listen, mux),
