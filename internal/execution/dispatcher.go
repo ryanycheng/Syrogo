@@ -19,16 +19,24 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.InternalRequest, 
 		return provider.ChatResponse{}, fmt.Errorf("execution plan has no steps")
 	}
 
-	step := plan.Steps[0]
-	if step.Type != runtime.StepTypeOutbound {
-		return provider.ChatResponse{}, fmt.Errorf("unsupported execution step type %q", step.Type)
-	}
-	if step.ProviderTarget == nil {
-		return provider.ChatResponse{}, fmt.Errorf("provider target is required")
+	var lastErr error
+	for _, step := range plan.Steps {
+		if step.Type != runtime.StepTypeOutbound {
+			return provider.ChatResponse{}, fmt.Errorf("unsupported execution step type %q", step.Type)
+		}
+		if step.ProviderTarget == nil {
+			return provider.ChatResponse{}, fmt.Errorf("provider target is required")
+		}
+
+		resp, err := step.ProviderTarget.ChatCompletion(ctx, provider.ChatRequest{
+			Model:    step.Model,
+			Messages: req.Messages,
+		})
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
 	}
 
-	return step.ProviderTarget.ChatCompletion(ctx, provider.ChatRequest{
-		Model:    step.Model,
-		Messages: req.Messages,
-	})
+	return provider.ChatResponse{}, lastErr
 }

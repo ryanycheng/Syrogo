@@ -61,6 +61,45 @@ func TestDispatchExecutesFirstOutboundStep(t *testing.T) {
 	}
 }
 
+func TestDispatchUsesFallbackStepWhenPrimaryFails(t *testing.T) {
+	dispatcher := NewDispatcher()
+	primary := &stubProvider{name: "primary", err: errors.New("primary failed")}
+	fallback := &stubProvider{
+		name: "fallback",
+		resp: provider.ChatResponse{ID: "2", Object: "chat.completion", Model: "gpt-4", Content: "fallback ok"},
+	}
+
+	resp, err := dispatcher.Dispatch(context.Background(), runtime.InternalRequest{
+		Model:    "gpt-4",
+		Messages: []provider.ChatMessage{{Role: "user", Content: "hello"}},
+	}, runtime.ExecutionPlan{
+		MatchedRoute: "primary",
+		Steps: []runtime.ExecutionStep{
+			{
+				Type:           runtime.StepTypeOutbound,
+				ProviderName:   "primary",
+				ProviderTarget: primary,
+				Model:          "gpt-4",
+			},
+			{
+				Type:           runtime.StepTypeOutbound,
+				ProviderName:   "fallback",
+				ProviderTarget: fallback,
+				Model:          "gpt-4",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if resp.Content != "fallback ok" {
+		t.Fatalf("Dispatch() content = %q, want fallback ok", resp.Content)
+	}
+	if fallback.req.Model != "gpt-4" {
+		t.Fatalf("fallback req.Model = %q, want gpt-4", fallback.req.Model)
+	}
+}
+
 func TestDispatchFailsWhenPlanHasNoSteps(t *testing.T) {
 	dispatcher := NewDispatcher()
 
@@ -70,19 +109,28 @@ func TestDispatchFailsWhenPlanHasNoSteps(t *testing.T) {
 	}
 }
 
-func TestDispatchFailsWhenProviderReturnsError(t *testing.T) {
+func TestDispatchFailsWhenAllStepsFail(t *testing.T) {
 	dispatcher := NewDispatcher()
-	p := &stubProvider{name: "primary", err: errors.New("provider failed")}
+	primary := &stubProvider{name: "primary", err: errors.New("primary failed")}
+	fallback := &stubProvider{name: "fallback", err: errors.New("fallback failed")}
 
 	_, err := dispatcher.Dispatch(context.Background(), runtime.InternalRequest{Model: "gpt-4"}, runtime.ExecutionPlan{
-		Steps: []runtime.ExecutionStep{{
-			Type:           runtime.StepTypeOutbound,
-			ProviderName:   "primary",
-			ProviderTarget: p,
-			Model:          "gpt-4",
-		}},
+		Steps: []runtime.ExecutionStep{
+			{
+				Type:           runtime.StepTypeOutbound,
+				ProviderName:   "primary",
+				ProviderTarget: primary,
+				Model:          "gpt-4",
+			},
+			{
+				Type:           runtime.StepTypeOutbound,
+				ProviderName:   "fallback",
+				ProviderTarget: fallback,
+				Model:          "gpt-4",
+			},
+		},
 	})
-	if err == nil || err.Error() != "provider failed" {
-		t.Fatalf("Dispatch() error = %v, want provider failed", err)
+	if err == nil || err.Error() != "fallback failed" {
+		t.Fatalf("Dispatch() error = %v, want fallback failed", err)
 	}
 }
