@@ -31,14 +31,28 @@ func TestNewFailsWhenDefaultProviderMissing(t *testing.T) {
 	}
 }
 
+func TestNewFailsWhenFallbackProviderMissing(t *testing.T) {
+	_, err := New(config.RoutingConfig{
+		DefaultProvider:   "default",
+		FallbackProviders: []string{"fallback"},
+	}, map[string]provider.Provider{
+		"default": provider.NewMock("default"),
+	})
+	if err == nil || err.Error() != "fallback provider \"fallback\" not found" {
+		t.Fatalf("New() error = %v, want fallback provider missing error", err)
+	}
+}
+
 func TestPlanReturnsMappedProviderStep(t *testing.T) {
 	providers := map[string]provider.Provider{
-		"default": provider.NewMock("default"),
-		"special": provider.NewMock("special"),
+		"default":  provider.NewMock("default"),
+		"special":  provider.NewMock("special"),
+		"fallback": provider.NewMock("fallback"),
 	}
 
 	r, err := New(config.RoutingConfig{
-		DefaultProvider: "default",
+		DefaultProvider:   "default",
+		FallbackProviders: []string{"fallback"},
 		ModelProviders: map[string]string{
 			"gpt-4": "special",
 		},
@@ -54,23 +68,27 @@ func TestPlanReturnsMappedProviderStep(t *testing.T) {
 	if plan.MatchedRoute != "special" {
 		t.Fatalf("Plan().MatchedRoute = %q, want special", plan.MatchedRoute)
 	}
-	if len(plan.Steps) != 1 {
-		t.Fatalf("len(Plan().Steps) = %d, want 1", len(plan.Steps))
+	if len(plan.Steps) != 2 {
+		t.Fatalf("len(Plan().Steps) = %d, want 2", len(plan.Steps))
 	}
 	if got := plan.Steps[0].ProviderName; got != "special" {
 		t.Fatalf("Plan().Steps[0].ProviderName = %q, want special", got)
 	}
-	if plan.Steps[0].ProviderTarget == nil {
-		t.Fatal("Plan().Steps[0].ProviderTarget = nil, want provider")
+	if got := plan.Steps[1].ProviderName; got != "fallback" {
+		t.Fatalf("Plan().Steps[1].ProviderName = %q, want fallback", got)
 	}
 }
 
 func TestPlanFallsBackToDefaultProvider(t *testing.T) {
 	providers := map[string]provider.Provider{
-		"default": provider.NewMock("default"),
+		"default":  provider.NewMock("default"),
+		"fallback": provider.NewMock("fallback"),
 	}
 
-	r, err := New(config.RoutingConfig{DefaultProvider: "default"}, providers)
+	r, err := New(config.RoutingConfig{
+		DefaultProvider:   "default",
+		FallbackProviders: []string{"fallback"},
+	}, providers)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -81,6 +99,31 @@ func TestPlanFallsBackToDefaultProvider(t *testing.T) {
 	}
 	if got := plan.MatchedRoute; got != "default" {
 		t.Fatalf("Plan().MatchedRoute = %q, want default", got)
+	}
+	if len(plan.Steps) != 2 {
+		t.Fatalf("len(Plan().Steps) = %d, want 2", len(plan.Steps))
+	}
+}
+
+func TestPlanSkipsDuplicateFallbackProvider(t *testing.T) {
+	providers := map[string]provider.Provider{
+		"default": provider.NewMock("default"),
+	}
+
+	r, err := New(config.RoutingConfig{
+		DefaultProvider:   "default",
+		FallbackProviders: []string{"default"},
+	}, providers)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	plan, err := r.Plan(runtime.RouteContext{Request: runtime.InternalRequest{Model: "gpt-4"}})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if len(plan.Steps) != 1 {
+		t.Fatalf("len(Plan().Steps) = %d, want 1", len(plan.Steps))
 	}
 }
 

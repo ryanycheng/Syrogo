@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +14,19 @@ import (
 	"syrogo/internal/provider"
 	"syrogo/internal/router"
 )
+
+type failingProvider struct {
+	name string
+	err  error
+}
+
+func (p *failingProvider) Name() string {
+	return p.name
+}
+
+func (p *failingProvider) ChatCompletion(_ context.Context, _ provider.ChatRequest) (provider.ChatResponse, error) {
+	return provider.ChatResponse{}, p.err
+}
 
 func newTestHandler(t *testing.T, providers map[string]provider.Provider, routing config.RoutingConfig) *Handler {
 	t.Helper()
@@ -114,5 +129,47 @@ func TestChatCompletionsUsesDispatcherBackedPlan(t *testing.T) {
 	}
 	if len(resp.Choices) != 1 || resp.Choices[0].Message.Role != "assistant" || resp.Choices[0].Message.Content == "" {
 		t.Fatalf("choices = %#v, want single assistant response", resp.Choices)
+	}
+}
+
+func TestChatCompletionsFallsBackToBackupProvider(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{
+		"primary":  &failingProvider{name: "primary", err: execution.NewRetryableError(errors.New("temporary upstream failure"))},
+		"fallback": provider.NewMock("fallback"),
+	}, config.RoutingConfig{
+		DefaultProvider:   "primary",
+		FallbackProviders: []string{"fallback"},
+	})
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-4",
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "hello",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if resp.Model != "gpt-4" {
+		t.Fatalf("model = %q, want gpt-4", resp.Model)
 	}
 }
