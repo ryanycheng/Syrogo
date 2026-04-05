@@ -20,7 +20,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.InternalRequest, 
 	}
 
 	var lastErr error
-	for _, step := range plan.Steps {
+	for i, step := range plan.Steps {
 		if step.Type != runtime.StepTypeOutbound {
 			return provider.ChatResponse{}, fmt.Errorf("unsupported execution step type %q", step.Type)
 		}
@@ -35,7 +35,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.InternalRequest, 
 		if err == nil {
 			return resp, nil
 		}
+
 		lastErr = err
+		if !shouldFallback(normalizeFallbackCondition(string(step.OnError)), classifyError(err), i == len(plan.Steps)-1) {
+			return provider.ChatResponse{}, err
+		}
 	}
 
 	return provider.ChatResponse{}, lastErr

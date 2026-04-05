@@ -13,8 +13,14 @@ type RouteContext struct {
 
 type StepType string
 
+type FallbackCondition string
+
 const (
 	StepTypeOutbound StepType = "outbound"
+
+	FallbackAlways          FallbackCondition = "always"
+	FallbackOnRetryable     FallbackCondition = "retryable"
+	FallbackOnQuotaExceeded FallbackCondition = "quota_exceeded"
 )
 
 type ExecutionStep struct {
@@ -22,6 +28,7 @@ type ExecutionStep struct {
 	ProviderName   string
 	ProviderTarget provider.Provider
 	Model          string
+	OnError        FallbackCondition
 }
 
 type ExecutionPlan struct {
