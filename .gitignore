@@ -1,6 +1,7 @@
 bin/
 dist/
 tmp/
+docs/
 coverage.out
 *.test
 *.out
