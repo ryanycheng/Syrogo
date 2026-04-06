@@ -1,11 +1,28 @@
-server:
-  listen: ":8080"
+listeners:
+  - name: "public-http"
+    listen: ":8080"
+    inbound: "openai-entry"
+
+inbounds:
+  - name: "openai-entry"
+    type: "openai_chat"
+    labels:
+      source: "claude-code"
 
 routing:
-  default_provider: "mock"
-  model_providers:
+  default_outbound: "mock"
+  model_outbounds:
     default: "mock"
 
-providers:
+outbounds:
   - name: "mock"
     type: "mock"
+
+  - name: "openai"
+    type: "openai_compatible"
+    base_url: "https://api.openai.com/v1"
+    api_keys:
+      - "${OPENAI_API_KEY_PRIMARY}"
+      - "${OPENAI_API_KEY_BACKUP}"
+    models:
+      - "gpt-4o-mini"

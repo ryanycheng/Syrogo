@@ -4,19 +4,28 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"syrogo/internal/config"
 	"syrogo/internal/execution"
-	"syrogo/internal/provider"
 	"syrogo/internal/router"
 	"syrogo/internal/runtime"
 )
 
 type Handler struct {
-	router     *router.Router
-	dispatcher *execution.Dispatcher
+	router      *router.Router
+	dispatcher  *execution.Dispatcher
+	inboundName string
+	inboundType string
+	labels      map[string]string
 }
 
-func New(r *router.Router, dispatcher *execution.Dispatcher) *Handler {
-	return &Handler{router: r, dispatcher: dispatcher}
+func New(r *router.Router, dispatcher *execution.Dispatcher, inbound config.InboundSpec) *Handler {
+	return &Handler{
+		router:      r,
+		dispatcher:  dispatcher,
+		inboundName: inbound.Name,
+		inboundType: inbound.Type,
+		labels:      inbound.Labels,
+	}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -34,7 +43,13 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req provider.ChatRequest
+	var req struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
@@ -48,11 +63,26 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	internalReq := runtime.InternalRequest{
+	internalReq := runtime.Request{
 		Model:    req.Model,
-		Messages: req.Messages,
+		Messages: make([]runtime.Message, 0, len(req.Messages)),
 	}
-	plan, err := h.router.Plan(runtime.RouteContext{Request: internalReq})
+	for _, msg := range req.Messages {
+		internalReq.Messages = append(internalReq.Messages, runtime.Message{
+			Role: runtime.MessageRole(msg.Role),
+			Parts: []runtime.ContentPart{{
+				Type: runtime.ContentPartTypeText,
+				Text: msg.Content,
+			}},
+		})
+	}
+
+	plan, err := h.router.Plan(runtime.RouteContext{
+		Request:       internalReq,
+		InboundName:   h.inboundName,
+		InboundType:   h.inboundType,
+		InboundLabels: h.labels,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -68,16 +98,23 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		"id":     resp.ID,
 		"object": resp.Object,
 		"model":  resp.Model,
-		"choices": []map[string]any{
-			{
-				"index": 0,
-				"message": map[string]string{
-					"role":    "assistant",
-					"content": resp.Content,
-				},
+		"choices": []map[string]any{{
+			"index": 0,
+			"message": map[string]string{
+				"role":    string(resp.Message.Role),
+				"content": firstTextPart(resp.Message),
 			},
-		},
+		}},
 	})
+}
+
+func firstTextPart(msg runtime.Message) string {
+	for _, part := range msg.Parts {
+		if part.Type == runtime.ContentPartTypeText {
+			return part.Text
+		}
+	}
+	return ""
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

@@ -29,7 +29,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("syrogo listening on %s", cfg.Server.Listen)
+		log.Printf("syrogo listening on %s", cfg.ListenAddress())
 		errCh <- application.Server.Start()
 	}()
 
