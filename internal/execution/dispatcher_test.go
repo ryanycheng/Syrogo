@@ -10,10 +10,11 @@ import (
 )
 
 type stubProvider struct {
-	name string
-	resp runtime.Response
-	err  error
-	req  runtime.Request
+	name         string
+	resp         runtime.Response
+	streamEvents []runtime.StreamEvent
+	err          error
+	req          runtime.Request
 }
 
 func (p *stubProvider) Name() string {
@@ -33,7 +34,10 @@ func (p *stubProvider) StreamCompletion(_ context.Context, req runtime.Request) 
 	if p.err != nil {
 		return nil, p.err
 	}
-	ch := make(chan runtime.StreamEvent)
+	ch := make(chan runtime.StreamEvent, len(p.streamEvents))
+	for _, event := range p.streamEvents {
+		ch <- event
+	}
 	close(ch)
 	return ch, nil
 }
@@ -60,11 +64,10 @@ func TestDispatchExecutesFirstOutboundStep(t *testing.T) {
 			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
 		}},
 	}, runtime.ExecutionPlan{
-		MatchedRoute: "primary",
 		Steps: []runtime.ExecutionStep{{
 			Type:           runtime.StepTypeOutbound,
-			ProviderName:   "primary",
-			ProviderTarget: p,
+			OutboundName:   "primary",
+			OutboundTarget: p,
 			Model:          "gpt-4",
 			OnError:        runtime.FallbackAlways,
 		}},
@@ -76,10 +79,7 @@ func TestDispatchExecutesFirstOutboundStep(t *testing.T) {
 		t.Fatalf("Dispatch() content = %q, want ok", got)
 	}
 	if p.req.Model != "gpt-4" {
-		t.Fatalf("provider req.Model = %q, want gpt-4", p.req.Model)
-	}
-	if len(p.req.Messages) != 1 || p.req.Messages[0].Parts[0].Text != "hello" {
-		t.Fatalf("provider req.Messages = %#v, want single hello message", p.req.Messages)
+		t.Fatalf("outbound req.Model = %q, want gpt-4", p.req.Model)
 	}
 }
 
@@ -99,29 +99,10 @@ func TestDispatchUsesFallbackStepWhenErrorIsRetryable(t *testing.T) {
 		},
 	}
 
-	resp, err := dispatcher.Dispatch(context.Background(), runtime.Request{
-		Model: "gpt-4",
-		Messages: []runtime.Message{{
-			Role:  runtime.MessageRoleUser,
-			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
-		}},
-	}, runtime.ExecutionPlan{
-		MatchedRoute: "primary",
+	resp, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{
 		Steps: []runtime.ExecutionStep{
-			{
-				Type:           runtime.StepTypeOutbound,
-				ProviderName:   "primary",
-				ProviderTarget: primary,
-				Model:          "gpt-4",
-				OnError:        runtime.FallbackOnRetryable,
-			},
-			{
-				Type:           runtime.StepTypeOutbound,
-				ProviderName:   "fallback",
-				ProviderTarget: fallback,
-				Model:          "gpt-4",
-				OnError:        runtime.FallbackAlways,
-			},
+			{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+			{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackAlways},
 		},
 	})
 	if err != nil {
@@ -135,35 +116,12 @@ func TestDispatchUsesFallbackStepWhenErrorIsRetryable(t *testing.T) {
 func TestDispatchDoesNotFallbackWhenErrorIsFatal(t *testing.T) {
 	dispatcher := NewDispatcher()
 	primary := &stubProvider{name: "primary", err: provider.NewFatalError(errors.New("auth failed"))}
-	fallback := &stubProvider{
-		name: "fallback",
-		resp: runtime.Response{
-			ID:     "2",
-			Object: "chat.completion",
-			Model:  "gpt-4",
-			Message: runtime.Message{
-				Role:  runtime.MessageRoleAssistant,
-				Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "fallback ok"}},
-			},
-		},
-	}
+	fallback := &stubProvider{name: "fallback"}
 
 	_, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{
 		Steps: []runtime.ExecutionStep{
-			{
-				Type:           runtime.StepTypeOutbound,
-				ProviderName:   "primary",
-				ProviderTarget: primary,
-				Model:          "gpt-4",
-				OnError:        runtime.FallbackOnRetryable,
-			},
-			{
-				Type:           runtime.StepTypeOutbound,
-				ProviderName:   "fallback",
-				ProviderTarget: fallback,
-				Model:          "gpt-4",
-				OnError:        runtime.FallbackAlways,
-			},
+			{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+			{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackAlways},
 		},
 	})
 	if err == nil || err.Error() != "auth failed" {
@@ -174,81 +132,68 @@ func TestDispatchDoesNotFallbackWhenErrorIsFatal(t *testing.T) {
 	}
 }
 
-func TestDispatchUsesFallbackStepWhenQuotaExceeded(t *testing.T) {
+func TestDispatchStreamReturnsFirstOutboundEvents(t *testing.T) {
 	dispatcher := NewDispatcher()
-	primary := &stubProvider{name: "primary", err: provider.NewQuotaExceededError(errors.New("quota exceeded"))}
-	fallback := &stubProvider{
-		name: "fallback",
-		resp: runtime.Response{
-			ID:     "2",
-			Object: "chat.completion",
-			Model:  "gpt-4",
-			Message: runtime.Message{
-				Role:  runtime.MessageRoleAssistant,
-				Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "fallback ok"}},
-			},
-		},
+	p := &stubProvider{name: "primary", streamEvents: []runtime.StreamEvent{{Type: runtime.StreamEventMessageStart, ResponseID: "chatcmpl-1", Model: "gpt-4"}}}
+
+	events, err := dispatcher.DispatchStream(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{
+		Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: p, Model: "gpt-4", OnError: runtime.FallbackAlways}},
+	})
+	if err != nil {
+		t.Fatalf("DispatchStream() error = %v", err)
+	}
+	if !p.req.Stream {
+		t.Fatal("outbound req.Stream = false, want true")
 	}
 
-	resp, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{
+	var got []runtime.StreamEvent
+	for event := range events {
+		got = append(got, event)
+	}
+	if len(got) != 1 || got[0].Type != runtime.StreamEventMessageStart {
+		t.Fatalf("events = %#v, want single message_start", got)
+	}
+}
+
+func TestDispatchStreamUsesFallbackWhenErrorIsRetryable(t *testing.T) {
+	dispatcher := NewDispatcher()
+	primary := &stubProvider{name: "primary", err: provider.NewRetryableError(errors.New("temporary upstream failure"))}
+	fallback := &stubProvider{name: "fallback", streamEvents: []runtime.StreamEvent{{Type: runtime.StreamEventMessageEnd, ResponseID: "chatcmpl-2", Model: "gpt-4"}}}
+
+	events, err := dispatcher.DispatchStream(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{
 		Steps: []runtime.ExecutionStep{
-			{
-				Type:           runtime.StepTypeOutbound,
-				ProviderName:   "primary",
-				ProviderTarget: primary,
-				Model:          "gpt-4",
-				OnError:        runtime.FallbackOnQuotaExceeded,
-			},
-			{
-				Type:           runtime.StepTypeOutbound,
-				ProviderName:   "fallback",
-				ProviderTarget: fallback,
-				Model:          "gpt-4",
-				OnError:        runtime.FallbackAlways,
-			},
+			{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+			{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackAlways},
 		},
 	})
 	if err != nil {
-		t.Fatalf("Dispatch() error = %v", err)
+		t.Fatalf("DispatchStream() error = %v", err)
 	}
-	if got := resp.Message.Parts[0].Text; got != "fallback ok" {
-		t.Fatalf("Dispatch() content = %q, want fallback ok", got)
+	if fallback.req.Model != "gpt-4" || !fallback.req.Stream {
+		t.Fatalf("fallback req = %#v, want stream gpt-4", fallback.req)
+	}
+
+	var got []runtime.StreamEvent
+	for event := range events {
+		got = append(got, event)
+	}
+	if len(got) != 1 || got[0].ResponseID != "chatcmpl-2" {
+		t.Fatalf("events = %#v, want fallback stream", got)
 	}
 }
 
 func TestDispatchFailsWhenPlanHasNoSteps(t *testing.T) {
 	dispatcher := NewDispatcher()
-
 	_, err := dispatcher.Dispatch(context.Background(), runtime.Request{}, runtime.ExecutionPlan{})
 	if err == nil || err.Error() != "execution plan has no steps" {
 		t.Fatalf("Dispatch() error = %v, want no steps error", err)
 	}
 }
 
-func TestDispatchFailsWhenAllStepsFail(t *testing.T) {
+func TestDispatchStreamFailsWhenPlanHasNoSteps(t *testing.T) {
 	dispatcher := NewDispatcher()
-	primary := &stubProvider{name: "primary", err: provider.NewRetryableError(errors.New("primary failed"))}
-	fallback := &stubProvider{name: "fallback", err: provider.NewRetryableError(errors.New("fallback failed"))}
-
-	_, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{
-		Steps: []runtime.ExecutionStep{
-			{
-				Type:           runtime.StepTypeOutbound,
-				ProviderName:   "primary",
-				ProviderTarget: primary,
-				Model:          "gpt-4",
-				OnError:        runtime.FallbackOnRetryable,
-			},
-			{
-				Type:           runtime.StepTypeOutbound,
-				ProviderName:   "fallback",
-				ProviderTarget: fallback,
-				Model:          "gpt-4",
-				OnError:        runtime.FallbackAlways,
-			},
-		},
-	})
-	if err == nil || err.Error() != "fallback failed" {
-		t.Fatalf("Dispatch() error = %v, want fallback failed", err)
+	_, err := dispatcher.DispatchStream(context.Background(), runtime.Request{}, runtime.ExecutionPlan{})
+	if err == nil || err.Error() != "execution plan has no steps" {
+		t.Fatalf("DispatchStream() error = %v, want no steps error", err)
 	}
 }

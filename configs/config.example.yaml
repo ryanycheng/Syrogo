@@ -1,28 +1,35 @@
 listeners:
   - name: "public-http"
     listen: ":8080"
-    inbound: "openai-entry"
+    inbounds:
+      - "openai-entry"
 
 inbounds:
   - name: "openai-entry"
-    type: "openai_chat"
-    labels:
-      source: "claude-code"
+    protocol: "openai_chat"
+    path: "/v1/chat/completions"
+    clients:
+      - token: "${SYROGO_CLIENT_TOKEN}"
+        tag: "office"
 
 routing:
-  default_outbound: "mock"
-  model_outbounds:
-    default: "mock"
+  rules:
+    - name: "office-route"
+      from_tags:
+        - "office"
+      to_tags:
+        - "mock-primary"
+        - "openai-backup"
+      strategy: "failover"
+      target_model: "gpt-4o-mini"
 
 outbounds:
   - name: "mock"
-    type: "mock"
+    protocol: "mock"
+    tag: "mock-primary"
 
   - name: "openai"
-    type: "openai_compatible"
-    base_url: "https://api.openai.com/v1"
-    api_keys:
-      - "${OPENAI_API_KEY_PRIMARY}"
-      - "${OPENAI_API_KEY_BACKUP}"
-    models:
-      - "gpt-4o-mini"
+    protocol: "openai_chat"
+    endpoint: "https://api.openai.com/v1"
+    auth_token: "${OPENAI_API_KEY_PRIMARY}"
+    tag: "openai-backup"

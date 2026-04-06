@@ -17,20 +17,19 @@ type App struct {
 }
 
 func New(cfg config.Config) (*App, error) {
-	outbounds := cfg.OutboundSpecs()
-	providers := make(map[string]provider.Provider, len(outbounds))
-	for _, spec := range outbounds {
-		switch spec.Type {
+	providers := make(map[string]provider.Provider, len(cfg.Outbounds))
+	for _, spec := range cfg.Outbounds {
+		switch spec.Protocol {
 		case "mock":
 			providers[spec.Name] = provider.NewMock(spec.Name)
-		case "openai_compatible":
-			providers[spec.Name] = provider.NewOpenAICompatible(spec.Name, spec.BaseURL, appendAPIKeys(spec), nil)
+		case "openai_chat":
+			providers[spec.Name] = provider.NewOpenAICompatible(spec.Name, spec.Endpoint, []string{spec.AuthToken}, nil)
 		default:
-			return nil, fmt.Errorf("unsupported provider type %q", spec.Type)
+			return nil, fmt.Errorf("unsupported provider protocol %q", spec.Protocol)
 		}
 	}
 
-	r, err := router.New(cfg.Routing, providers)
+	r, err := router.New(cfg.Routing, providers, cfg.Outbounds)
 	if err != nil {
 		return nil, err
 	}
@@ -44,29 +43,14 @@ func New(cfg config.Config) (*App, error) {
 }
 
 func buildListeners(r *router.Router, dispatcher *execution.Dispatcher, cfg config.Config) []server.Listener {
-	if len(cfg.Listeners) == 0 {
-		mux := http.NewServeMux()
-		gateway.New(r, dispatcher, cfg.PrimaryInbound()).Register(mux)
-		return []server.Listener{{Addr: cfg.ListenAddress(), Handler: mux}}
-	}
-
 	listeners := make([]server.Listener, 0, len(cfg.Listeners))
 	for _, listener := range cfg.Listeners {
 		mux := http.NewServeMux()
-		gateway.New(r, dispatcher, cfg.InboundByName(listener.Inbound)).Register(mux)
+		gateway.New(r, dispatcher, cfg.ListenerInbounds(listener)).Register(mux)
 		listeners = append(listeners, server.Listener{
 			Addr:    listener.Listen,
 			Handler: mux,
 		})
 	}
 	return listeners
-}
-
-func appendAPIKeys(spec config.ProviderSpec) []string {
-	keys := make([]string, 0, len(spec.APIKeys)+1)
-	if spec.APIKey != "" {
-		keys = append(keys, spec.APIKey)
-	}
-	keys = append(keys, spec.APIKeys...)
-	return keys
 }

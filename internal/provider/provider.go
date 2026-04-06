@@ -28,6 +28,23 @@ type OpenAICompatibleProvider struct {
 	nextAPIKeyIx int
 }
 
+type openAIChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type openAIChatResponseEnvelope struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Model   string `json:"model"`
+	Choices []struct {
+		Message struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
 func NewMock(name string) *MockProvider {
 	return &MockProvider{providerName: name}
 }
@@ -98,7 +115,7 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req runti
 		return runtime.Response{}, fmt.Errorf("api key is required")
 	}
 
-	payload, err := json.Marshal(toOpenAIChatRequest(req))
+	payload, err := json.Marshal(encodeOpenAIChatRequest(req))
 	if err != nil {
 		return runtime.Response{}, fmt.Errorf("marshal request: %w", err)
 	}
@@ -129,7 +146,7 @@ func (p *OpenAICompatibleProvider) StreamCompletion(ctx context.Context, req run
 	if err != nil {
 		return nil, err
 	}
-	ch := make(chan runtime.StreamEvent, 3)
+	ch := make(chan runtime.StreamEvent, 4)
 	go func() {
 		defer close(ch)
 		ch <- runtime.StreamEvent{Type: runtime.StreamEventMessageStart, ResponseID: resp.ID, Model: resp.Model, MessageRole: resp.Message.Role}
@@ -169,20 +186,28 @@ func (p *OpenAICompatibleProvider) chatCompletionWithAPIKey(ctx context.Context,
 		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream request failed: %s", httpResp.Status))
 	}
 
-	var resp struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		Model   string `json:"model"`
-		Choices []struct {
-			Message struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
+	var resp openAIChatResponseEnvelope
 	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
 		return runtime.Response{}, NewRetryableError(fmt.Errorf("decode response: %w", err))
 	}
+	return decodeOpenAIChatResponse(resp)
+}
+
+func encodeOpenAIChatRequest(req runtime.Request) any {
+	messages := make([]openAIChatMessage, 0, len(req.Messages))
+	for _, msg := range req.Messages {
+		messages = append(messages, openAIChatMessage{
+			Role:    string(msg.Role),
+			Content: firstTextPart(msg),
+		})
+	}
+	return map[string]any{
+		"model":    req.Model,
+		"messages": messages,
+	}
+}
+
+func decodeOpenAIChatResponse(resp openAIChatResponseEnvelope) (runtime.Response, error) {
 	if len(resp.Choices) == 0 {
 		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream response missing choices"))
 	}
@@ -200,24 +225,6 @@ func (p *OpenAICompatibleProvider) chatCompletionWithAPIKey(ctx context.Context,
 			}},
 		},
 	}, nil
-}
-
-func toOpenAIChatRequest(req runtime.Request) any {
-	type chatMessage struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	messages := make([]chatMessage, 0, len(req.Messages))
-	for _, msg := range req.Messages {
-		messages = append(messages, chatMessage{
-			Role:    string(msg.Role),
-			Content: firstTextPart(msg),
-		})
-	}
-	return map[string]any{
-		"model":    req.Model,
-		"messages": messages,
-	}
 }
 
 func firstTextPart(msg runtime.Message) string {

@@ -14,6 +14,8 @@ type FinishReason string
 
 type StreamEventType string
 
+type RoutingStrategy string
+
 const (
 	ContentPartTypeText ContentPartType = "text"
 
@@ -37,6 +39,9 @@ const (
 	StreamEventMessageEnd   StreamEventType = "message_end"
 	StreamEventUsage        StreamEventType = "usage"
 	StreamEventError        StreamEventType = "error"
+
+	RoutingStrategyFailover   RoutingStrategy = "failover"
+	RoutingStrategyRoundRobin RoutingStrategy = "round_robin"
 )
 
 type ContentPart struct {
@@ -88,21 +93,23 @@ type CompletionProvider interface {
 }
 
 type RouteContext struct {
-	Request       Request
-	InboundName   string
-	InboundType   string
-	InboundLabels map[string]string
+	Request         Request
+	InboundName     string
+	InboundProtocol string
+	ActiveTag       string
 }
 
 type ExecutionStep struct {
 	Type           StepType
-	ProviderName   string
-	ProviderTarget CompletionProvider
+	OutboundName   string
+	OutboundTarget CompletionProvider
 	Model          string
 	OnError        FallbackCondition
 }
 
 type ExecutionPlan struct {
-	MatchedRoute string
-	Steps        []ExecutionStep
+	MatchedRule    string
+	Strategy       RoutingStrategy
+	ResolvedToTags []string
+	Steps          []ExecutionStep
 }

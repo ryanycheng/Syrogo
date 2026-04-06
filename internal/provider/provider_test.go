@@ -10,6 +10,65 @@ import (
 	"syrogo/internal/runtime"
 )
 
+func TestEncodeOpenAIChatRequestUsesFirstTextPart(t *testing.T) {
+	payload := encodeOpenAIChatRequest(runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role: runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{
+				Type: runtime.ContentPartTypeText,
+				Text: "hello",
+			}, {
+				Type: runtime.ContentPartTypeText,
+				Text: "ignored",
+			}},
+		}},
+	})
+
+	body, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	if body["model"] != "gpt-4o-mini" {
+		t.Fatalf("payload model = %#v, want gpt-4o-mini", body["model"])
+	}
+	messages, ok := body["messages"].([]openAIChatMessage)
+	if !ok {
+		t.Fatalf("payload messages type = %T, want []openAIChatMessage", body["messages"])
+	}
+	if len(messages) != 1 || messages[0].Role != "user" || messages[0].Content != "hello" {
+		t.Fatalf("payload messages = %#v, want single user hello message", messages)
+	}
+}
+
+func TestDecodeOpenAIChatResponseMapsAssistantMessage(t *testing.T) {
+	resp, err := decodeOpenAIChatResponse(openAIChatResponseEnvelope{
+		ID:     "chatcmpl-1",
+		Object: "chat.completion",
+		Model:  "gpt-4o-mini",
+		Choices: []struct {
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+		}{
+			{Message: struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			}{Role: "assistant", Content: "hello from upstream"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("decodeOpenAIChatResponse() error = %v", err)
+	}
+	if resp.Message.Role != runtime.MessageRoleAssistant {
+		t.Fatalf("resp.Message.Role = %q, want assistant", resp.Message.Role)
+	}
+	if got := resp.Message.Parts[0].Text; got != "hello from upstream" {
+		t.Fatalf("resp.Message.Parts[0].Text = %q, want hello from upstream", got)
+	}
+}
+
 func TestOpenAICompatibleChatCompletionSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
@@ -152,6 +211,42 @@ func TestOpenAICompatibleChatCompletionFatalOnBadRequest(t *testing.T) {
 	}
 	if NormalizeError(err) != ErrorKindFatal {
 		t.Fatalf("NormalizeError() = %q, want fatal", NormalizeError(err))
+	}
+}
+
+func TestOpenAICompatibleChatCompletionResumesRoundRobinAfterSuccessfulCall(t *testing.T) {
+	var authHeaders []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-round-robin",
+			"object": "chat.completion",
+			"model":  "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"message": map[string]string{
+					"role":    "assistant",
+					"content": "hello",
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewOpenAICompatible("openai", server.URL, []string{"key-1", "key-2"}, server.Client())
+	p.setNextAPIKey(1)
+
+	for range 2 {
+		_, err := p.ChatCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini"})
+		if err != nil {
+			t.Fatalf("ChatCompletion() error = %v", err)
+		}
+	}
+
+	if len(authHeaders) != 2 {
+		t.Fatalf("len(authHeaders) = %d, want 2", len(authHeaders))
+	}
+	if authHeaders[0] != "Bearer key-2" || authHeaders[1] != "Bearer key-1" {
+		t.Fatalf("Authorization headers = %#v, want key-2 then key-1", authHeaders)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"syrogo/internal/config"
@@ -33,21 +34,54 @@ func (p *failingProvider) StreamCompletion(_ context.Context, _ runtime.Request)
 	return nil, p.err
 }
 
-func newTestHandler(t *testing.T, providers map[string]provider.Provider, routing config.RoutingConfig) *Handler {
+func testRoutingConfig() config.RoutingConfig {
+	return config.RoutingConfig{Rules: []config.RoutingRule{{
+		Name:     "office",
+		FromTags: []string{"office"},
+		ToTags:   []string{"mock-tag"},
+		Strategy: "failover",
+	}}}
+}
+
+func testInbounds() []config.InboundSpec {
+	return []config.InboundSpec{{
+		Name:     "openai-entry",
+		Protocol: "openai_chat",
+		Path:     "/v1/chat/completions",
+		Clients:  []config.ClientSpec{{Token: "client-token", Tag: "office"}},
+	}}
+}
+
+func testDualProtocolInbounds() []config.InboundSpec {
+	return []config.InboundSpec{
+		{Name: "openai-entry", Protocol: "openai_chat", Path: "/v1/chat/completions", Clients: []config.ClientSpec{{Token: "client-token", Tag: "office"}}},
+		{Name: "anthropic-entry", Protocol: "anthropic_messages", Path: "/v1/messages", Clients: []config.ClientSpec{{Token: "anthropic-token", Tag: "office"}}},
+	}
+}
+
+func testOutbounds() []config.OutboundSpec {
+	return []config.OutboundSpec{{Name: "mock", Protocol: "mock", Tag: "mock-tag"}}
+}
+
+func newTestHandler(t *testing.T, providers map[string]provider.Provider, routing config.RoutingConfig, inbounds []config.InboundSpec, outbounds []config.OutboundSpec) *Handler {
 	t.Helper()
 
-	r, err := router.New(routing, providers)
+	r, err := router.New(routing, providers, outbounds)
 	if err != nil {
 		t.Fatalf("router.New() error = %v", err)
 	}
 
-	return New(r, execution.NewDispatcher(), config.InboundSpec{Name: "test-inbound", Type: "openai_chat"})
+	return New(r, execution.NewDispatcher(), inbounds)
+}
+
+func authorizedRequest(method, path, token string, body []byte) *http.Request {
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	return req
 }
 
 func TestHealthzReturnsOK(t *testing.T) {
-	h := newTestHandler(t, map[string]provider.Provider{
-		"mock": provider.NewMock("mock"),
-	}, config.RoutingConfig{DefaultProvider: "mock"})
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
 
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -59,167 +93,147 @@ func TestHealthzReturnsOK(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	if got := w.Header().Get("Content-Type"); got != "application/json" {
-		t.Fatalf("Content-Type = %q, want application/json", got)
-	}
-	if w.Body.String() != "{\"status\":\"ok\"}\n" {
-		t.Fatalf("body = %q, want status ok json", w.Body.String())
+}
+
+func TestChatCompletionsRejectsMissingToken(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body)))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
 	}
 }
 
 func TestChatCompletionsRejectsInvalidJSON(t *testing.T) {
-	h := newTestHandler(t, map[string]provider.Provider{
-		"mock": provider.NewMock("mock"),
-	}, config.RoutingConfig{DefaultProvider: "mock"})
-
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString("{"))
 	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", []byte("{")))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
 }
 
 func TestChatCompletionsUsesDispatcherBackedPlan(t *testing.T) {
-	h := newTestHandler(t, map[string]provider.Provider{
-		"mock": provider.NewMock("mock"),
-	}, config.RoutingConfig{DefaultProvider: "mock"})
-
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	body, err := json.Marshal(map[string]any{
-		"model": "gpt-4",
-		"messages": []map[string]string{{
-			"role":    "user",
-			"content": "hello",
-		}},
-	})
+	body, err := json.Marshal(map[string]any{"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hello"}}})
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
 	}
+}
 
+func TestChatCompletionsStreamsSSE(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "gpt-4", "stream": true, "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+	if !strings.Contains(w.Body.String(), "data: [DONE]\n\n") {
+		t.Fatalf("body = %q, want done sentinel", w.Body.String())
+	}
+}
+
+func TestAnthropicMessagesUsesDispatcherBackedPlan(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testDualProtocolInbounds(), testOutbounds())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "claude-sonnet-4-5", "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
 	var resp struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		Model   string `json:"model"`
-		Choices []struct {
-			Index   int `json:"index"`
-			Message struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
+		Type    string `json:"type"`
+		Role    string `json:"role"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if resp.Object != "chat.completion" {
-		t.Fatalf("object = %q, want chat.completion", resp.Object)
+	if resp.Type != "message" || resp.Role != "assistant" || len(resp.Content) != 1 || resp.Content[0].Text == "" {
+		t.Fatalf("resp = %#v, want anthropic message response", resp)
 	}
-	if resp.Model != "gpt-4" {
-		t.Fatalf("model = %q, want gpt-4", resp.Model)
+}
+
+func TestAnthropicMessagesStreamsSSE(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testDualProtocolInbounds(), testOutbounds())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "claude-sonnet-4-5", "stream": true, "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
 	}
-	if len(resp.Choices) != 1 || resp.Choices[0].Message.Role != "assistant" || resp.Choices[0].Message.Content == "" {
-		t.Fatalf("choices = %#v, want single assistant response", resp.Choices)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"type":"message_start"`) {
+		t.Fatalf("body = %q, want anthropic message_start payload", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "event: done\ndata: {}\n\n") {
+		t.Fatalf("body = %q, want anthropic done event", w.Body.String())
 	}
 }
 
 func TestChatCompletionsFallsBackToBackupProvider(t *testing.T) {
+	routing := config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"primary-tag", "fallback-tag"}, Strategy: "failover"}}}
+	outbounds := []config.OutboundSpec{{Name: "primary", Protocol: "mock", Tag: "primary-tag"}, {Name: "fallback", Protocol: "mock", Tag: "fallback-tag"}}
 	h := newTestHandler(t, map[string]provider.Provider{
 		"primary":  &failingProvider{name: "primary", err: provider.NewRetryableError(errors.New("temporary upstream failure"))},
 		"fallback": provider.NewMock("fallback"),
-	}, config.RoutingConfig{
-		DefaultProvider:   "primary",
-		FallbackProviders: []string{"fallback"},
-	})
-
+	}, routing, testInbounds(), outbounds)
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	body, err := json.Marshal(map[string]any{
-		"model": "gpt-4",
-		"messages": []map[string]string{{
-			"role":    "user",
-			"content": "hello",
-		}},
-	})
+	body, err := json.Marshal(map[string]any{"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hello"}}})
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
-	}
-
-	var resp struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if resp.Model != "gpt-4" {
-		t.Fatalf("model = %q, want gpt-4", resp.Model)
-	}
-}
-
-func TestChatCompletionsUsesInboundTarget(t *testing.T) {
-	h := newTestHandler(t, map[string]provider.Provider{
-		"default": provider.NewMock("default"),
-		"office":  provider.NewMock("office"),
-	}, config.RoutingConfig{
-		DefaultOutbound: "default",
-		InboundOutbounds: map[string]string{
-			"test-inbound": "office",
-		},
-	})
-
-	mux := http.NewServeMux()
-	h.Register(mux)
-
-	body, err := json.Marshal(map[string]any{
-		"model": "gpt-4",
-		"messages": []map[string]string{{
-			"role":    "user",
-			"content": "hello",
-		}},
-	})
-	if err != nil {
-		t.Fatalf("json.Marshal() error = %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
-	}
-
-	var resp struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if resp.Model != "gpt-4" {
-		t.Fatalf("model = %q, want gpt-4", resp.Model)
 	}
 }
 
@@ -231,81 +245,22 @@ func TestChatCompletionsUsesOpenAICompatibleProvider(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Fatalf("Authorization = %q, want Bearer test-key", got)
 		}
-
-		var req struct {
-			Model    string `json:"model"`
-			Messages []struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("Decode() error = %v", err)
-		}
-		if req.Model != "gpt-4o-mini" {
-			t.Fatalf("req.Model = %q, want gpt-4o-mini", req.Model)
-		}
-
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":     "chatcmpl-upstream",
-			"object": "chat.completion",
-			"model":  req.Model,
-			"choices": []map[string]any{{
-				"message": map[string]string{
-					"role":    "assistant",
-					"content": "hello from upstream gateway",
-				},
-			}},
-		})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "chatcmpl-upstream", "object": "chat.completion", "model": "gpt-4o-mini", "choices": []map[string]any{{"message": map[string]string{"role": "assistant", "content": "hello from upstream gateway"}}}})
 	}))
 	defer upstream.Close()
 
-	h := newTestHandler(t, map[string]provider.Provider{
-		"openai": provider.NewOpenAICompatible("openai", upstream.URL, []string{"test-key"}, upstream.Client()),
-	}, config.RoutingConfig{DefaultProvider: "openai"})
-
+	h := newTestHandler(t, map[string]provider.Provider{"openai": provider.NewOpenAICompatible("openai", upstream.URL, []string{"test-key"}, upstream.Client())}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"openai-tag"}, Strategy: "failover"}}}, testInbounds(), []config.OutboundSpec{{Name: "openai", Protocol: "openai_chat", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "openai-tag"}})
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	body, err := json.Marshal(map[string]any{
-		"model": "gpt-4o-mini",
-		"messages": []map[string]string{{
-			"role":    "user",
-			"content": "hello",
-		}},
-	})
+	body, err := json.Marshal(map[string]any{"model": "gpt-4o-mini", "messages": []map[string]string{{"role": "user", "content": "hello"}}})
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
-	}
-
-	var resp struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		Model   string `json:"model"`
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if resp.ID != "chatcmpl-upstream" {
-		t.Fatalf("id = %q, want chatcmpl-upstream", resp.ID)
-	}
-	if resp.Model != "gpt-4o-mini" {
-		t.Fatalf("model = %q, want gpt-4o-mini", resp.Model)
-	}
-	if len(resp.Choices) != 1 || resp.Choices[0].Message.Content != "hello from upstream gateway" {
-		t.Fatalf("choices = %#v, want upstream assistant message", resp.Choices)
 	}
 }

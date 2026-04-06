@@ -12,8 +12,7 @@ type Config struct {
 	Listeners []ListenerSpec `yaml:"listeners"`
 	Inbounds  []InboundSpec  `yaml:"inbounds"`
 	Routing   RoutingConfig  `yaml:"routing"`
-	Outbound  []ProviderSpec `yaml:"outbounds"`
-	Provider  []ProviderSpec `yaml:"providers"`
+	Outbounds []OutboundSpec `yaml:"outbounds"`
 }
 
 type ServerConfig struct {
@@ -21,35 +20,41 @@ type ServerConfig struct {
 }
 
 type ListenerSpec struct {
-	Name    string `yaml:"name"`
-	Listen  string `yaml:"listen"`
-	Inbound string `yaml:"inbound"`
+	Name     string   `yaml:"name"`
+	Listen   string   `yaml:"listen"`
+	Inbounds []string `yaml:"inbounds"`
+}
+
+type ClientSpec struct {
+	Token string `yaml:"token"`
+	Tag   string `yaml:"tag"`
 }
 
 type InboundSpec struct {
-	Name   string            `yaml:"name"`
-	Type   string            `yaml:"type"`
-	Labels map[string]string `yaml:"labels"`
+	Name     string       `yaml:"name"`
+	Protocol string       `yaml:"protocol"`
+	Path     string       `yaml:"path"`
+	Clients  []ClientSpec `yaml:"clients"`
+}
+
+type RoutingRule struct {
+	Name        string   `yaml:"name"`
+	FromTags    []string `yaml:"from_tags"`
+	ToTags      []string `yaml:"to_tags"`
+	Strategy    string   `yaml:"strategy"`
+	TargetModel string   `yaml:"target_model"`
 }
 
 type RoutingConfig struct {
-	DefaultProvider   string            `yaml:"default_provider"`
-	DefaultOutbound   string            `yaml:"default_outbound"`
-	ModelProviders    map[string]string `yaml:"model_providers"`
-	ModelOutbounds    map[string]string `yaml:"model_outbounds"`
-	InboundProviders  map[string]string `yaml:"inbound_providers"`
-	InboundOutbounds  map[string]string `yaml:"inbound_outbounds"`
-	FallbackProviders []string          `yaml:"fallback_providers"`
-	FallbackOutbounds []string          `yaml:"fallback_outbounds"`
+	Rules []RoutingRule `yaml:"rules"`
 }
 
-type ProviderSpec struct {
-	Name    string   `yaml:"name"`
-	Type    string   `yaml:"type"`
-	BaseURL string   `yaml:"base_url"`
-	APIKey  string   `yaml:"api_key"`
-	APIKeys []string `yaml:"api_keys"`
-	Models  []string `yaml:"models"`
+type OutboundSpec struct {
+	Name      string `yaml:"name"`
+	Protocol  string `yaml:"protocol"`
+	Endpoint  string `yaml:"endpoint"`
+	AuthToken string `yaml:"auth_token"`
+	Tag       string `yaml:"tag"`
 }
 
 func Load(path string) (Config, error) {
@@ -74,87 +79,113 @@ func (c Config) Validate() error {
 	if len(c.ListenAddresses()) == 0 {
 		return fmt.Errorf("server.listen or listeners is required")
 	}
-	if c.Routing.DefaultTarget() == "" {
-		return fmt.Errorf("routing.default_provider or routing.default_outbound is required")
-	}
-
-	outbounds := c.OutboundSpecs()
-	if len(outbounds) == 0 {
+	if len(c.Outbounds) == 0 {
 		return fmt.Errorf("at least one outbound is required")
+	}
+	if len(c.Routing.Rules) == 0 {
+		return fmt.Errorf("at least one routing rule is required")
 	}
 
 	inboundNames := make(map[string]struct{}, len(c.Inbounds))
+	tokens := make(map[string]string)
 	for _, inbound := range c.Inbounds {
 		if inbound.Name == "" {
 			return fmt.Errorf("inbounds.name is required")
 		}
-		if inbound.Type == "" {
-			return fmt.Errorf("inbounds.%s.type is required", inbound.Name)
+		if inbound.Protocol == "" {
+			return fmt.Errorf("inbounds.%s.protocol is required", inbound.Name)
+		}
+		if inbound.Path == "" {
+			return fmt.Errorf("inbounds.%s.path is required", inbound.Name)
+		}
+		if len(inbound.Clients) == 0 {
+			return fmt.Errorf("inbounds.%s.clients is required", inbound.Name)
+		}
+		for i, client := range inbound.Clients {
+			if client.Token == "" {
+				return fmt.Errorf("inbounds.%s.clients[%d].token is required", inbound.Name, i)
+			}
+			if client.Tag == "" {
+				return fmt.Errorf("inbounds.%s.clients[%d].tag is required", inbound.Name, i)
+			}
+			if owner, ok := tokens[client.Token]; ok {
+				return fmt.Errorf("inbounds.%s.clients[%d].token duplicates token used by %s", inbound.Name, i, owner)
+			}
+			tokens[client.Token] = inbound.Name
 		}
 		inboundNames[inbound.Name] = struct{}{}
 	}
 
-	if len(c.Listeners) > 0 {
-		if len(c.Inbounds) == 0 {
-			return fmt.Errorf("at least one inbound is required when listeners are configured")
+	if len(c.Listeners) > 0 && len(c.Inbounds) == 0 {
+		return fmt.Errorf("at least one inbound is required when listeners are configured")
+	}
+	for _, listener := range c.Listeners {
+		if listener.Name == "" {
+			return fmt.Errorf("listeners.name is required")
 		}
-		for _, listener := range c.Listeners {
-			if listener.Name == "" {
-				return fmt.Errorf("listeners.name is required")
-			}
-			if listener.Listen == "" {
-				return fmt.Errorf("listeners.%s.listen is required", listener.Name)
-			}
-			if listener.Inbound == "" {
-				return fmt.Errorf("listeners.%s.inbound is required", listener.Name)
-			}
-			if _, ok := inboundNames[listener.Inbound]; !ok {
-				return fmt.Errorf("listeners.%s.inbound %q not found in inbounds", listener.Name, listener.Inbound)
+		if listener.Listen == "" {
+			return fmt.Errorf("listeners.%s.listen is required", listener.Name)
+		}
+		if len(listener.Inbounds) == 0 {
+			return fmt.Errorf("listeners.%s.inbounds is required", listener.Name)
+		}
+		for _, inboundName := range listener.Inbounds {
+			if _, ok := inboundNames[inboundName]; !ok {
+				return fmt.Errorf("listeners.%s.inbound %q not found in inbounds", listener.Name, inboundName)
 			}
 		}
 	}
 
-	outboundNames := make(map[string]struct{}, len(outbounds))
-	for _, spec := range outbounds {
-		outboundNames[spec.Name] = struct{}{}
-		switch spec.Type {
+	outboundNames := make(map[string]struct{}, len(c.Outbounds))
+	outboundTags := make(map[string]struct{}, len(c.Outbounds))
+	for _, outbound := range c.Outbounds {
+		if outbound.Name == "" {
+			return fmt.Errorf("outbounds.name is required")
+		}
+		if outbound.Protocol == "" {
+			return fmt.Errorf("outbounds.%s.protocol is required", outbound.Name)
+		}
+		if outbound.Tag == "" {
+			return fmt.Errorf("outbounds.%s.tag is required", outbound.Name)
+		}
+		switch outbound.Protocol {
 		case "mock":
-		case "openai_compatible":
-			if spec.BaseURL == "" {
-				return fmt.Errorf("outbounds.%s.base_url is required", spec.Name)
+		case "openai_chat":
+			if outbound.Endpoint == "" {
+				return fmt.Errorf("outbounds.%s.endpoint is required", outbound.Name)
 			}
-			if spec.APIKey == "" && len(spec.APIKeys) == 0 {
-				return fmt.Errorf("outbounds.%s.api_key or api_keys is required", spec.Name)
+			if outbound.AuthToken == "" {
+				return fmt.Errorf("outbounds.%s.auth_token is required", outbound.Name)
 			}
 		default:
-			return fmt.Errorf("outbounds.%s.type %q is unsupported", spec.Name, spec.Type)
+			return fmt.Errorf("outbounds.%s.protocol %q is unsupported", outbound.Name, outbound.Protocol)
 		}
+		outboundNames[outbound.Name] = struct{}{}
+		outboundTags[outbound.Tag] = struct{}{}
 	}
-	if _, ok := outboundNames[c.Routing.DefaultTarget()]; !ok {
-		return fmt.Errorf("routing default target %q not found in outbounds", c.Routing.DefaultTarget())
-	}
-	for _, name := range c.Routing.FallbackTargets() {
-		if _, ok := outboundNames[name]; !ok {
-			return fmt.Errorf("routing fallback target %q not found in outbounds", name)
+
+	for i, rule := range c.Routing.Rules {
+		if len(rule.FromTags) == 0 {
+			return fmt.Errorf("routing.rules[%d].from_tags is required", i)
 		}
-	}
-	for inbound, target := range c.Routing.InboundTargets() {
-		if _, ok := inboundNames[inbound]; !ok {
-			return fmt.Errorf("routing inbound target %q not found in inbounds", inbound)
+		if len(rule.ToTags) == 0 {
+			return fmt.Errorf("routing.rules[%d].to_tags is required", i)
 		}
-		if _, ok := outboundNames[target]; !ok {
-			return fmt.Errorf("routing inbound %q target %q not found in outbounds", inbound, target)
+		if rule.Strategy == "" {
+			return fmt.Errorf("routing.rules[%d].strategy is required", i)
+		}
+		if rule.Strategy != "failover" && rule.Strategy != "round_robin" {
+			return fmt.Errorf("routing.rules[%d].strategy %q is unsupported", i, rule.Strategy)
+		}
+		for _, tag := range rule.ToTags {
+			if _, ok := outboundTags[tag]; !ok {
+				return fmt.Errorf("routing.rules[%d].to_tags %q not found in outbounds", i, tag)
+			}
 		}
 	}
 
+	_ = outboundNames
 	return nil
-}
-
-func (c Config) OutboundSpecs() []ProviderSpec {
-	if len(c.Outbound) > 0 {
-		return c.Outbound
-	}
-	return c.Provider
 }
 
 func (c Config) ListenAddress() string {
@@ -179,13 +210,6 @@ func (c Config) ListenAddresses() []string {
 	return []string{c.Server.Listen}
 }
 
-func (c Config) PrimaryInbound() InboundSpec {
-	if len(c.Listeners) == 0 {
-		return InboundSpec{}
-	}
-	return c.InboundByName(c.Listeners[0].Inbound)
-}
-
 func (c Config) InboundByName(name string) InboundSpec {
 	for _, inbound := range c.Inbounds {
 		if inbound.Name == name {
@@ -195,30 +219,13 @@ func (c Config) InboundByName(name string) InboundSpec {
 	return InboundSpec{}
 }
 
-func (r RoutingConfig) DefaultTarget() string {
-	if r.DefaultOutbound != "" {
-		return r.DefaultOutbound
+func (c Config) ListenerInbounds(listener ListenerSpec) []InboundSpec {
+	inbounds := make([]InboundSpec, 0, len(listener.Inbounds))
+	for _, name := range listener.Inbounds {
+		inbound := c.InboundByName(name)
+		if inbound.Name != "" {
+			inbounds = append(inbounds, inbound)
+		}
 	}
-	return r.DefaultProvider
-}
-
-func (r RoutingConfig) ModelTargets() map[string]string {
-	if len(r.ModelOutbounds) > 0 {
-		return r.ModelOutbounds
-	}
-	return r.ModelProviders
-}
-
-func (r RoutingConfig) InboundTargets() map[string]string {
-	if len(r.InboundOutbounds) > 0 {
-		return r.InboundOutbounds
-	}
-	return r.InboundProviders
-}
-
-func (r RoutingConfig) FallbackTargets() []string {
-	if len(r.FallbackOutbounds) > 0 {
-		return r.FallbackOutbounds
-	}
-	return r.FallbackProviders
+	return inbounds
 }
