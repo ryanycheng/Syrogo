@@ -3,13 +3,21 @@ listeners:
     listen: ":8080"
     inbounds:
       - "openai-entry"
+      - "anthropic-entry"
 
 inbounds:
   - name: "openai-entry"
     protocol: "openai_chat"
     path: "/v1/chat/completions"
     clients:
-      - token: "${SYROGO_CLIENT_TOKEN}"
+      - token: "${SYROGO_OPENAI_CLIENT_TOKEN}"
+        tag: "office"
+
+  - name: "anthropic-entry"
+    protocol: "anthropic_messages"
+    path: "/v1/messages"
+    clients:
+      - token: "${SYROGO_ANTHROPIC_CLIENT_TOKEN}"
         tag: "office"
 
 routing:
