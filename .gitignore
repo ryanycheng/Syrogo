@@ -15,5 +15,8 @@ coverage.out
 .env
 .env.*
 configs/config.yaml
+configs/config.manual-test.yaml
+configs/config.local.yaml
+configs/config.local.*.yaml
 
 .claude/worktrees/

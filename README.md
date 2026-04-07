@@ -71,20 +71,21 @@ Syrogo 是一个面向多模型场景的 AI Gateway / Semantic Router。
 
 ```text
 cmd/
-  syrogo/               # 程序入口
+  syrogo/                    # 程序入口
 
 internal/
-  app/                  # 应用装配
-  config/               # 配置定义、加载、校验
-  execution/            # 执行计划消费与 fallback
-  gateway/              # inbound protocol / HTTP handler
-  provider/             # outbound protocol / 上游适配
-  router/               # tag-first 路由决策
-  runtime/              # 中立标准模型
-  server/               # HTTP server 生命周期
+  app/                       # 应用装配
+  config/                    # 配置定义、加载、校验
+  execution/                 # 执行计划消费与 fallback
+  gateway/                   # inbound protocol / HTTP handler
+  provider/                  # outbound protocol / 上游适配
+  router/                    # tag-first 路由决策
+  runtime/                   # 中立标准模型
+  server/                    # HTTP server 生命周期
 
 configs/
-  config.example.yaml   # 配置示例
+  config.example.yaml        # 功能展示版配置
+  config.yaml                # 你本地复制出来的手测配置（已 gitignore）
 ```
 
 ## 核心架构理解
@@ -147,6 +148,76 @@ provider 负责：
 - `openai_chat`
 
 provider-specific transform 也放在这一层，而不是放到 gateway 或 router。
+
+---
+
+## 配置文件说明
+
+当前仓库默认提供一种配置文件：
+
+### `configs/config.example.yaml`
+用途：**功能展示版**。
+
+它用于展示当前已经支持的配置组织方式，包括：
+- 一个 listener 同时挂多个 inbound
+- `openai_chat` 与 `anthropic_messages` 双入口
+- `failover` 与 `round_robin` 两种路由策略
+- 多个 OpenAI-compatible outbound
+- `target_model` 覆盖
+
+这个文件偏“展示当前能力边界”，适合阅读和参考，不建议直接拿来作为你的本地手测配置。
+
+### `configs/config.yaml`
+用途：**你本地复制出来的手测配置**。
+
+建议做法是：
+- 从 `configs/config.example.yaml` 复制一份为 `configs/config.yaml`
+- 把里面的 token、endpoint、auth_token 按你的本地环境改成真实可用的值
+- 这个文件已经在 `.gitignore` 中，不会误提交
+
+如果你只是想确认“服务是不是已经跑起来了”，可以把 `configs/config.yaml` 改成只走 `mock` outbound 的最小配置。
+
+---
+
+## 环境变量与 `.env`
+
+这里要特别注意当前真实行为。
+
+### 当前是否自动支持 `.env`
+**不支持。**
+
+项目根目录放一个 `.env` 文件，当前程序**不会自动读取**。
+
+### 当前是否自动展开 `${VAR}`
+**不会。**
+
+当前配置加载只是：
+- 读取 YAML 文件
+- 直接反序列化到配置结构
+
+没有做：
+- `.env` 自动加载
+- `${VAR}` 环境变量展开
+
+所以像下面这种写法：
+
+```yaml
+auth_token: "${OPENAI_API_KEY_PRIMARY}"
+```
+
+在当前实现里会被当成普通字符串原样读入，而不是替换成环境变量值。
+
+### 这意味着什么
+- `config.example.yaml` 里出现的 `${VAR}` 目前只是**展示性占位写法**
+- 它表达的是“这里通常应该填什么值”
+- 不是说当前程序已经实现了自动替换能力
+
+### 你现在该怎么做
+如果你要真正运行：
+
+- 复制一份本地配置：`cp configs/config.example.yaml configs/config.yaml`
+- 再按你的环境把 `configs/config.yaml` 里的 token、endpoint、auth_token 改成真实值
+- 如果只是做最小本地验证，也可以把 `configs/config.yaml` 改成只走 `mock` outbound 的简化配置
 
 ---
 
@@ -216,7 +287,7 @@ routing:
       from_tags:
         - "office"
       to_tags:
-        - "mock-primary"
+        - "openai-primary"
         - "openai-backup"
       strategy: "failover"
       target_model: "gpt-4o-mini"
@@ -237,15 +308,11 @@ routing:
 
 ```yaml
 outbounds:
-  - name: "mock"
-    protocol: "mock"
-    tag: "mock-primary"
-
-  - name: "openai"
+  - name: "openai-primary"
     protocol: "openai_chat"
     endpoint: "https://api.openai.com/v1"
-    auth_token: "${OPENAI_API_KEY_PRIMARY}"
-    tag: "openai-backup"
+    auth_token: "sk-xxx"
+    tag: "openai-primary"
 ```
 
 含义：
@@ -264,13 +331,19 @@ outbounds:
 go test ./...
 ```
 
-### 2. 启动服务
+### 2. 准备本地配置并启动服务
 
 ```bash
-go run ./cmd/syrogo -config ./configs/config.example.yaml
+cp configs/config.example.yaml configs/config.yaml
 ```
 
-> `-config` 默认也是 `./configs/config.example.yaml`
+把 `configs/config.yaml` 里的占位值替换成你自己的真实值后，再启动：
+
+```bash
+go run ./cmd/syrogo -config ./configs/config.yaml
+```
+
+> `-config` 默认值仍然是 `./configs/config.example.yaml`，本地联调时建议显式指定你自己的 `configs/config.yaml`
 
 ### 3. 健康检查
 
@@ -282,11 +355,17 @@ curl http://127.0.0.1:8080/healthz
 
 ## 请求示例
 
+下面这些请求示例默认假设你已经把 `configs/config.yaml` 里的 token 改成了：
+- OpenAI 入口：`your-openai-client-token`
+- Anthropic 入口：`your-anthropic-client-token`
+
+请按你本地实际配置替换。
+
 ### OpenAI Chat Completions
 
 ```bash
 curl -s http://127.0.0.1:8080/v1/chat/completions \
-  -H 'Authorization: Bearer client-token' \
+  -H 'Authorization: Bearer your-openai-client-token' \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "gpt-4",
@@ -300,7 +379,7 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 
 ```bash
 curl -N http://127.0.0.1:8080/v1/chat/completions \
-  -H 'Authorization: Bearer client-token' \
+  -H 'Authorization: Bearer your-openai-client-token' \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "gpt-4",
@@ -315,7 +394,7 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 
 ```bash
 curl -s http://127.0.0.1:8080/v1/messages \
-  -H 'Authorization: Bearer anthropic-token' \
+  -H 'Authorization: Bearer your-anthropic-client-token' \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "claude-sonnet-4-5",
@@ -329,7 +408,7 @@ curl -s http://127.0.0.1:8080/v1/messages \
 
 ```bash
 curl -N http://127.0.0.1:8080/v1/messages \
-  -H 'Authorization: Bearer anthropic-token' \
+  -H 'Authorization: Bearer your-anthropic-client-token' \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "claude-sonnet-4-5",
@@ -353,6 +432,7 @@ curl -N http://127.0.0.1:8080/v1/messages \
 - `anthropic_messages` 当前已支持作为 inbound protocol
 - 当前还没有实现 anthropic outbound provider
 - 当前流式能力以最小 SSE 闭环为主，不追求完整上游事件透传
+- 当前还没有实现 `.env` 自动加载与 `${VAR}` 自动展开
 
 ---
 
@@ -383,5 +463,6 @@ golangci-lint run
 - 更完整的 key 管理与额度切换
 - 更强的统计、治理与审计能力
 - 多节点串接与中继部署能力
+- 环境变量展开与更顺手的本地配置体验
 
 但这些都会建立在当前骨架和边界继续保持清晰的前提上。
