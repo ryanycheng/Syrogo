@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"syrogo/internal/runtime"
@@ -41,21 +42,54 @@ func TestEncodeOpenAIChatRequestUsesFirstTextPart(t *testing.T) {
 	}
 }
 
+func TestEncodeOpenAIChatRequestPreservesToolCallingFields(t *testing.T) {
+	payload := encodeOpenAIChatRequest(runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role: runtime.MessageRoleAssistant,
+			ToolCalls: []runtime.ToolCall{{
+				ID:        "call_123",
+				Name:      "get_weather",
+				Arguments: `{"city":"shanghai"}`,
+			}},
+		}, {
+			Role:       runtime.MessageRoleTool,
+			ToolCallID: "call_123",
+			Parts: []runtime.ContentPart{{
+				Type: runtime.ContentPartTypeText,
+				Text: "sunny",
+			}},
+		}},
+	})
+
+	body := payload.(map[string]any)
+	messages := body["messages"].([]openAIChatMessage)
+	if len(messages) != 2 {
+		t.Fatalf("len(messages) = %d, want 2", len(messages))
+	}
+	if len(messages[0].ToolCalls) != 1 {
+		t.Fatalf("len(messages[0].ToolCalls) = %d, want 1", len(messages[0].ToolCalls))
+	}
+	if messages[0].ToolCalls[0].ID != "call_123" || messages[0].ToolCalls[0].Function.Name != "get_weather" {
+		t.Fatalf("messages[0].ToolCalls = %#v, want encoded assistant tool call", messages[0].ToolCalls)
+	}
+	if messages[1].ToolCallID != "call_123" {
+		t.Fatalf("messages[1].ToolCallID = %q, want call_123", messages[1].ToolCallID)
+	}
+	if messages[1].Content != "sunny" {
+		t.Fatalf("messages[1].Content = %q, want sunny", messages[1].Content)
+	}
+}
+
 func TestDecodeOpenAIChatResponseMapsAssistantMessage(t *testing.T) {
 	resp, err := decodeOpenAIChatResponse(openAIChatResponseEnvelope{
 		ID:     "chatcmpl-1",
 		Object: "chat.completion",
 		Model:  "gpt-4o-mini",
 		Choices: []struct {
-			Message struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"message"`
+			Message openAIChatMessage `json:"message"`
 		}{
-			{Message: struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			}{Role: "assistant", Content: "hello from upstream"}},
+			{Message: openAIChatMessage{Role: "assistant", Content: "hello from upstream"}},
 		},
 	})
 	if err != nil {
@@ -66,6 +100,57 @@ func TestDecodeOpenAIChatResponseMapsAssistantMessage(t *testing.T) {
 	}
 	if got := resp.Message.Parts[0].Text; got != "hello from upstream" {
 		t.Fatalf("resp.Message.Parts[0].Text = %q, want hello from upstream", got)
+	}
+}
+
+func TestDecodeOpenAIChatResponseMapsAssistantToolCalls(t *testing.T) {
+	resp, err := decodeOpenAIChatResponse(openAIChatResponseEnvelope{
+		ID:     "chatcmpl-1",
+		Object: "chat.completion",
+		Model:  "gpt-4o-mini",
+		Choices: []struct {
+			Message openAIChatMessage `json:"message"`
+		}{
+			{Message: openAIChatMessage{
+				Role: "assistant",
+				ToolCalls: []openAIToolCall{{
+					ID:   "call_123",
+					Type: "function",
+					Function: openAIToolCallFunction{
+						Name:      "get_weather",
+						Arguments: `{"city":"shanghai"}`,
+					},
+				}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("decodeOpenAIChatResponse() error = %v", err)
+	}
+	if len(resp.Message.ToolCalls) != 1 {
+		t.Fatalf("len(resp.Message.ToolCalls) = %d, want 1", len(resp.Message.ToolCalls))
+	}
+	if resp.Message.ToolCalls[0].ID != "call_123" || resp.Message.ToolCalls[0].Name != "get_weather" {
+		t.Fatalf("resp.Message.ToolCalls = %#v, want decoded tool call", resp.Message.ToolCalls)
+	}
+}
+
+func TestDecodeOpenAIChatResponseRejectsEmptyAssistantMessage(t *testing.T) {
+	_, err := decodeOpenAIChatResponse(openAIChatResponseEnvelope{
+		ID:     "chatcmpl-1",
+		Object: "chat.completion",
+		Model:  "gpt-4o-mini",
+		Choices: []struct {
+			Message openAIChatMessage `json:"message"`
+		}{
+			{Message: openAIChatMessage{Role: "assistant"}},
+		},
+	})
+	if err == nil {
+		t.Fatal("decodeOpenAIChatResponse() error = nil, want error")
+	}
+	if got := err.Error(); got != "upstream returned no content and no tool calls" {
+		t.Fatalf("decodeOpenAIChatResponse() error = %q, want upstream returned no content and no tool calls", got)
 	}
 }
 
@@ -122,6 +207,63 @@ func TestOpenAICompatibleChatCompletionSuccess(t *testing.T) {
 	}
 	if resp.FinishReason != runtime.FinishReasonStop {
 		t.Fatalf("resp.FinishReason = %q, want stop", resp.FinishReason)
+	}
+}
+
+func TestOpenAICompatibleChatCompletionSendsToolCallingFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct {
+				Role       string           `json:"role"`
+				Content    string           `json:"content"`
+				ToolCalls  []openAIToolCall `json:"tool_calls"`
+				ToolCallID string           `json:"tool_call_id"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		if len(req.Messages) != 2 {
+			t.Fatalf("len(req.Messages) = %d, want 2", len(req.Messages))
+		}
+		if len(req.Messages[0].ToolCalls) != 1 || req.Messages[0].ToolCalls[0].ID != "call_123" {
+			t.Fatalf("req.Messages[0].ToolCalls = %#v, want encoded tool call", req.Messages[0].ToolCalls)
+		}
+		if req.Messages[1].ToolCallID != "call_123" {
+			t.Fatalf("req.Messages[1].ToolCallID = %q, want call_123", req.Messages[1].ToolCallID)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-1",
+			"object": "chat.completion",
+			"model":  "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"message": map[string]string{
+					"role":    "assistant",
+					"content": "done",
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewOpenAICompatible("openai", server.URL, []string{"test-key"}, server.Client())
+	_, err := p.ChatCompletion(context.Background(), runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role: runtime.MessageRoleAssistant,
+			ToolCalls: []runtime.ToolCall{{
+				ID:        "call_123",
+				Name:      "get_weather",
+				Arguments: `{"city":"shanghai"}`,
+			}},
+		}, {
+			Role:       runtime.MessageRoleTool,
+			ToolCallID: "call_123",
+			Parts:      []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "sunny"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
 	}
 }
 
@@ -201,6 +343,7 @@ func TestOpenAICompatibleChatCompletionRetryableOnServerError(t *testing.T) {
 func TestOpenAICompatibleChatCompletionFatalOnBadRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"tool_choice is required"}`))
 	}))
 	defer server.Close()
 
@@ -211,6 +354,9 @@ func TestOpenAICompatibleChatCompletionFatalOnBadRequest(t *testing.T) {
 	}
 	if NormalizeError(err) != ErrorKindFatal {
 		t.Fatalf("NormalizeError() = %q, want fatal", NormalizeError(err))
+	}
+	if !strings.Contains(err.Error(), `tool_choice is required`) {
+		t.Fatalf("err = %q, want upstream response body", err)
 	}
 }
 
@@ -250,7 +396,51 @@ func TestOpenAICompatibleChatCompletionResumesRoundRobinAfterSuccessfulCall(t *t
 	}
 }
 
-func TestMockProviderStreamCompletionEmitsLifecycleEvents(t *testing.T) {
+func TestOpenAICompatibleStreamCompletionEmitsToolCallDelta(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-1",
+			"object": "chat.completion",
+			"model":  "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{{
+						"id":   "call_123",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "get_weather",
+							"arguments": `{"city":"shanghai"}`,
+						},
+					}},
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewOpenAICompatible("openai", server.URL, []string{"test-key"}, server.Client())
+	ch, err := p.StreamCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini"})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+
+	var toolEvent *runtime.StreamEvent
+	for event := range ch {
+		if event.ToolCall != nil {
+			e := event
+			toolEvent = &e
+		}
+	}
+	if toolEvent == nil {
+		t.Fatal("toolEvent = nil, want tool call delta")
+	}
+	if toolEvent.ToolCall.ID != "call_123" || toolEvent.ToolCall.Name != "get_weather" {
+		t.Fatalf("toolEvent.ToolCall = %#v, want decoded tool call", toolEvent.ToolCall)
+	}
+}
+
+func TestMockProviderStreamCompletionEmitsToolCallDelta(t *testing.T) {
 	p := NewMock("mock")
 	ch, err := p.StreamCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini"})
 	if err != nil {

@@ -184,8 +184,8 @@ func TestNewStreamsSSEFromListener(t *testing.T) {
 	if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
 		t.Fatalf("Content-Type = %q, want text/event-stream", got)
 	}
-	if !strings.Contains(w.Body.String(), "event: message_start\n") || !strings.Contains(w.Body.String(), "data: [DONE]\n\n") {
-		t.Fatalf("body = %q, want SSE lifecycle + DONE", w.Body.String())
+	if !strings.Contains(w.Body.String(), "data: {\"") || strings.Contains(w.Body.String(), "event: message_start\n") || !strings.Contains(w.Body.String(), "data: [DONE]\n\n") {
+		t.Fatalf("body = %q, want OpenAI SSE data frames + DONE", w.Body.String())
 	}
 }
 

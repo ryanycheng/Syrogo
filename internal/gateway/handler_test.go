@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -71,7 +72,7 @@ func newTestHandler(t *testing.T, providers map[string]provider.Provider, routin
 		t.Fatalf("router.New() error = %v", err)
 	}
 
-	return New(r, execution.NewDispatcher(), inbounds)
+	return New(r, execution.NewDispatcher(), inbounds, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 }
 
 func authorizedRequest(method, path, token string, body []byte) *http.Request {
@@ -121,6 +122,30 @@ func TestChatCompletionsRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsLogsDecodeFailure(t *testing.T) {
+	providers := map[string]provider.Provider{"mock": provider.NewMock("mock")}
+	r, err := router.New(testRoutingConfig(), providers, testOutbounds())
+	if err != nil {
+		t.Fatalf("router.New() error = %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	h := New(r, execution.NewDispatcher(), testInbounds(), logger)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", []byte("{")))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	got := logBuf.String()
+	if !strings.Contains(got, "request decode failed") || !strings.Contains(got, "path=/v1/chat/completions") {
+		t.Fatalf("logs = %q, want decode failure log with path", got)
+	}
+}
+
 func TestChatCompletionsUsesDispatcherBackedPlan(t *testing.T) {
 	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
 	mux := http.NewServeMux()
@@ -133,6 +158,136 @@ func TestChatCompletionsUsesDispatcherBackedPlan(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestChatCompletionsAcceptsStructuredContent(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-4",
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "hello",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestBuildRuntimeRequestPreservesOpenAIToolCallingFields(t *testing.T) {
+	req := inboundRequest{
+		Model: "gpt-4o-mini",
+		Messages: []inboundMessage{{
+			Role: "assistant",
+			ToolCalls: []inboundToolCall{{
+				ID:   "call_123",
+				Type: "function",
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{Name: "get_weather", Arguments: `{"city":"shanghai"}`},
+			}},
+		}, {
+			Role:       "tool",
+			ToolCallID: "call_123",
+			Content:    json.RawMessage(`"sunny"`),
+		}},
+	}
+
+	got, err := buildRuntimeRequest(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequest() error = %v", err)
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("len(Messages) = %d, want 2", len(got.Messages))
+	}
+	if len(got.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("len(Messages[0].ToolCalls) = %d, want 1", len(got.Messages[0].ToolCalls))
+	}
+	if got.Messages[0].ToolCalls[0].ID != "call_123" || got.Messages[0].ToolCalls[0].Name != "get_weather" {
+		t.Fatalf("Messages[0].ToolCalls = %#v, want preserved tool call", got.Messages[0].ToolCalls)
+	}
+	if got.Messages[1].ToolCallID != "call_123" {
+		t.Fatalf("Messages[1].ToolCallID = %q, want call_123", got.Messages[1].ToolCallID)
+	}
+	if got.Messages[1].Parts[0].Text != "sunny" {
+		t.Fatalf("Messages[1].Parts = %#v, want sunny result", got.Messages[1].Parts)
+	}
+}
+
+func TestBuildRuntimeRequestPreservesAnthropicToolBlocks(t *testing.T) {
+	req := inboundRequest{
+		Model: "claude-sonnet-4-5",
+		Messages: []inboundMessage{{
+			Role: "assistant",
+			Content: json.RawMessage(`[
+				{"type":"tool_use","id":"toolu_123","name":"get_weather","input":{"city":"shanghai"}}
+			]`),
+		}, {
+			Role: "tool",
+			Content: json.RawMessage(`[
+				{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"text","text":"sunny"}]}
+			]`),
+		}},
+	}
+
+	got, err := buildRuntimeRequest(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequest() error = %v", err)
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("len(Messages) = %d, want 2", len(got.Messages))
+	}
+	if len(got.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("len(Messages[0].ToolCalls) = %d, want 1", len(got.Messages[0].ToolCalls))
+	}
+	if got.Messages[0].ToolCalls[0].ID != "toolu_123" || got.Messages[0].ToolCalls[0].Arguments != `{"city":"shanghai"}` {
+		t.Fatalf("Messages[0].ToolCalls = %#v, want anthropic tool_use mapping", got.Messages[0].ToolCalls)
+	}
+	if got.Messages[1].ToolCallID != "toolu_123" {
+		t.Fatalf("Messages[1].ToolCallID = %q, want toolu_123", got.Messages[1].ToolCallID)
+	}
+	if got.Messages[1].Parts[0].Text != "sunny" {
+		t.Fatalf("Messages[1].Parts = %#v, want sunny", got.Messages[1].Parts)
+	}
+}
+
+func TestAnthropicMessagesAcceptsStructuredContent(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testDualProtocolInbounds(), testOutbounds())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-5",
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "hello",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
 	}
@@ -215,6 +370,53 @@ func TestAnthropicMessagesStreamsSSE(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsStreamsToolCallDelta(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-tool",
+			"object": "chat.completion",
+			"model":  "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{{
+						"id":   "call_123",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "get_weather",
+							"arguments": `{"city":"shanghai"}`,
+						},
+					}},
+				},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"openai": provider.NewOpenAICompatible("openai", upstream.URL, []string{"test-key"}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"openai-tag"}, Strategy: "failover"}}}, testInbounds(), []config.OutboundSpec{{Name: "openai", Protocol: "openai_chat", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "openai-tag"}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "gpt-4o-mini", "stream": true, "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "data: {\"") {
+		t.Fatalf("body = %q, want OpenAI SSE data frames", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "event: message_start") {
+		t.Fatalf("body = %q, should not include custom event names for OpenAI SSE", w.Body.String())
+	}
+}
+
 func TestChatCompletionsFallsBackToBackupProvider(t *testing.T) {
 	routing := config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"primary-tag", "fallback-tag"}, Strategy: "failover"}}}
 	outbounds := []config.OutboundSpec{{Name: "primary", Protocol: "mock", Tag: "primary-tag"}, {Name: "fallback", Protocol: "mock", Tag: "fallback-tag"}}
@@ -234,6 +436,74 @@ func TestChatCompletionsFallsBackToBackupProvider(t *testing.T) {
 	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestChatCompletionsReturnsBadGatewayForEmptyUpstreamResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-empty",
+			"object": "chat.completion",
+			"model":  "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant"},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"openai": provider.NewOpenAICompatible("openai", upstream.URL, []string{"test-key"}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"openai-tag"}, Strategy: "failover"}}}, testInbounds(), []config.OutboundSpec{{Name: "openai", Protocol: "openai_chat", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "openai-tag"}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "gpt-4o-mini", "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "upstream returned no content and no tool calls") {
+		t.Fatalf("body = %q, want explicit upstream empty response error", w.Body.String())
+	}
+}
+
+func TestChatCompletionsStreamingReturnsBadGatewayForEmptyUpstreamResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-empty",
+			"object": "chat.completion",
+			"model":  "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant"},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"openai": provider.NewOpenAICompatible("openai", upstream.URL, []string{"test-key"}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"openai-tag"}, Strategy: "failover"}}}, testInbounds(), []config.OutboundSpec{{Name: "openai", Protocol: "openai_chat", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "openai-tag"}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "gpt-4o-mini", "stream": true, "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "upstream returned no content and no tool calls") {
+		t.Fatalf("body = %q, want explicit upstream empty response error", w.Body.String())
 	}
 }
 

@@ -49,9 +49,17 @@ type ContentPart struct {
 	Text string
 }
 
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments string
+}
+
 type Message struct {
-	Role  MessageRole
-	Parts []ContentPart
+	Role       MessageRole
+	Parts      []ContentPart
+	ToolCalls  []ToolCall
+	ToolCallID string
 }
 
 type Request struct {
@@ -76,14 +84,16 @@ type Response struct {
 }
 
 type StreamEvent struct {
-	Type         StreamEventType
-	ResponseID   string
-	Model        string
-	MessageRole  MessageRole
-	Delta        *ContentPart
-	FinishReason FinishReason
-	Usage        *Usage
-	Err          error
+	Type          StreamEventType
+	ResponseID    string
+	Model         string
+	MessageRole   MessageRole
+	Delta         *ContentPart
+	ToolCall      *ToolCall
+	ToolCallIndex int
+	FinishReason  FinishReason
+	Usage         *Usage
+	Err           error
 }
 
 type CompletionProvider interface {

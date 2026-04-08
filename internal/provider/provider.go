@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -29,8 +30,21 @@ type OpenAICompatibleProvider struct {
 }
 
 type openAIChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string           `json:"role"`
+	Content    string           `json:"content,omitempty"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+}
+
+type openAIToolCall struct {
+	ID       string                 `json:"id,omitempty"`
+	Type     string                 `json:"type"`
+	Function openAIToolCallFunction `json:"function"`
+}
+
+type openAIToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type openAIChatResponseEnvelope struct {
@@ -38,10 +52,7 @@ type openAIChatResponseEnvelope struct {
 	Object  string `json:"object"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Message struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"message"`
+		Message openAIChatMessage `json:"message"`
 	} `json:"choices"`
 }
 
@@ -90,13 +101,25 @@ func (p *MockProvider) StreamCompletion(ctx context.Context, req runtime.Request
 	if err != nil {
 		return nil, err
 	}
-	ch := make(chan runtime.StreamEvent, 3)
+	toolCallCount := len(resp.Message.ToolCalls)
+	eventCount := 2 + len(resp.Message.Parts) + toolCallCount
+	if resp.Usage != nil {
+		eventCount++
+	}
+	ch := make(chan runtime.StreamEvent, eventCount)
 	go func() {
 		defer close(ch)
 		ch <- runtime.StreamEvent{Type: runtime.StreamEventMessageStart, ResponseID: resp.ID, Model: resp.Model, MessageRole: resp.Message.Role}
 		for _, part := range resp.Message.Parts {
 			partCopy := part
 			ch <- runtime.StreamEvent{Type: runtime.StreamEventContentDelta, ResponseID: resp.ID, Model: resp.Model, Delta: &partCopy}
+		}
+		for i, call := range resp.Message.ToolCalls {
+			callCopy := call
+			ch <- runtime.StreamEvent{Type: runtime.StreamEventContentDelta, ResponseID: resp.ID, Model: resp.Model, ToolCall: &callCopy, ToolCallIndex: i}
+		}
+		if resp.Usage != nil {
+			ch <- runtime.StreamEvent{Type: runtime.StreamEventUsage, ResponseID: resp.ID, Model: resp.Model, Usage: resp.Usage}
 		}
 		ch <- runtime.StreamEvent{Type: runtime.StreamEventMessageEnd, ResponseID: resp.ID, Model: resp.Model, FinishReason: resp.FinishReason}
 	}()
@@ -146,13 +169,22 @@ func (p *OpenAICompatibleProvider) StreamCompletion(ctx context.Context, req run
 	if err != nil {
 		return nil, err
 	}
-	ch := make(chan runtime.StreamEvent, 4)
+	toolCallCount := len(resp.Message.ToolCalls)
+	eventCount := 2 + len(resp.Message.Parts) + toolCallCount
+	if resp.Usage != nil {
+		eventCount++
+	}
+	ch := make(chan runtime.StreamEvent, eventCount)
 	go func() {
 		defer close(ch)
 		ch <- runtime.StreamEvent{Type: runtime.StreamEventMessageStart, ResponseID: resp.ID, Model: resp.Model, MessageRole: resp.Message.Role}
 		for _, part := range resp.Message.Parts {
 			partCopy := part
 			ch <- runtime.StreamEvent{Type: runtime.StreamEventContentDelta, ResponseID: resp.ID, Model: resp.Model, Delta: &partCopy}
+		}
+		for i, call := range resp.Message.ToolCalls {
+			callCopy := call
+			ch <- runtime.StreamEvent{Type: runtime.StreamEventContentDelta, ResponseID: resp.ID, Model: resp.Model, ToolCall: &callCopy, ToolCallIndex: i}
 		}
 		if resp.Usage != nil {
 			ch <- runtime.StreamEvent{Type: runtime.StreamEventUsage, ResponseID: resp.ID, Model: resp.Model, Usage: resp.Usage}
@@ -176,30 +208,62 @@ func (p *OpenAICompatibleProvider) chatCompletionWithAPIKey(ctx context.Context,
 	}
 	defer httpResp.Body.Close()
 
+	responseBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return runtime.Response{}, NewRetryableError(fmt.Errorf("read response body: %w", err))
+	}
+
 	if httpResp.StatusCode == http.StatusTooManyRequests {
-		return runtime.Response{}, NewQuotaExceededError(fmt.Errorf("upstream quota exceeded"))
+		return runtime.Response{}, NewQuotaExceededError(fmt.Errorf("upstream quota exceeded: %s", previewResponseBody(responseBody)))
 	}
 	if httpResp.StatusCode >= http.StatusInternalServerError {
-		return runtime.Response{}, NewRetryableError(fmt.Errorf("upstream server error: %s", httpResp.Status))
+		return runtime.Response{}, NewRetryableError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
 	}
 	if httpResp.StatusCode >= http.StatusBadRequest {
-		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream request failed: %s", httpResp.Status))
+		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream request failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
 	}
 
 	var resp openAIChatResponseEnvelope
-	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(responseBody, &resp); err != nil {
 		return runtime.Response{}, NewRetryableError(fmt.Errorf("decode response: %w", err))
 	}
 	return decodeOpenAIChatResponse(resp)
 }
 
+func previewResponseBody(body []byte) string {
+	const max = 1024
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return `""`
+	}
+	if len(trimmed) <= max {
+		return trimmed
+	}
+	return trimmed[:max] + "..."
+}
+
 func encodeOpenAIChatRequest(req runtime.Request) any {
 	messages := make([]openAIChatMessage, 0, len(req.Messages))
 	for _, msg := range req.Messages {
-		messages = append(messages, openAIChatMessage{
-			Role:    string(msg.Role),
-			Content: firstTextPart(msg),
-		})
+		encoded := openAIChatMessage{
+			Role:       string(msg.Role),
+			Content:    firstTextPart(msg),
+			ToolCallID: msg.ToolCallID,
+		}
+		if len(msg.ToolCalls) > 0 {
+			encoded.ToolCalls = make([]openAIToolCall, 0, len(msg.ToolCalls))
+			for _, call := range msg.ToolCalls {
+				encoded.ToolCalls = append(encoded.ToolCalls, openAIToolCall{
+					ID:   call.ID,
+					Type: "function",
+					Function: openAIToolCallFunction{
+						Name:      call.Name,
+						Arguments: call.Arguments,
+					},
+				})
+			}
+		}
+		messages = append(messages, encoded)
 	}
 	return map[string]any{
 		"model":    req.Model,
@@ -212,18 +276,33 @@ func decodeOpenAIChatResponse(resp openAIChatResponseEnvelope) (runtime.Response
 		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream response missing choices"))
 	}
 
+	message := runtime.Message{Role: runtime.MessageRole(resp.Choices[0].Message.Role)}
+	if resp.Choices[0].Message.Content != "" {
+		message.Parts = []runtime.ContentPart{{
+			Type: runtime.ContentPartTypeText,
+			Text: resp.Choices[0].Message.Content,
+		}}
+	}
+	if len(resp.Choices[0].Message.ToolCalls) > 0 {
+		message.ToolCalls = make([]runtime.ToolCall, 0, len(resp.Choices[0].Message.ToolCalls))
+		for _, call := range resp.Choices[0].Message.ToolCalls {
+			message.ToolCalls = append(message.ToolCalls, runtime.ToolCall{
+				ID:        call.ID,
+				Name:      call.Function.Name,
+				Arguments: call.Function.Arguments,
+			})
+		}
+	}
+	if len(message.Parts) == 0 && len(message.ToolCalls) == 0 {
+		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream returned no content and no tool calls"))
+	}
+
 	return runtime.Response{
 		ID:           resp.ID,
 		Object:       resp.Object,
 		Model:        resp.Model,
 		FinishReason: runtime.FinishReasonStop,
-		Message: runtime.Message{
-			Role: runtime.MessageRole(resp.Choices[0].Message.Role),
-			Parts: []runtime.ContentPart{{
-				Type: runtime.ContentPartTypeText,
-				Text: resp.Choices[0].Message.Content,
-			}},
-		},
+		Message:      message,
 	}, nil
 }
 
