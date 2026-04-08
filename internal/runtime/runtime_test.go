@@ -87,6 +87,51 @@ func TestRequestCarriesStandardMessageParts(t *testing.T) {
 	}
 }
 
+func TestMessageCarriesToolCallingFields(t *testing.T) {
+	msg := Message{
+		Role: MessageRoleAssistant,
+		ToolCalls: []ToolCall{{
+			ID:        "call_123",
+			Name:      "get_weather",
+			Arguments: `{"city":"shanghai"}`,
+		}},
+	}
+
+	if len(msg.ToolCalls) != 1 {
+		t.Fatalf("len(ToolCalls) = %d, want 1", len(msg.ToolCalls))
+	}
+	if msg.ToolCalls[0].ID != "call_123" {
+		t.Fatalf("ToolCalls[0].ID = %q, want call_123", msg.ToolCalls[0].ID)
+	}
+	if msg.ToolCalls[0].Name != "get_weather" {
+		t.Fatalf("ToolCalls[0].Name = %q, want get_weather", msg.ToolCalls[0].Name)
+	}
+	if msg.ToolCalls[0].Arguments != `{"city":"shanghai"}` {
+		t.Fatalf("ToolCalls[0].Arguments = %q, want weather args", msg.ToolCalls[0].Arguments)
+	}
+}
+
+func TestToolMessageCarriesToolCallID(t *testing.T) {
+	msg := Message{
+		Role:       MessageRoleTool,
+		ToolCallID: "call_123",
+		Parts: []ContentPart{{
+			Type: ContentPartTypeText,
+			Text: "sunny",
+		}},
+	}
+
+	if msg.Role != MessageRoleTool {
+		t.Fatalf("Role = %q, want tool", msg.Role)
+	}
+	if msg.ToolCallID != "call_123" {
+		t.Fatalf("ToolCallID = %q, want call_123", msg.ToolCallID)
+	}
+	if len(msg.Parts) != 1 || msg.Parts[0].Text != "sunny" {
+		t.Fatalf("Parts = %#v, want single text part", msg.Parts)
+	}
+}
+
 func TestStreamEventCarriesStandardFields(t *testing.T) {
 	delta := ContentPart{Type: ContentPartTypeText, Text: "chunk"}
 	event := StreamEvent{

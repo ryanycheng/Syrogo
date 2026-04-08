@@ -56,6 +56,7 @@ func testInbounds() []config.InboundSpec {
 func testDualProtocolInbounds() []config.InboundSpec {
 	return []config.InboundSpec{
 		{Name: "openai-entry", Protocol: "openai_chat", Path: "/v1/chat/completions", Clients: []config.ClientSpec{{Token: "client-token", Tag: "office"}}},
+		{Name: "responses-entry", Protocol: "openai_responses", Path: "/v1/responses", Clients: []config.ClientSpec{{Token: "responses-token", Tag: "office"}}},
 		{Name: "anthropic-entry", Protocol: "anthropic_messages", Path: "/v1/messages", Clients: []config.ClientSpec{{Token: "anthropic-token", Tag: "office"}}},
 	}
 }
@@ -267,29 +268,168 @@ func TestBuildRuntimeRequestPreservesAnthropicToolBlocks(t *testing.T) {
 	}
 }
 
-func TestAnthropicMessagesAcceptsStructuredContent(t *testing.T) {
+func TestBuildRuntimeRequestFromResponsesSupportsStringInput(t *testing.T) {
+	req := openAIResponsesRequest{
+		Model:  "gpt-4o-mini",
+		Input:  json.RawMessage(`"hello"`),
+		Stream: true,
+	}
+
+	got, err := buildRuntimeRequestFromResponses(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequestFromResponses() error = %v", err)
+	}
+	if got.Model != "gpt-4o-mini" || !got.Stream {
+		t.Fatalf("got = %#v, want model and stream preserved", got)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].Role != runtime.MessageRoleUser || got.Messages[0].Parts[0].Text != "hello" {
+		t.Fatalf("Messages = %#v, want single user hello message", got.Messages)
+	}
+}
+
+func TestBuildRuntimeRequestFromResponsesSupportsItemArray(t *testing.T) {
+	req := openAIResponsesRequest{
+		Model: "gpt-4o-mini",
+		Input: json.RawMessage(`[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"function_call","call_id":"call_123","name":"get_weather","input":{"city":"shanghai"}},
+			{"type":"function_call_output","call_id":"call_123","output":[{"type":"output_text","text":"sunny"}]}
+		]`),
+	}
+
+	got, err := buildRuntimeRequestFromResponses(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequestFromResponses() error = %v", err)
+	}
+	if len(got.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want 3", len(got.Messages))
+	}
+	if got.Messages[0].Role != runtime.MessageRoleUser || got.Messages[0].Parts[0].Text != "hello" {
+		t.Fatalf("Messages[0] = %#v, want user hello", got.Messages[0])
+	}
+	if len(got.Messages[1].ToolCalls) != 1 || got.Messages[1].ToolCalls[0].ID != "call_123" || got.Messages[1].ToolCalls[0].Arguments != `{"city":"shanghai"}` {
+		t.Fatalf("Messages[1].ToolCalls = %#v, want function_call mapping", got.Messages[1].ToolCalls)
+	}
+	if got.Messages[2].ToolCallID != "call_123" || got.Messages[2].Parts[0].Text != "sunny" {
+		t.Fatalf("Messages[2] = %#v, want tool output mapping", got.Messages[2])
+	}
+}
+
+func TestResponsesRejectsUnsupportedInputItemType(t *testing.T) {
 	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testDualProtocolInbounds(), testOutbounds())
 	mux := http.NewServeMux()
 	h.Register(mux)
 
 	body, err := json.Marshal(map[string]any{
-		"model": "claude-sonnet-4-5",
-		"messages": []map[string]any{{
-			"role": "user",
-			"content": []map[string]any{{
-				"type": "text",
-				"text": "hello",
-			}},
-		}},
+		"model": "gpt-4o-mini",
+		"input": []map[string]any{{"type": "image", "url": "https://example.com/a.png"}},
 	})
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 
 	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "unsupported responses input item type") {
+		t.Fatalf("body = %q, want unsupported item type message", w.Body.String())
+	}
+}
+
+func TestResponsesUsesDispatcherBackedPlan(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testDualProtocolInbounds(), testOutbounds())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-4o-mini",
+		"input": "hello",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"output"`) || !strings.Contains(w.Body.String(), `"type":"message"`) {
+		t.Fatalf("body = %q, want responses output payload", w.Body.String())
+	}
+}
+
+func TestResponsesStreamsSSE(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testDualProtocolInbounds(), testOutbounds())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model":  "gpt-4o-mini",
+		"stream": true,
+		"input":  "hello",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+	if !strings.Contains(w.Body.String(), "event: response.created") || !strings.Contains(w.Body.String(), "event: response.completed") {
+		t.Fatalf("body = %q, want responses SSE lifecycle", w.Body.String())
+	}
+}
+
+func TestResponsesUsesOpenAIResponsesProvider(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %q, want /responses", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Fatalf("Authorization = %q, want Bearer test-key", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_123",
+			"object": "response",
+			"model":  "gpt-4o-mini",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "hello from responses upstream",
+				}},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"responses-tag"}, Strategy: "failover"}}}, testDualProtocolInbounds(), []config.OutboundSpec{{Name: "responses", Protocol: "openai_responses", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "responses-tag"}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "gpt-4o-mini", "input": "hello"})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "hello from responses upstream") {
+		t.Fatalf("body = %q, want upstream responses content", w.Body.String())
 	}
 }
 

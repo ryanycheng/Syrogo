@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +15,8 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{})))
+
 	configPath := flag.String("config", "./configs/config.example.yaml", "path to config file")
 	flag.Parse()
 
@@ -29,7 +32,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("syrogo listening on %s", cfg.ListenAddress())
+		slog.Info("server starting", "listen", cfg.ListenAddress())
 		errCh <- application.Server.Start()
 	}()
 
@@ -38,7 +41,7 @@ func main() {
 
 	select {
 	case sig := <-sigCh:
-		log.Printf("received signal %s, shutting down", sig)
+		slog.Info("shutdown signal received", "signal", sig.String())
 	case err := <-errCh:
 		if err != nil {
 			log.Fatalf("server error: %v", err)

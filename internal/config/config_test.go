@@ -180,6 +180,33 @@ func TestConfigValidateOpenAIChatRequiresEndpointAndAuthToken(t *testing.T) {
 	}
 }
 
+func TestConfigValidateSupportsOpenAIResponsesOutbound(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0] = OutboundSpec{Name: "responses", Protocol: "openai_responses", Tag: "responses-tag", Endpoint: "https://example.com/v1", AuthToken: "key-1"}
+	cfg.Routing.Rules[0].ToTags = []string{"responses-tag"}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigValidateOpenAIResponsesRequiresEndpointAndAuthToken(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0] = OutboundSpec{Name: "responses", Protocol: "openai_responses", Tag: "responses-tag"}
+	cfg.Routing.Rules[0].ToTags = []string{"responses-tag"}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "outbounds.responses.endpoint is required" {
+		t.Fatalf("Validate() error = %v, want missing endpoint error", err)
+	}
+
+	cfg.Outbounds[0].Endpoint = "https://example.com/v1"
+	err = cfg.Validate()
+	if err == nil || err.Error() != "outbounds.responses.auth_token is required" {
+		t.Fatalf("Validate() error = %v, want missing auth_token error", err)
+	}
+}
+
 func TestConfigValidateRequiresRuleStrategy(t *testing.T) {
 	cfg := validConfig()
 	cfg.Routing.Rules[0].Strategy = ""

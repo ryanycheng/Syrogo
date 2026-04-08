@@ -24,10 +24,19 @@ type OpenAICompatibleProvider struct {
 	baseURL      string
 	apiKeys      []string
 	httpClient   *http.Client
+	path         string
+	mode         openAIProtocolMode
 
 	mu           sync.Mutex
 	nextAPIKeyIx int
 }
+
+type openAIProtocolMode string
+
+const (
+	openAIProtocolModeChat      openAIProtocolMode = "chat"
+	openAIProtocolModeResponses openAIProtocolMode = "responses"
+)
 
 type openAIChatMessage struct {
 	Role       string           `json:"role"`
@@ -56,11 +65,55 @@ type openAIChatResponseEnvelope struct {
 	} `json:"choices"`
 }
 
+type openAIResponsesTextPart struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+type openAIResponsesInputItem struct {
+	Type    string                    `json:"type,omitempty"`
+	Role    string                    `json:"role,omitempty"`
+	Content []openAIResponsesTextPart `json:"content,omitempty"`
+	CallID  string                    `json:"call_id,omitempty"`
+	Name    string                    `json:"name,omitempty"`
+	Input   json.RawMessage           `json:"input,omitempty"`
+	Output  string                    `json:"output,omitempty"`
+}
+
+type openAIResponsesOutputItem struct {
+	Type    string                    `json:"type"`
+	Role    string                    `json:"role,omitempty"`
+	Content []openAIResponsesTextPart `json:"content,omitempty"`
+	CallID  string                    `json:"call_id,omitempty"`
+	Name    string                    `json:"name,omitempty"`
+	Input   json.RawMessage           `json:"input,omitempty"`
+}
+
+type openAIResponsesEnvelope struct {
+	ID     string                      `json:"id"`
+	Object string                      `json:"object"`
+	Model  string                      `json:"model"`
+	Output []openAIResponsesOutputItem `json:"output"`
+	Usage  *struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+		TotalTokens  int `json:"total_tokens"`
+	} `json:"usage,omitempty"`
+}
+
 func NewMock(name string) *MockProvider {
 	return &MockProvider{providerName: name}
 }
 
 func NewOpenAICompatible(name, baseURL string, apiKeys []string, httpClient *http.Client) *OpenAICompatibleProvider {
+	return newOpenAIProvider(name, baseURL, apiKeys, httpClient, "/chat/completions", openAIProtocolModeChat)
+}
+
+func NewOpenAIResponsesCompatible(name, baseURL string, apiKeys []string, httpClient *http.Client) *OpenAICompatibleProvider {
+	return newOpenAIProvider(name, baseURL, apiKeys, httpClient, "/responses", openAIProtocolModeResponses)
+}
+
+func newOpenAIProvider(name, baseURL string, apiKeys []string, httpClient *http.Client, path string, mode openAIProtocolMode) *OpenAICompatibleProvider {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
@@ -69,6 +122,8 @@ func NewOpenAICompatible(name, baseURL string, apiKeys []string, httpClient *htt
 		baseURL:      strings.TrimRight(baseURL, "/"),
 		apiKeys:      append([]string(nil), apiKeys...),
 		httpClient:   httpClient,
+		path:         path,
+		mode:         mode,
 	}
 }
 
@@ -138,7 +193,14 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req runti
 		return runtime.Response{}, fmt.Errorf("api key is required")
 	}
 
-	payload, err := json.Marshal(encodeOpenAIChatRequest(req))
+	var payload any
+	switch p.mode {
+	case openAIProtocolModeResponses:
+		payload = encodeOpenAIResponsesRequest(req)
+	default:
+		payload = encodeOpenAIChatRequest(req)
+	}
+	encodedPayload, err := json.Marshal(payload)
 	if err != nil {
 		return runtime.Response{}, fmt.Errorf("marshal request: %w", err)
 	}
@@ -147,7 +209,7 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req runti
 	lastErr := error(nil)
 	for offset := range p.apiKeys {
 		keyIx := (start + offset) % len(p.apiKeys)
-		resp, err := p.chatCompletionWithAPIKey(ctx, payload, p.apiKeys[keyIx])
+		resp, err := p.completionWithAPIKey(ctx, encodedPayload, p.apiKeys[keyIx])
 		if err == nil {
 			p.markNextAPIKeyAfter(keyIx)
 			return resp, nil
@@ -194,8 +256,8 @@ func (p *OpenAICompatibleProvider) StreamCompletion(ctx context.Context, req run
 	return ch, nil
 }
 
-func (p *OpenAICompatibleProvider) chatCompletionWithAPIKey(ctx context.Context, payload []byte, apiKey string) (runtime.Response, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(payload))
+func (p *OpenAICompatibleProvider) completionWithAPIKey(ctx context.Context, payload []byte, apiKey string) (runtime.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+p.path, bytes.NewReader(payload))
 	if err != nil {
 		return runtime.Response{}, fmt.Errorf("build request: %w", err)
 	}
@@ -223,11 +285,20 @@ func (p *OpenAICompatibleProvider) chatCompletionWithAPIKey(ctx context.Context,
 		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream request failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
 	}
 
-	var resp openAIChatResponseEnvelope
-	if err := json.Unmarshal(responseBody, &resp); err != nil {
-		return runtime.Response{}, NewRetryableError(fmt.Errorf("decode response: %w", err))
+	switch p.mode {
+	case openAIProtocolModeResponses:
+		var resp openAIResponsesEnvelope
+		if err := json.Unmarshal(responseBody, &resp); err != nil {
+			return runtime.Response{}, NewRetryableError(fmt.Errorf("decode response: %w", err))
+		}
+		return decodeOpenAIResponsesResponse(resp)
+	default:
+		var resp openAIChatResponseEnvelope
+		if err := json.Unmarshal(responseBody, &resp); err != nil {
+			return runtime.Response{}, NewRetryableError(fmt.Errorf("decode response: %w", err))
+		}
+		return decodeOpenAIChatResponse(resp)
 	}
-	return decodeOpenAIChatResponse(resp)
 }
 
 func previewResponseBody(body []byte) string {
@@ -271,6 +342,42 @@ func encodeOpenAIChatRequest(req runtime.Request) any {
 	}
 }
 
+func encodeOpenAIResponsesRequest(req runtime.Request) any {
+	input := make([]openAIResponsesInputItem, 0, len(req.Messages))
+	for _, msg := range req.Messages {
+		switch {
+		case msg.Role == runtime.MessageRoleTool:
+			input = append(input, openAIResponsesInputItem{
+				Type:   "function_call_output",
+				CallID: msg.ToolCallID,
+				Output: firstTextPart(msg),
+			})
+		case len(msg.ToolCalls) > 0:
+			for _, call := range msg.ToolCalls {
+				input = append(input, openAIResponsesInputItem{
+					Type:   "function_call",
+					CallID: call.ID,
+					Name:   call.Name,
+					Input:  json.RawMessage(call.Arguments),
+				})
+			}
+		default:
+			input = append(input, openAIResponsesInputItem{
+				Type: "message",
+				Role: string(msg.Role),
+				Content: []openAIResponsesTextPart{{
+					Type: "input_text",
+					Text: firstTextPart(msg),
+				}},
+			})
+		}
+	}
+	return map[string]any{
+		"model": req.Model,
+		"input": input,
+	}
+}
+
 func decodeOpenAIChatResponse(resp openAIChatResponseEnvelope) (runtime.Response, error) {
 	if len(resp.Choices) == 0 {
 		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream response missing choices"))
@@ -304,6 +411,59 @@ func decodeOpenAIChatResponse(resp openAIChatResponseEnvelope) (runtime.Response
 		FinishReason: runtime.FinishReasonStop,
 		Message:      message,
 	}, nil
+}
+
+func decodeOpenAIResponsesResponse(resp openAIResponsesEnvelope) (runtime.Response, error) {
+	if len(resp.Output) == 0 {
+		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream response missing output"))
+	}
+
+	message := runtime.Message{Role: runtime.MessageRoleAssistant}
+	for _, item := range resp.Output {
+		switch item.Type {
+		case "message":
+			if item.Role != "" {
+				message.Role = runtime.MessageRole(item.Role)
+			}
+			for _, part := range item.Content {
+				if part.Text != "" {
+					message.Parts = append(message.Parts, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: part.Text})
+				}
+			}
+		case "function_call":
+			message.ToolCalls = append(message.ToolCalls, runtime.ToolCall{ID: item.CallID, Name: item.Name, Arguments: compactJSONOrEmpty(item.Input)})
+		}
+	}
+	if len(message.Parts) == 0 && len(message.ToolCalls) == 0 {
+		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream returned no content and no tool calls"))
+	}
+
+	response := runtime.Response{
+		ID:           resp.ID,
+		Object:       resp.Object,
+		Model:        resp.Model,
+		FinishReason: runtime.FinishReasonStop,
+		Message:      message,
+	}
+	if resp.Usage != nil {
+		response.Usage = &runtime.Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens, TotalTokens: resp.Usage.TotalTokens}
+	}
+	return response, nil
+}
+
+func compactJSONOrEmpty(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "{}"
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return string(raw)
+	}
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return string(raw)
+	}
+	return string(encoded)
 }
 
 func firstTextPart(msg runtime.Message) string {

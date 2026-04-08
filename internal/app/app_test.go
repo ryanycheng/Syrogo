@@ -78,6 +78,26 @@ func TestNewSucceedsWithOpenAICompatibleProvider(t *testing.T) {
 	}
 }
 
+func TestNewSucceedsWithOpenAIResponsesProvider(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "responses",
+		Protocol:  "openai_responses",
+		Endpoint:  "https://example.com/v1",
+		AuthToken: "key-1",
+		Tag:       "responses-tag",
+	}}
+	cfg.Routing.Rules[0].ToTags = []string{"responses-tag"}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if app == nil || app.Server == nil {
+		t.Fatal("New() returned nil app or server")
+	}
+}
+
 func TestNewBindsEachListenerToItsInbounds(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Listeners = []config.ListenerSpec{

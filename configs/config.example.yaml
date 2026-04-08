@@ -3,6 +3,7 @@ listeners:
     listen: ":8080"
     inbounds:
       - "openai-entry"
+      - "responses-entry"
       - "anthropic-entry"
 
 inbounds:
@@ -14,6 +15,13 @@ inbounds:
         tag: "office"
       - token: "${SYROGO_MOBILE_CLIENT_TOKEN}"
         tag: "mobile"
+
+  - name: "responses-entry"
+    protocol: "openai_responses"
+    path: "/v1/responses"
+    clients:
+      - token: "${SYROGO_RESPONSES_CLIENT_TOKEN}"
+        tag: "responses"
 
   - name: "anthropic-entry"
     protocol: "anthropic_messages"
@@ -41,6 +49,13 @@ routing:
         - "openai-backup"
       strategy: "round_robin"
 
+    - name: "responses-route"
+      from_tags:
+        - "responses"
+      to_tags:
+        - "responses-primary"
+      strategy: "failover"
+
 outbounds:
   - name: "mock"
     protocol: "mock"
@@ -57,3 +72,9 @@ outbounds:
     endpoint: "https://api.openai.com/v1"
     auth_token: "${OPENAI_API_KEY_BACKUP}"
     tag: "openai-backup"
+
+  - name: "responses-primary"
+    protocol: "openai_responses"
+    endpoint: "https://api.openai.com/v1"
+    auth_token: "${OPENAI_RESPONSES_API_KEY_PRIMARY}"
+    tag: "responses-primary"

@@ -61,6 +61,27 @@ type inboundRequest struct {
 	Stream   bool             `json:"stream"`
 }
 
+type openAIResponsesRequest struct {
+	Model  string          `json:"model"`
+	Input  json.RawMessage `json:"input"`
+	Stream bool            `json:"stream"`
+}
+
+type openAIResponsesInputItem struct {
+	Type    string          `json:"type"`
+	Role    string          `json:"role,omitempty"`
+	Content json.RawMessage `json:"content,omitempty"`
+	CallID  string          `json:"call_id,omitempty"`
+	Name    string          `json:"name,omitempty"`
+	Input   json.RawMessage `json:"input,omitempty"`
+	Output  json.RawMessage `json:"output,omitempty"`
+}
+
+type openAIResponsesContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
 func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
@@ -122,6 +143,8 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	switch inbound.Protocol {
 	case "openai_chat":
 		h.handleOpenAIChatCompletions(lw, r, inbound, client, requestLogger)
+	case "openai_responses":
+		h.handleOpenAIResponses(lw, r, inbound, client, requestLogger)
 	case "anthropic_messages":
 		h.handleAnthropicMessages(lw, r, inbound, client, requestLogger)
 	default:
@@ -247,6 +270,91 @@ func (h *Handler) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Req
 	writeOpenAIChatResponse(w, resp)
 }
 
+func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) {
+	if r.Method != http.MethodPost {
+		logger.Warn("request rejected", slog.String("reason", "method not allowed"))
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		logger.Warn("request body read failed", slog.Any("error", err))
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+
+	var req openAIResponsesRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		logger.Warn("request decode failed",
+			slog.Any("error", err),
+			slog.String("body_preview", previewBody(body)),
+		)
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.Model == "" {
+		logger.Warn("request validation failed", slog.String("reason", "model is required"))
+		writeError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+	if len(req.Input) == 0 {
+		logger.Warn("request validation failed",
+			slog.String("model", req.Model),
+			slog.String("reason", "input is required"),
+		)
+		writeError(w, http.StatusBadRequest, "input is required")
+		return
+	}
+
+	internalReq, err := buildRuntimeRequestFromResponses(req)
+	if err != nil {
+		logger.Warn("request normalize failed",
+			slog.String("model", req.Model),
+			slog.Any("error", err),
+			slog.String("body_preview", previewBody(body)),
+		)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	plan, err := h.planRequest(internalReq, inbound, client)
+	if err != nil {
+		logger.Warn("request routing failed",
+			slog.String("model", req.Model),
+			slog.Any("error", err),
+		)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	logger.Info("request routed",
+		slog.String("requested_model", req.Model),
+		slog.String("planned_model", plannedModel(plan)),
+		slog.String("matched_rule", plan.MatchedRule),
+		slog.String("resolved_to", strings.Join(plan.ResolvedToTags, ",")),
+		slog.Bool("stream", req.Stream),
+	)
+
+	if req.Stream {
+		h.handleOpenAIResponsesStreaming(w, r, internalReq, plan, logger)
+		return
+	}
+
+	resp, err := h.dispatcher.Dispatch(r.Context(), internalReq, plan)
+	if err != nil {
+		status, message := gatewayError(err)
+		logger.Error("request dispatch failed",
+			slog.String("model", plannedModel(plan)),
+			slog.Int("status", status),
+			slog.Any("error", err),
+		)
+		writeError(w, status, message)
+		return
+	}
+
+	writeOpenAIResponsesResponse(w, resp)
+}
+
 func (h *Handler) handleAnthropicMessages(w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) {
 	if r.Method != http.MethodPost {
 		logger.Warn("request rejected", slog.String("reason", "method not allowed"))
@@ -355,6 +463,14 @@ func buildRuntimeRequest(req inboundRequest) (runtime.Request, error) {
 	return internalReq, nil
 }
 
+func buildRuntimeRequestFromResponses(req openAIResponsesRequest) (runtime.Request, error) {
+	messages, err := parseOpenAIResponsesInput(req.Input)
+	if err != nil {
+		return runtime.Request{}, err
+	}
+	return runtime.Request{Model: req.Model, Messages: messages, Stream: req.Stream}, nil
+}
+
 func parseInboundMessage(msg inboundMessage) ([]runtime.ContentPart, []runtime.ToolCall, string, error) {
 	parts, toolCalls, toolCallID, err := parseInboundContent(msg.Role, msg.Content)
 	if err != nil {
@@ -431,6 +547,117 @@ func parseInboundContent(role string, raw json.RawMessage) ([]runtime.ContentPar
 	}
 
 	return nil, nil, "", fmt.Errorf("unsupported message content")
+}
+
+func parseOpenAIResponsesInput(raw json.RawMessage) ([]runtime.Message, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: text}},
+		}}, nil
+	}
+
+	var items []openAIResponsesInputItem
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("unsupported responses input")
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("input is required")
+	}
+
+	messages := make([]runtime.Message, 0, len(items))
+	for _, item := range items {
+		switch item.Type {
+		case "message":
+			parts, err := parseOpenAIResponsesMessageContent(item.Content)
+			if err != nil {
+				return nil, err
+			}
+			role := runtime.MessageRole(item.Role)
+			if role == "" {
+				role = runtime.MessageRoleUser
+			}
+			messages = append(messages, runtime.Message{Role: role, Parts: parts})
+		case "function_call":
+			arguments, err := marshalCompactJSON(item.Input)
+			if err != nil {
+				return nil, fmt.Errorf("invalid function_call input: %w", err)
+			}
+			messages = append(messages, runtime.Message{
+				Role: runtime.MessageRoleAssistant,
+				ToolCalls: []runtime.ToolCall{{
+					ID:        item.CallID,
+					Name:      item.Name,
+					Arguments: arguments,
+				}},
+			})
+		case "function_call_output":
+			output, err := parseOpenAIResponsesFunctionOutput(item.Output)
+			if err != nil {
+				return nil, err
+			}
+			if item.CallID == "" {
+				return nil, fmt.Errorf("function_call_output.call_id is required")
+			}
+			messages = append(messages, runtime.Message{
+				Role:       runtime.MessageRoleTool,
+				ToolCallID: item.CallID,
+				Parts:      []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: output}},
+			})
+		default:
+			return nil, fmt.Errorf("unsupported responses input item type %q", item.Type)
+		}
+	}
+	return messages, nil
+}
+
+func parseOpenAIResponsesMessageContent(raw json.RawMessage) ([]runtime.ContentPart, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: text}}, nil
+	}
+
+	var parts []openAIResponsesContentPart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return nil, fmt.Errorf("unsupported responses message content")
+	}
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("message content must include at least one text part")
+	}
+
+	result := make([]runtime.ContentPart, 0, len(parts))
+	for _, part := range parts {
+		if part.Type != "input_text" && part.Type != "output_text" && part.Type != "text" {
+			return nil, fmt.Errorf("unsupported responses content part type %q", part.Type)
+		}
+		result = append(result, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: part.Text})
+	}
+	return result, nil
+}
+
+func parseOpenAIResponsesFunctionOutput(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text, nil
+	}
+	var parts []openAIResponsesContentPart
+	if err := json.Unmarshal(raw, &parts); err == nil {
+		texts := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if part.Type == "output_text" || part.Type == "text" || part.Type == "input_text" {
+				texts = append(texts, part.Text)
+			}
+		}
+		if len(texts) == 0 {
+			return "", fmt.Errorf("function_call_output.output must include at least one text part")
+		}
+		return strings.Join(texts, "\n"), nil
+	}
+	return "", fmt.Errorf("unsupported function_call_output.output")
 }
 
 func parseToolResultContent(raw json.RawMessage) (string, error) {
@@ -521,6 +748,48 @@ func (h *Handler) handleOpenAIStreaming(w http.ResponseWriter, r *http.Request, 
 	flusher.Flush()
 }
 
+func (h *Handler) handleOpenAIResponsesStreaming(w http.ResponseWriter, r *http.Request, req runtime.Request, plan runtime.ExecutionPlan, logger *slog.Logger) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		logger.Error("streaming not supported by response writer")
+		writeError(w, http.StatusInternalServerError, "streaming is not supported")
+		return
+	}
+
+	events, err := h.dispatcher.DispatchStream(r.Context(), req, plan)
+	if err != nil {
+		status, message := gatewayError(err)
+		logger.Error("stream dispatch failed",
+			slog.String("model", plannedModel(plan)),
+			slog.Int("status", status),
+			slog.Any("error", err),
+		)
+		writeError(w, status, message)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	for _, frame := range openAIResponsesStreamPrelude(plan) {
+		if err := writeOpenAIResponsesSSE(w, frame.event, frame.payload); err != nil {
+			logger.Error("stream write failed", slog.Any("error", err))
+			return
+		}
+		flusher.Flush()
+	}
+
+	for _, frame := range openAIResponsesStreamFrames(events) {
+		if err := writeOpenAIResponsesSSE(w, frame.event, frame.payload); err != nil {
+			logger.Error("stream write failed", slog.Any("error", err))
+			return
+		}
+		flusher.Flush()
+	}
+}
+
 func (h *Handler) handleAnthropicStreaming(w http.ResponseWriter, r *http.Request, req runtime.Request, plan runtime.ExecutionPlan, logger *slog.Logger) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -590,6 +859,68 @@ func writeOpenAIChatResponse(w http.ResponseWriter, resp runtime.Response) {
 			"message": message,
 		}},
 	})
+}
+
+func writeOpenAIResponsesResponse(w http.ResponseWriter, resp runtime.Response) {
+	output := buildOpenAIResponsesOutput(resp)
+	body := map[string]any{
+		"id":     resp.ID,
+		"object": nonEmpty(resp.Object, "response"),
+		"model":  resp.Model,
+		"output": output,
+	}
+	if resp.Usage != nil {
+		body["usage"] = map[string]any{
+			"input_tokens":  resp.Usage.InputTokens,
+			"output_tokens": resp.Usage.OutputTokens,
+			"total_tokens":  resp.Usage.TotalTokens,
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func buildOpenAIResponsesOutput(resp runtime.Response) []map[string]any {
+	output := make([]map[string]any, 0, 1+len(resp.Message.ToolCalls))
+	messageContent := make([]map[string]any, 0, len(resp.Message.Parts))
+	for _, part := range resp.Message.Parts {
+		if part.Type != runtime.ContentPartTypeText {
+			continue
+		}
+		messageContent = append(messageContent, map[string]any{
+			"type": "output_text",
+			"text": part.Text,
+		})
+	}
+	if len(messageContent) > 0 {
+		output = append(output, map[string]any{
+			"type":    "message",
+			"role":    string(resp.Message.Role),
+			"content": messageContent,
+		})
+	}
+	for _, call := range resp.Message.ToolCalls {
+		var input any
+		if err := json.Unmarshal([]byte(call.Arguments), &input); err != nil {
+			input = map[string]any{}
+		}
+		output = append(output, map[string]any{
+			"type":    "function_call",
+			"call_id": call.ID,
+			"name":    call.Name,
+			"input":   input,
+		})
+	}
+	if len(output) == 0 {
+		output = append(output, map[string]any{
+			"type": "message",
+			"role": string(resp.Message.Role),
+			"content": []map[string]any{{
+				"type": "output_text",
+				"text": "",
+			}},
+		})
+	}
+	return output
 }
 
 func writeAnthropicMessageResponse(w http.ResponseWriter, resp runtime.Response) {
@@ -681,6 +1012,149 @@ func openAIStreamChunk(event runtime.StreamEvent) any {
 	return chunk
 }
 
+type openAIResponsesSSEFrame struct {
+	event   string
+	payload any
+}
+
+func openAIResponsesStreamPrelude(plan runtime.ExecutionPlan) []openAIResponsesSSEFrame {
+	model := plannedModel(plan)
+	return []openAIResponsesSSEFrame{
+		{event: "response.created", payload: map[string]any{"type": "response", "response": map[string]any{"model": model, "status": "created"}}},
+		{event: "response.in_progress", payload: map[string]any{"type": "response", "response": map[string]any{"model": model, "status": "in_progress"}}},
+	}
+}
+
+func openAIResponsesStreamFrames(events <-chan runtime.StreamEvent) []openAIResponsesSSEFrame {
+	frames := make([]openAIResponsesSSEFrame, 0, 8)
+	textItemStarted := false
+	toolItemsDone := make(map[string]bool)
+	messageItemID := "msg_0"
+	messageOutputIndex := 0
+	toolOutputIndex := 1
+	responseID := ""
+	model := ""
+
+	for event := range events {
+		if event.ResponseID != "" {
+			responseID = event.ResponseID
+		}
+		if event.Model != "" {
+			model = event.Model
+		}
+		switch event.Type {
+		case runtime.StreamEventMessageStart:
+			frames = append(frames, openAIResponsesSSEFrame{
+				event: "response.output_item.added",
+				payload: map[string]any{
+					"output_index": messageOutputIndex,
+					"item": map[string]any{
+						"id":      messageItemID,
+						"type":    "message",
+						"role":    string(event.MessageRole),
+						"content": []map[string]any{},
+					},
+				},
+			})
+		case runtime.StreamEventContentDelta:
+			if event.Delta != nil {
+				if !textItemStarted {
+					frames = append(frames, openAIResponsesSSEFrame{
+						event: "response.content_part.added",
+						payload: map[string]any{
+							"output_index":  messageOutputIndex,
+							"item_id":       messageItemID,
+							"content_index": 0,
+							"part":          map[string]any{"type": "output_text", "text": ""},
+						},
+					})
+					textItemStarted = true
+				}
+				frames = append(frames, openAIResponsesSSEFrame{
+					event: "response.output_text.delta",
+					payload: map[string]any{
+						"output_index":  messageOutputIndex,
+						"item_id":       messageItemID,
+						"content_index": 0,
+						"delta":         event.Delta.Text,
+					},
+				})
+			}
+			if event.ToolCall != nil {
+				var input any
+				if err := json.Unmarshal([]byte(event.ToolCall.Arguments), &input); err != nil {
+					input = map[string]any{}
+				}
+				frames = append(frames, openAIResponsesSSEFrame{
+					event: "response.output_item.added",
+					payload: map[string]any{
+						"output_index": toolOutputIndex + event.ToolCallIndex,
+						"item": map[string]any{
+							"id":      nonEmpty(event.ToolCall.ID, fmt.Sprintf("call_%d", event.ToolCallIndex)),
+							"type":    "function_call",
+							"call_id": event.ToolCall.ID,
+							"name":    event.ToolCall.Name,
+							"input":   input,
+						},
+					},
+				})
+				toolItemsDone[event.ToolCall.ID] = false
+			}
+		case runtime.StreamEventUsage:
+			if event.Usage != nil {
+				frames = append(frames, openAIResponsesSSEFrame{event: "response.usage", payload: map[string]any{"usage": map[string]any{"input_tokens": event.Usage.InputTokens, "output_tokens": event.Usage.OutputTokens, "total_tokens": event.Usage.TotalTokens}}})
+			}
+		case runtime.StreamEventMessageEnd:
+			if textItemStarted {
+				frames = append(frames, openAIResponsesSSEFrame{
+					event: "response.content_part.done",
+					payload: map[string]any{
+						"output_index":  messageOutputIndex,
+						"item_id":       messageItemID,
+						"content_index": 0,
+					},
+				})
+			}
+			frames = append(frames, openAIResponsesSSEFrame{
+				event:   "response.output_item.done",
+				payload: map[string]any{"output_index": messageOutputIndex, "item_id": messageItemID},
+			})
+			for toolCallID, done := range toolItemsDone {
+				if done {
+					continue
+				}
+				frames = append(frames, openAIResponsesSSEFrame{
+					event:   "response.output_item.done",
+					payload: map[string]any{"item_id": toolCallID},
+				})
+				toolItemsDone[toolCallID] = true
+			}
+			frames = append(frames, openAIResponsesSSEFrame{
+				event: "response.completed",
+				payload: map[string]any{
+					"type": "response",
+					"response": map[string]any{
+						"id":     responseID,
+						"model":  model,
+						"status": "completed",
+					},
+				},
+			})
+		case runtime.StreamEventError:
+			message := "stream error"
+			if event.Err != nil {
+				message = event.Err.Error()
+			}
+			frames = append(frames, openAIResponsesSSEFrame{
+				event:   "error",
+				payload: map[string]any{"message": message},
+			})
+		}
+	}
+
+	return frames
+}
+
 func anthropicStreamChunk(event runtime.StreamEvent) any {
 	switch event.Type {
 	case runtime.StreamEventMessageStart:
@@ -746,6 +1220,20 @@ func writeOpenAISSE(w http.ResponseWriter, payload any) error {
 	return nil
 }
 
+func writeOpenAIResponsesSSE(w http.ResponseWriter, event string, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\n", event); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		return err
+	}
+	return nil
+}
+
 func writeSSE(w http.ResponseWriter, eventType runtime.StreamEventType, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -767,6 +1255,13 @@ func firstTextPart(msg runtime.Message) string {
 		}
 	}
 	return ""
+}
+
+func nonEmpty(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

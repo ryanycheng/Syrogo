@@ -154,6 +154,197 @@ func TestDecodeOpenAIChatResponseRejectsEmptyAssistantMessage(t *testing.T) {
 	}
 }
 
+func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
+	payload := encodeOpenAIResponsesRequest(runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}, {
+			Role: runtime.MessageRoleAssistant,
+			ToolCalls: []runtime.ToolCall{{
+				ID:        "call_123",
+				Name:      "get_weather",
+				Arguments: `{"city":"shanghai"}`,
+			}},
+		}, {
+			Role:       runtime.MessageRoleTool,
+			ToolCallID: "call_123",
+			Parts:      []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "sunny"}},
+		}},
+	})
+
+	body := payload.(map[string]any)
+	input := body["input"].([]openAIResponsesInputItem)
+	if len(input) != 3 {
+		t.Fatalf("len(input) = %d, want 3", len(input))
+	}
+	if input[0].Type != "message" || input[0].Role != "user" {
+		t.Fatalf("input[0] = %#v, want user message", input[0])
+	}
+	if len(input[0].Content) != 1 || input[0].Content[0].Type != "input_text" || input[0].Content[0].Text != "hello" {
+		t.Fatalf("input[0].Content = %#v, want input_text hello", input[0].Content)
+	}
+	if input[1].Type != "function_call" || input[1].CallID != "call_123" || input[1].Name != "get_weather" {
+		t.Fatalf("input[1] = %#v, want function_call", input[1])
+	}
+	if string(input[1].Input) != `{"city":"shanghai"}` {
+		t.Fatalf("input[1].Input = %s, want compact JSON", string(input[1].Input))
+	}
+	if input[2].Type != "function_call_output" || input[2].CallID != "call_123" || input[2].Output != "sunny" {
+		t.Fatalf("input[2] = %#v, want function_call_output", input[2])
+	}
+}
+
+func TestDecodeOpenAIResponsesResponseMapsTextAndToolCalls(t *testing.T) {
+	resp, err := decodeOpenAIResponsesResponse(openAIResponsesEnvelope{
+		ID:     "resp_123",
+		Object: "response",
+		Model:  "gpt-4o-mini",
+		Output: []openAIResponsesOutputItem{{
+			Type: "message",
+			Role: "assistant",
+			Content: []openAIResponsesTextPart{{
+				Type: "output_text",
+				Text: "hello from upstream",
+			}},
+		}, {
+			Type:   "function_call",
+			CallID: "call_123",
+			Name:   "get_weather",
+			Input:  json.RawMessage(`{"city":"shanghai"}`),
+		}},
+		Usage: &struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+			TotalTokens  int `json:"total_tokens"`
+		}{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+	})
+	if err != nil {
+		t.Fatalf("decodeOpenAIResponsesResponse() error = %v", err)
+	}
+	if resp.Message.Role != runtime.MessageRoleAssistant {
+		t.Fatalf("resp.Message.Role = %q, want assistant", resp.Message.Role)
+	}
+	if len(resp.Message.Parts) != 1 || resp.Message.Parts[0].Text != "hello from upstream" {
+		t.Fatalf("resp.Message.Parts = %#v, want decoded text", resp.Message.Parts)
+	}
+	if len(resp.Message.ToolCalls) != 1 || resp.Message.ToolCalls[0].ID != "call_123" || resp.Message.ToolCalls[0].Arguments != `{"city":"shanghai"}` {
+		t.Fatalf("resp.Message.ToolCalls = %#v, want decoded function_call", resp.Message.ToolCalls)
+	}
+	if resp.Usage == nil || resp.Usage.TotalTokens != 15 {
+		t.Fatalf("resp.Usage = %#v, want total tokens", resp.Usage)
+	}
+}
+
+func TestDecodeOpenAIResponsesResponseRejectsEmptyOutput(t *testing.T) {
+	_, err := decodeOpenAIResponsesResponse(openAIResponsesEnvelope{ID: "resp_123", Object: "response", Model: "gpt-4o-mini"})
+	if err == nil {
+		t.Fatal("decodeOpenAIResponsesResponse() error = nil, want error")
+	}
+	if got := err.Error(); got != "upstream response missing output" {
+		t.Fatalf("decodeOpenAIResponsesResponse() error = %q, want upstream response missing output", got)
+	}
+}
+
+func TestOpenAIResponsesCompatibleChatCompletionSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %q, want /responses", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Fatalf("Authorization = %q, want Bearer test-key", got)
+		}
+
+		var req struct {
+			Model string `json:"model"`
+			Input []struct {
+				Type    string                    `json:"type"`
+				Role    string                    `json:"role"`
+				Content []openAIResponsesTextPart `json:"content"`
+			} `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		if req.Model != "gpt-4o-mini" {
+			t.Fatalf("req.Model = %q, want gpt-4o-mini", req.Model)
+		}
+		if len(req.Input) != 1 || req.Input[0].Type != "message" || req.Input[0].Role != "user" || req.Input[0].Content[0].Text != "hello" {
+			t.Fatalf("req.Input = %#v, want single message input", req.Input)
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_123",
+			"object": "response",
+			"model":  req.Model,
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "hello from upstream",
+				}},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewOpenAIResponsesCompatible("responses", server.URL, []string{"test-key"}, server.Client())
+	resp, err := p.ChatCompletion(context.Background(), runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if got := resp.Message.Parts[0].Text; got != "hello from upstream" {
+		t.Fatalf("resp.Message.Parts[0].Text = %q, want hello from upstream", got)
+	}
+}
+
+func TestOpenAIResponsesCompatibleStreamCompletionEmitsToolCallDelta(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_123",
+			"object": "response",
+			"model":  "gpt-4o-mini",
+			"output": []map[string]any{{
+				"type":    "function_call",
+				"call_id": "call_123",
+				"name":    "get_weather",
+				"input": map[string]any{
+					"city": "shanghai",
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewOpenAIResponsesCompatible("responses", server.URL, []string{"test-key"}, server.Client())
+	ch, err := p.StreamCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini"})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+
+	var toolEvent *runtime.StreamEvent
+	for event := range ch {
+		if event.ToolCall != nil {
+			e := event
+			toolEvent = &e
+		}
+	}
+	if toolEvent == nil {
+		t.Fatal("toolEvent = nil, want tool call delta")
+	}
+	if toolEvent.ToolCall.ID != "call_123" || toolEvent.ToolCall.Name != "get_weather" {
+		t.Fatalf("toolEvent.ToolCall = %#v, want decoded tool call", toolEvent.ToolCall)
+	}
+}
+
 func TestOpenAICompatibleChatCompletionSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {

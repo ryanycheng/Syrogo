@@ -32,8 +32,9 @@ Syrogo 是一个面向多模型场景的 AI Gateway / Semantic Router。
 - Go HTTP 服务启动与优雅退出
 - 配置加载与校验
 - `GET /healthz`
-- 两种 inbound protocol
+- 三种 inbound protocol
   - `openai_chat`
+  - `openai_responses`
   - `anthropic_messages`
 - 统一转换到内部中立模型 `runtime.Request / Response / StreamEvent`
 - 基于 `client token -> active tag` 的入口识别
@@ -41,11 +42,13 @@ Syrogo 是一个面向多模型场景的 AI Gateway / Semantic Router。
 - 单条规则内的：
   - `failover`
   - `round_robin`
-- 两种 outbound protocol
+- 三种 outbound protocol
   - `mock`
   - `openai_chat`
+  - `openai_responses`
 - OpenAI-compatible 上游调用
 - 基础流式 SSE 返回
+- 最小 tool calling 映射闭环
 - 单元测试、回归测试与关键链路测试
 
 ---
@@ -58,7 +61,8 @@ Syrogo 是一个面向多模型场景的 AI Gateway / Semantic Router。
 - gRPC / MCP / WebSocket 等额外接入方式
 - 完整 semantic routing 能力
 - 完整 Anthropic 上游透传
-- tool use / multimodal / function calling 全量支持
+- multimodal 全量支持
+- Responses API 全量 item type 无损透传
 - 对外 Go SDK 或 `pkg` 级公共库抽象
 
 当前重点是：
@@ -112,6 +116,7 @@ client request
 
 当前已支持：
 - `openai_chat`
+- `openai_responses`
 - `anthropic_messages`
 
 ### 2. runtime
@@ -146,6 +151,7 @@ provider 负责：
 当前支持：
 - `mock`
 - `openai_chat`
+- `openai_responses`
 
 provider-specific transform 也放在这一层，而不是放到 gateway 或 router。
 
@@ -160,7 +166,7 @@ provider-specific transform 也放在这一层，而不是放到 gateway 或 rou
 
 它用于展示当前已经支持的配置组织方式，包括：
 - 一个 listener 同时挂多个 inbound
-- `openai_chat` 与 `anthropic_messages` 双入口
+- `openai_chat`、`openai_responses` 与 `anthropic_messages` 多入口
 - `failover` 与 `round_robin` 两种路由策略
 - 多个 OpenAI-compatible outbound
 - `target_model` 覆盖
@@ -241,12 +247,13 @@ listeners:
     listen: ":8080"
     inbounds:
       - "openai-entry"
+      - "responses-entry"
       - "anthropic-entry"
 ```
 
 含义：
 - 监听 `:8080`
-- 这个 listener 同时挂两个入口协议
+- 这个 listener 可以同时挂多个入口协议
 
 ### 2. inbounds
 定义入口协议、路径和 client token。
@@ -261,6 +268,13 @@ inbounds:
     clients:
       - token: "client-token"
         tag: "office"
+
+  - name: "responses-entry"
+    protocol: "openai_responses"
+    path: "/v1/responses"
+    clients:
+      - token: "responses-token"
+        tag: "responses"
 
   - name: "anthropic-entry"
     protocol: "anthropic_messages"
@@ -291,6 +305,13 @@ routing:
         - "openai-backup"
       strategy: "failover"
       target_model: "gpt-4o-mini"
+
+    - name: "responses-route"
+      from_tags:
+        - "responses"
+      to_tags:
+        - "responses-primary"
+      strategy: "failover"
 ```
 
 含义：
@@ -313,6 +334,12 @@ outbounds:
     endpoint: "https://api.openai.com/v1"
     auth_token: "sk-xxx"
     tag: "openai-primary"
+
+  - name: "responses-primary"
+    protocol: "openai_responses"
+    endpoint: "https://api.openai.com/v1"
+    auth_token: "sk-xxx"
+    tag: "responses-primary"
 ```
 
 含义：
@@ -320,6 +347,33 @@ outbounds:
 - 一个 key 对应一个 outbound
 - 不在单个 outbound 内塞多个 key
 - 多 key 轮询应该通过多个 outbound + 路由策略表达
+
+---
+
+## OpenAI Responses 兼容范围
+
+当前 `openai_responses` 走的是**最小兼容映射**，不是完整无损透传。
+
+### inbound 当前支持
+- `input` 为字符串
+- `input` 为 item 数组，其中支持：
+  - `message`
+  - `function_call`
+  - `function_call_output`
+- `message.content` 支持文本类 part：
+  - `input_text`
+  - `output_text`
+  - `text`
+
+### outbound 当前支持
+- 将 `runtime.Message` 映射到 `/responses` 的 `input`
+- 将文本响应映射回 `output[].message.content[].output_text`
+- 将工具调用映射回 `output[].function_call`
+
+### 当前限制
+- 还不支持 Responses 全量 item type
+- 当前 stream 仍是“先拿完整响应，再本地拆成事件”的兼容型伪流式
+- 更细粒度的原生事件语义暂未完全保留
 
 ---
 
@@ -356,7 +410,8 @@ curl http://127.0.0.1:8080/healthz
 ## 请求示例
 
 下面这些请求示例默认假设你已经把 `configs/config.yaml` 里的 token 改成了：
-- OpenAI 入口：`your-openai-client-token`
+- OpenAI Chat 入口：`your-openai-client-token`
+- OpenAI Responses 入口：`your-responses-client-token`
 - Anthropic 入口：`your-anthropic-client-token`
 
 请按你本地实际配置替换。
@@ -375,7 +430,7 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-### OpenAI 流式
+### OpenAI Chat 流式
 
 ```bash
 curl -N http://127.0.0.1:8080/v1/chat/completions \
@@ -386,6 +441,72 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
     "stream": true,
     "messages": [
       {"role": "user", "content": "hello"}
+    ]
+  }'
+```
+
+### OpenAI Responses
+
+```bash
+curl -s http://127.0.0.1:8080/v1/responses \
+  -H 'Authorization: Bearer your-responses-client-token' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-4o-mini",
+    "input": "hello"
+  }'
+```
+
+### OpenAI Responses 流式
+
+```bash
+curl -N http://127.0.0.1:8080/v1/responses \
+  -H 'Authorization: Bearer your-responses-client-token' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-4o-mini",
+    "stream": true,
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {"type": "input_text", "text": "hello"}
+        ]
+      }
+    ]
+  }'
+```
+
+### OpenAI Responses function calling 一轮示例
+
+```bash
+curl -s http://127.0.0.1:8080/v1/responses \
+  -H 'Authorization: Bearer your-responses-client-token' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-4o-mini",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {"type": "input_text", "text": "上海天气怎么样"}
+        ]
+      },
+      {
+        "type": "function_call",
+        "call_id": "call_123",
+        "name": "get_weather",
+        "input": {"city": "shanghai"}
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_123",
+        "output": [
+          {"type": "output_text", "text": "sunny"}
+        ]
+      }
     ]
   }'
 ```
@@ -430,8 +551,10 @@ curl -N http://127.0.0.1:8080/v1/messages \
 - tag 当前按单字符串活动 tag 处理，而不是多标签并行求值
 - `mock` outbound 主要用于打通链路与测试
 - `anthropic_messages` 当前已支持作为 inbound protocol
+- `openai_responses` 当前已支持作为 inbound 与 outbound protocol
 - 当前还没有实现 anthropic outbound provider
 - 当前流式能力以最小 SSE 闭环为主，不追求完整上游事件透传
+- Responses stream 当前是兼容型伪流式，不是上游原生 SSE 透传
 - 当前还没有实现 `.env` 自动加载与 `${VAR}` 自动展开
 
 ---
@@ -464,5 +587,6 @@ golangci-lint run
 - 更强的统计、治理与审计能力
 - 多节点串接与中继部署能力
 - 环境变量展开与更顺手的本地配置体验
+- Responses item-oriented runtime 演进
 
 但这些都会建立在当前骨架和边界继续保持清晰的前提上。
