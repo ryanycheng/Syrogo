@@ -4,7 +4,7 @@ tmp_dir = "tmp"
 [build]
 cmd = "go build -o ./tmp/syrogo ./cmd/syrogo"
 bin = "./tmp/syrogo"
-full_bin = "./tmp/syrogo -config ./configs/config.yaml"
+full_bin = "./tmp/syrogo -config ./configs/config.yaml -dev-log"
 include_dir = ["cmd", "internal", "configs"]
 include_ext = ["go", "yaml", "yml"]
 exclude_dir = ["tmp", "vendor", ".git", ".claude", "docs", "bin", "dist"]

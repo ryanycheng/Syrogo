@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -15,19 +14,43 @@ import (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{})))
+	os.Exit(runMain())
+}
 
+func runMain() int {
 	configPath := flag.String("config", "./configs/config.example.yaml", "path to config file")
+	devLog := flag.Bool("dev-log", false, "write logs to stdout and ./tmp/dev.log for local development")
 	flag.Parse()
 
-	cfg, err := config.Load(*configPath)
+	logger, closeLogger, err := newLogger(newLoggerOptions{enableDevLog: *devLog})
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{})))
+		slog.Error("initialize logger failed", slog.Any("error", err))
+		return 1
+	}
+	defer closeLogger()
+	slog.SetDefault(logger)
+
+	if *devLog {
+		slog.Info("development log enabled", slog.String("path", devLogPath))
+	}
+
+	if err := run(*configPath); err != nil {
+		slog.Error("application exited with error", slog.Any("error", err))
+		return 1
+	}
+	return 0
+}
+
+func run(configPath string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
 	}
 
 	application, err := app.New(cfg)
 	if err != nil {
-		log.Fatalf("build app: %v", err)
+		return err
 	}
 
 	errCh := make(chan error, 1)
@@ -38,21 +61,23 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
 	select {
 	case sig := <-sigCh:
 		slog.Info("shutdown signal received", "signal", sig.String())
 	case err := <-errCh:
 		if err != nil {
-			log.Fatalf("server error: %v", err)
+			return err
 		}
-		return
+		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := application.Server.Shutdown(ctx); err != nil {
-		log.Fatalf("shutdown server: %v", err)
+		return err
 	}
+	return nil
 }

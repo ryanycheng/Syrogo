@@ -404,8 +404,15 @@ make dev
 这会通过 `.air.toml` 启动 Air，并实际运行：
 
 ```bash
-./tmp/syrogo -config ./configs/config.yaml
+./tmp/syrogo -config ./configs/config.yaml -dev-log
 ```
+
+启用 `-dev-log` 后：
+- 日志会继续输出到当前终端
+- 同时追加写入 `tmp/dev.log`
+- `tmp/` 目录不存在时会自动创建
+
+这样在本地复现问题后，你可以直接查看 `tmp/dev.log`，也可以让我一起读日志定位问题。
 
 > `make dev` 依赖你本机已安装 `air`
 
@@ -415,6 +422,14 @@ make dev
 
 ```bash
 make run
+```
+
+当前 `make run` 同样会带上 `-dev-log`，因此会同时输出终端日志和 `tmp/dev.log`。
+
+如果你不想写文件日志，也可以直接手动运行：
+
+```bash
+go run ./cmd/syrogo -config ./configs/config.yaml
 ```
 
 > `cmd/syrogo/main.go` 中 `-config` 默认值仍然是 `./configs/config.example.yaml`，但本地开发建议统一通过 `make run` / `make dev` 使用你自己的 `configs/config.yaml`
