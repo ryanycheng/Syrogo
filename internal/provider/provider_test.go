@@ -188,8 +188,8 @@ func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 	if input[1].Type != "function_call" || input[1].CallID != "call_123" || input[1].Name != "get_weather" {
 		t.Fatalf("input[1] = %#v, want function_call", input[1])
 	}
-	if string(input[1].Input) != `{"city":"shanghai"}` {
-		t.Fatalf("input[1].Input = %s, want compact JSON", string(input[1].Input))
+	if input[1].Arguments != `{"city":"shanghai"}` {
+		t.Fatalf("input[1].Arguments = %s, want compact JSON string", input[1].Arguments)
 	}
 	if input[2].Type != "function_call_output" || input[2].CallID != "call_123" || input[2].Output != "sunny" {
 		t.Fatalf("input[2] = %#v, want function_call_output", input[2])
@@ -209,10 +209,10 @@ func TestDecodeOpenAIResponsesResponseMapsTextAndToolCalls(t *testing.T) {
 				Text: "hello from upstream",
 			}},
 		}, {
-			Type:   "function_call",
-			CallID: "call_123",
-			Name:   "get_weather",
-			Input:  json.RawMessage(`{"city":"shanghai"}`),
+			Type:      "function_call",
+			CallID:    "call_123",
+			Name:      "get_weather",
+			Arguments: `{"city":"shanghai"}`,
 		}},
 		Usage: &struct {
 			InputTokens  int `json:"input_tokens"`

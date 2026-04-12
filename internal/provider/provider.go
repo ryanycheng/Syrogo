@@ -71,22 +71,22 @@ type openAIResponsesTextPart struct {
 }
 
 type openAIResponsesInputItem struct {
-	Type    string                    `json:"type,omitempty"`
-	Role    string                    `json:"role,omitempty"`
-	Content []openAIResponsesTextPart `json:"content,omitempty"`
-	CallID  string                    `json:"call_id,omitempty"`
-	Name    string                    `json:"name,omitempty"`
-	Input   json.RawMessage           `json:"input,omitempty"`
-	Output  string                    `json:"output,omitempty"`
+	Type      string                    `json:"type,omitempty"`
+	Role      string                    `json:"role,omitempty"`
+	Content   []openAIResponsesTextPart `json:"content,omitempty"`
+	CallID    string                    `json:"call_id,omitempty"`
+	Name      string                    `json:"name,omitempty"`
+	Arguments string                    `json:"arguments,omitempty"`
+	Output    string                    `json:"output,omitempty"`
 }
 
 type openAIResponsesOutputItem struct {
-	Type    string                    `json:"type"`
-	Role    string                    `json:"role,omitempty"`
-	Content []openAIResponsesTextPart `json:"content,omitempty"`
-	CallID  string                    `json:"call_id,omitempty"`
-	Name    string                    `json:"name,omitempty"`
-	Input   json.RawMessage           `json:"input,omitempty"`
+	Type      string                    `json:"type"`
+	Role      string                    `json:"role,omitempty"`
+	Content   []openAIResponsesTextPart `json:"content,omitempty"`
+	CallID    string                    `json:"call_id,omitempty"`
+	Name      string                    `json:"name,omitempty"`
+	Arguments string                    `json:"arguments,omitempty"`
 }
 
 type openAIResponsesEnvelope struct {
@@ -355,10 +355,10 @@ func encodeOpenAIResponsesRequest(req runtime.Request) any {
 		case len(msg.ToolCalls) > 0:
 			for _, call := range msg.ToolCalls {
 				input = append(input, openAIResponsesInputItem{
-					Type:   "function_call",
-					CallID: call.ID,
-					Name:   call.Name,
-					Input:  json.RawMessage(call.Arguments),
+					Type:      "function_call",
+					CallID:    call.ID,
+					Name:      call.Name,
+					Arguments: compactJSONOrEmpty(json.RawMessage(call.Arguments)),
 				})
 			}
 		default:
@@ -431,7 +431,7 @@ func decodeOpenAIResponsesResponse(resp openAIResponsesEnvelope) (runtime.Respon
 				}
 			}
 		case "function_call":
-			message.ToolCalls = append(message.ToolCalls, runtime.ToolCall{ID: item.CallID, Name: item.Name, Arguments: compactJSONOrEmpty(item.Input)})
+			message.ToolCalls = append(message.ToolCalls, runtime.ToolCall{ID: item.CallID, Name: item.Name, Arguments: item.Arguments})
 		}
 	}
 	if len(message.Parts) == 0 && len(message.ToolCalls) == 0 {
