@@ -385,21 +385,41 @@ outbounds:
 go test ./...
 ```
 
-### 2. 准备本地配置并启动服务
+### 2. 准备本地配置
 
 ```bash
 cp configs/config.example.yaml configs/config.yaml
 ```
 
-把 `configs/config.yaml` 里的占位值替换成你自己的真实值后，再启动：
+把 `configs/config.yaml` 里的占位值替换成你自己的真实值。
+
+### 3. 开发模式启动（热重载）
+
+推荐本地开发优先使用：
 
 ```bash
-go run ./cmd/syrogo -config ./configs/config.yaml
+make dev
 ```
 
-> `-config` 默认值仍然是 `./configs/config.example.yaml`，本地联调时建议显式指定你自己的 `configs/config.yaml`
+这会通过 `.air.toml` 启动 Air，并实际运行：
 
-### 3. 健康检查
+```bash
+./tmp/syrogo -config ./configs/config.yaml
+```
+
+> `make dev` 依赖你本机已安装 `air`
+
+### 4. 单次启动
+
+如果你只是想单次启动服务排查问题，可以使用：
+
+```bash
+make run
+```
+
+> `cmd/syrogo/main.go` 中 `-config` 默认值仍然是 `./configs/config.example.yaml`，但本地开发建议统一通过 `make run` / `make dev` 使用你自己的 `configs/config.yaml`
+
+### 5. 健康检查
 
 ```bash
 curl http://127.0.0.1:8080/healthz
@@ -566,6 +586,12 @@ curl -N http://127.0.0.1:8080/v1/messages \
 ```bash
 make fmt
 make test
+make dev
+```
+
+如果你只是想单次启动当前配置，也可以使用：
+
+```bash
 make run
 ```
 
@@ -574,6 +600,8 @@ make run
 ```bash
 golangci-lint run
 ```
+
+> 热重载只替代运行流程，不替代测试或格式化。
 
 ---
 

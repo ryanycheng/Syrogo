@@ -1,5 +1,8 @@
 run:
-	go run ./cmd/syrogo -config ./configs/config.example.yaml
+	go run ./cmd/syrogo -config ./configs/config.yaml
+
+dev:
+	air -c .air.toml
 
 build:
 	go build -o ./bin/syrogo ./cmd/syrogo
