@@ -5,13 +5,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"syrogo/internal/runtime"
 )
 
-func TestEncodeOpenAIChatRequestUsesFirstTextPart(t *testing.T) {
+func TestEncodeOpenAIChatRequestUsesJoinedTextParts(t *testing.T) {
 	payload := encodeOpenAIChatRequest(runtime.Request{
 		Model: "gpt-4o-mini",
 		Messages: []runtime.Message{{
@@ -26,19 +28,155 @@ func TestEncodeOpenAIChatRequestUsesFirstTextPart(t *testing.T) {
 		}},
 	})
 
-	body, ok := payload.(map[string]any)
+	body, ok := payload.(openAIChatRequest)
 	if !ok {
-		t.Fatalf("payload type = %T, want map[string]any", payload)
+		t.Fatalf("payload type = %T, want openAIChatRequest", payload)
 	}
-	if body["model"] != "gpt-4o-mini" {
-		t.Fatalf("payload model = %#v, want gpt-4o-mini", body["model"])
+	if body.Model != "gpt-4o-mini" {
+		t.Fatalf("payload model = %#v, want gpt-4o-mini", body.Model)
 	}
-	messages, ok := body["messages"].([]openAIChatMessage)
+	messages := body.Messages
+	if len(messages) != 1 || messages[0].Role != "user" || messages[0].Content != "hello\nignored" {
+		t.Fatalf("payload messages = %#v, want single user joined message", messages)
+	}
+}
+
+func TestEncodeOpenAIChatRequestUsesSystemJoinedTextPartsAndMaxTokens(t *testing.T) {
+	payload := encodeOpenAIChatRequest(runtime.Request{
+		Model:     "gpt-4o-mini",
+		System:    "follow system",
+		MaxTokens: 512,
+		Messages: []runtime.Message{{
+			Role: runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{
+				Type: runtime.ContentPartTypeText,
+				Text: "hello",
+			}, {
+				Type: runtime.ContentPartTypeText,
+				Text: "world",
+			}},
+		}},
+	})
+
+	body, ok := payload.(openAIChatRequest)
 	if !ok {
-		t.Fatalf("payload messages type = %T, want []openAIChatMessage", body["messages"])
+		t.Fatalf("payload type = %T, want openAIChatRequest", payload)
 	}
-	if len(messages) != 1 || messages[0].Role != "user" || messages[0].Content != "hello" {
-		t.Fatalf("payload messages = %#v, want single user hello message", messages)
+	if body.MaxTokens != 512 {
+		t.Fatalf("payload max_tokens = %#v, want 512", body.MaxTokens)
+	}
+	messages := body.Messages
+	if len(messages) != 2 {
+		t.Fatalf("len(messages) = %d, want 2", len(messages))
+	}
+	if messages[0].Role != "system" || messages[0].Content != "follow system" {
+		t.Fatalf("messages[0] = %#v, want system message", messages[0])
+	}
+	if messages[1].Role != "user" || messages[1].Content != "hello\nworld" {
+		t.Fatalf("messages[1] = %#v, want joined user text", messages[1])
+	}
+}
+
+func TestEncodeOpenAIChatRequestIncludesToolDefinitions(t *testing.T) {
+	payload := encodeOpenAIChatRequest(runtime.Request{
+		Model: "gpt-4o-mini",
+		Tools: []runtime.ToolDefinition{{
+			Name:        "get_weather",
+			Description: "Query weather by city",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+		}},
+		Messages: []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}},
+	})
+
+	body, ok := payload.(openAIChatRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want openAIChatRequest", payload)
+	}
+	tools := body.Tools
+	if len(tools) != 1 {
+		t.Fatalf("len(tools) = %d, want 1", len(tools))
+	}
+	if body.ToolChoice != "auto" {
+		t.Fatalf("body.ToolChoice = %q, want auto", body.ToolChoice)
+	}
+	if tools[0].Type != "function" || tools[0].Function.Name != "get_weather" || tools[0].Function.Description != "Query weather by city" {
+		t.Fatalf("tools[0] = %#v, want encoded tool definition", tools[0])
+	}
+	if !tools[0].Function.Strict {
+		t.Fatalf("tools[0].Function.Strict = %v, want true", tools[0].Function.Strict)
+	}
+	var params map[string]any
+	if err := json.Unmarshal(tools[0].Function.Parameters, &params); err != nil {
+		t.Fatalf("json.Unmarshal(tools[0].Function.Parameters) error = %v", err)
+	}
+	if params["type"] != "object" {
+		t.Fatalf("params[type] = %#v, want object", params["type"])
+	}
+}
+
+func TestEncodeOpenAIChatRequestDropsAllClaudeCodeBuiltinTools(t *testing.T) {
+	payload := encodeOpenAIChatRequest(runtime.Request{
+		Model: "gpt-4o-mini",
+		Tools: []runtime.ToolDefinition{{
+			Name:        "CronCreate",
+			Description: "Claude Code builtin scheduler",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"cron":{"type":"string"}},"required":["cron"]}`),
+		}, {
+			Name:        "Bash",
+			Description: "Execute shell commands",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+		}, {
+			Name:        "Read",
+			Description: "Read file contents",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}`),
+		}, {
+			Name:        "Glob",
+			Description: "Find files by glob",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]}`),
+		}, {
+			Name:        "get_weather",
+			Description: "Query weather by city",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
+		}},
+	})
+
+	body, ok := payload.(openAIChatRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want openAIChatRequest", payload)
+	}
+	if len(body.Tools) != 1 {
+		t.Fatalf("len(body.Tools) = %d, want 1", len(body.Tools))
+	}
+	if body.Tools[0].Function.Name != "get_weather" {
+		t.Fatalf("body.Tools[0].Function.Name = %q, want get_weather", body.Tools[0].Function.Name)
+	}
+	if body.ToolChoice != "auto" {
+		t.Fatalf("body.ToolChoice = %q, want auto", body.ToolChoice)
+	}
+}
+
+func TestEncodeOpenAIChatRequestDropsNonObjectSchemaTools(t *testing.T) {
+	payload := encodeOpenAIChatRequest(runtime.Request{
+		Model: "gpt-4o-mini",
+		Tools: []runtime.ToolDefinition{{
+			Name:        "bad_tool",
+			Description: "Has array schema",
+			InputSchema: json.RawMessage(`{"type":"array","items":{"type":"string"}}`),
+		}},
+	})
+
+	body, ok := payload.(openAIChatRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want openAIChatRequest", payload)
+	}
+	if len(body.Tools) != 0 {
+		t.Fatalf("len(body.Tools) = %d, want 0", len(body.Tools))
+	}
+	if body.ToolChoice != "" {
+		t.Fatalf("body.ToolChoice = %q, want empty", body.ToolChoice)
 	}
 }
 
@@ -62,8 +200,11 @@ func TestEncodeOpenAIChatRequestPreservesToolCallingFields(t *testing.T) {
 		}},
 	})
 
-	body := payload.(map[string]any)
-	messages := body["messages"].([]openAIChatMessage)
+	body, ok := payload.(openAIChatRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want openAIChatRequest", payload)
+	}
+	messages := body.Messages
 	if len(messages) != 2 {
 		t.Fatalf("len(messages) = %d, want 2", len(messages))
 	}
@@ -193,6 +334,122 @@ func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 	}
 	if input[2].Type != "function_call_output" || input[2].CallID != "call_123" || input[2].Output != "sunny" {
 		t.Fatalf("input[2] = %#v, want function_call_output", input[2])
+	}
+}
+
+func TestEncodeAnthropicMessagesRequestMapsSystemToolsAndMaxTokens(t *testing.T) {
+	payload := encodeAnthropicMessagesRequest(runtime.Request{
+		Model:     "claude-sonnet-4-5",
+		System:    "be concise",
+		MaxTokens: 256,
+		Stream:    true,
+		Messages: []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}, {
+			Role: runtime.MessageRoleAssistant,
+			ToolCalls: []runtime.ToolCall{{
+				ID:        "tool_123",
+				Name:      "get_weather",
+				Arguments: `{"city":"shanghai"}`,
+			}},
+		}, {
+			Role:       runtime.MessageRoleTool,
+			ToolCallID: "tool_123",
+			Parts:      []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "sunny"}},
+		}},
+	})
+
+	body, ok := payload.(anthropicMessagesRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want anthropicMessagesRequest", payload)
+	}
+	if body.Model != "claude-sonnet-4-5" || body.System != "be concise" || body.MaxTokens != 256 || !body.Stream {
+		t.Fatalf("payload header = %#v, want model/system/max_tokens/stream preserved", body)
+	}
+	if len(body.Messages) != 3 {
+		t.Fatalf("len(body.Messages) = %d, want 3", len(body.Messages))
+	}
+	if body.Messages[0].Role != "user" || body.Messages[0].Content[0].Type != "text" || body.Messages[0].Content[0].Text != "hello" {
+		t.Fatalf("body.Messages[0] = %#v, want user text", body.Messages[0])
+	}
+	if body.Messages[1].Content[0].Type != "tool_use" || body.Messages[1].Content[0].ID != "tool_123" || body.Messages[1].Content[0].Name != "get_weather" {
+		t.Fatalf("body.Messages[1] = %#v, want assistant tool_use", body.Messages[1])
+	}
+	if body.Messages[2].Role != "user" || body.Messages[2].Content[0].Type != "tool_result" || body.Messages[2].Content[0].ToolUseID != "tool_123" {
+		t.Fatalf("body.Messages[2] = %#v, want user tool_result", body.Messages[2])
+	}
+}
+
+func TestEncodeAnthropicMessagesRequestIncludesToolDefinitions(t *testing.T) {
+	payload := encodeAnthropicMessagesRequest(runtime.Request{
+		Model:     "claude-sonnet-4-5",
+		MaxTokens: 256,
+		Tools: []runtime.ToolDefinition{{
+			Name:        "get_weather",
+			Description: "Query weather by city",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+		}},
+		Messages: []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}},
+	})
+
+	body, ok := payload.(anthropicMessagesRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want anthropicMessagesRequest", payload)
+	}
+	if len(body.Tools) != 1 {
+		t.Fatalf("len(body.Tools) = %d, want 1", len(body.Tools))
+	}
+	if body.Tools[0].Name != "get_weather" || body.Tools[0].Description != "Query weather by city" {
+		t.Fatalf("body.Tools[0] = %#v, want encoded anthropic tool definition", body.Tools[0])
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(body.Tools[0].InputSchema, &schema); err != nil {
+		t.Fatalf("json.Unmarshal(body.Tools[0].InputSchema) error = %v", err)
+	}
+	if schema["type"] != "object" {
+		t.Fatalf("schema[type] = %#v, want object", schema["type"])
+	}
+}
+
+func TestDecodeAnthropicMessagesResponseMapsTextToolCallsUsageAndStopReason(t *testing.T) {
+	resp, err := decodeAnthropicMessagesResponse(anthropicMessagesEnvelope{
+		ID:         "msg_123",
+		Type:       "message",
+		Role:       "assistant",
+		Model:      "claude-sonnet-4-5",
+		StopReason: "max_tokens",
+		Content: []anthropicContentBlock{{
+			Type: "text",
+			Text: "hello from upstream",
+		}, {
+			Type:  "tool_use",
+			ID:    "tool_123",
+			Name:  "get_weather",
+			Input: json.RawMessage(`{"city":"shanghai"}`),
+		}},
+		Usage: &struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		}{InputTokens: 10, OutputTokens: 5},
+	})
+	if err != nil {
+		t.Fatalf("decodeAnthropicMessagesResponse() error = %v", err)
+	}
+	if resp.FinishReason != runtime.FinishReasonLength {
+		t.Fatalf("resp.FinishReason = %q, want length", resp.FinishReason)
+	}
+	if len(resp.Message.Parts) != 1 || resp.Message.Parts[0].Text != "hello from upstream" {
+		t.Fatalf("resp.Message.Parts = %#v, want decoded text", resp.Message.Parts)
+	}
+	if len(resp.Message.ToolCalls) != 1 || resp.Message.ToolCalls[0].ID != "tool_123" {
+		t.Fatalf("resp.Message.ToolCalls = %#v, want decoded tool call", resp.Message.ToolCalls)
+	}
+	if resp.Usage == nil || resp.Usage.TotalTokens != 15 {
+		t.Fatalf("resp.Usage = %#v, want total tokens 15", resp.Usage)
 	}
 }
 
@@ -345,6 +602,120 @@ func TestOpenAIResponsesCompatibleStreamCompletionEmitsToolCallDelta(t *testing.
 	}
 }
 
+func TestAnthropicMessagesCompatibleChatCompletionSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" {
+			t.Fatalf("path = %q, want /messages", r.URL.Path)
+		}
+		if got := r.Header.Get("x-api-key"); got != "test-key" {
+			t.Fatalf("x-api-key = %q, want test-key", got)
+		}
+		if got := r.Header.Get("anthropic-version"); got != "2023-06-01" {
+			t.Fatalf("anthropic-version = %q, want 2023-06-01", got)
+		}
+
+		var req anthropicMessagesRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		if req.Model != "claude-sonnet-4-5" || req.System != "be concise" || req.MaxTokens != 256 {
+			t.Fatalf("req = %#v, want model/system/max_tokens preserved", req)
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_123",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       req.Model,
+			"stop_reason": "end_turn",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "hello from upstream",
+			}},
+			"usage": map[string]any{
+				"input_tokens":  10,
+				"output_tokens": 5,
+			},
+		})
+	}))
+	defer server.Close()
+
+	p := NewAnthropicMessagesCompatible("anthropic", server.URL, []string{"test-key"}, server.Client())
+	resp, err := p.ChatCompletion(context.Background(), runtime.Request{
+		Model:     "claude-sonnet-4-5",
+		System:    "be concise",
+		MaxTokens: 256,
+		Messages: []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if got := resp.Message.Parts[0].Text; got != "hello from upstream" {
+		t.Fatalf("resp.Message.Parts[0].Text = %q, want hello from upstream", got)
+	}
+	if resp.Usage == nil || resp.Usage.TotalTokens != 15 {
+		t.Fatalf("resp.Usage = %#v, want total tokens 15", resp.Usage)
+	}
+}
+
+func TestAnthropicMessagesCompatibleChatCompletionQuotaExceeded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	p := NewAnthropicMessagesCompatible("anthropic", server.URL, []string{"test-key"}, server.Client())
+	_, err := p.ChatCompletion(context.Background(), runtime.Request{Model: "claude-sonnet-4-5"})
+	if err == nil {
+		t.Fatal("ChatCompletion() error = nil, want error")
+	}
+	if NormalizeError(err) != ErrorKindQuotaExceeded {
+		t.Fatalf("NormalizeError() = %q, want quota_exceeded", NormalizeError(err))
+	}
+}
+
+func TestAnthropicMessagesCompatibleStreamCompletionEmitsToolCallDelta(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_123",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       "claude-sonnet-4-5",
+			"stop_reason": "tool_use",
+			"content": []map[string]any{{
+				"type":  "tool_use",
+				"id":    "tool_123",
+				"name":  "get_weather",
+				"input": map[string]any{"city": "shanghai"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewAnthropicMessagesCompatible("anthropic", server.URL, []string{"test-key"}, server.Client())
+	ch, err := p.StreamCompletion(context.Background(), runtime.Request{Model: "claude-sonnet-4-5"})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+
+	var toolEvent *runtime.StreamEvent
+	for event := range ch {
+		if event.ToolCall != nil {
+			e := event
+			toolEvent = &e
+		}
+	}
+	if toolEvent == nil {
+		t.Fatal("toolEvent = nil, want tool call delta")
+	}
+	if toolEvent.ToolCall.ID != "tool_123" || toolEvent.ToolCall.Name != "get_weather" {
+		t.Fatalf("toolEvent.ToolCall = %#v, want decoded tool call", toolEvent.ToolCall)
+	}
+}
+
 func TestOpenAICompatibleChatCompletionSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
@@ -401,6 +772,69 @@ func TestOpenAICompatibleChatCompletionSuccess(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleChatCompletionWritesTraceWhenEnabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() error = %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("os.Chdir() error = %v", err)
+	}
+	defer func() { _ = os.Chdir(wd) }()
+	defer func() { _ = os.Unsetenv("SYROGO_TRACE") }()
+	if err := os.Setenv("SYROGO_TRACE", "full"); err != nil {
+		t.Fatalf("os.Setenv() error = %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-1",
+			"object": "chat.completion",
+			"model":  "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant", "content": "hello from upstream"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	ctx := context.WithValue(context.Background(), runtime.ContextKeyRequestID, "req-trace-openai")
+	p := NewOpenAICompatible("openai", server.URL, []string{"test-key"}, server.Client())
+	_, err = p.ChatCompletion(ctx, runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+
+	tracePath := filepath.Join(tmpDir, "tmp", "trace", "req-trace-openai.outbound-openai-openai_chat.json")
+	data, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%q) error = %v", tracePath, err)
+	}
+
+	var snap struct {
+		RequestID string            `json:"request_id"`
+		Protocol  string            `json:"protocol"`
+		Headers   map[string]string `json:"headers"`
+		Status    int               `json:"status"`
+	}
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if snap.RequestID != "req-trace-openai" || snap.Protocol != "openai_chat" || snap.Status != http.StatusOK {
+		t.Fatalf("trace snapshot = %#v, want request_id/protocol/status preserved", snap)
+	}
+	if snap.Headers["Authorization"] != "Bearer ***" {
+		t.Fatalf("Authorization header = %q, want Bearer ***", snap.Headers["Authorization"])
+	}
+}
+
 func TestOpenAICompatibleChatCompletionSendsToolCallingFields(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -410,6 +844,8 @@ func TestOpenAICompatibleChatCompletionSendsToolCallingFields(t *testing.T) {
 				ToolCalls  []openAIToolCall `json:"tool_calls"`
 				ToolCallID string           `json:"tool_call_id"`
 			} `json:"messages"`
+			Tools      []openAIToolDefinition `json:"tools"`
+			ToolChoice string                 `json:"tool_choice"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("Decode() error = %v", err)
@@ -422,6 +858,15 @@ func TestOpenAICompatibleChatCompletionSendsToolCallingFields(t *testing.T) {
 		}
 		if req.Messages[1].ToolCallID != "call_123" {
 			t.Fatalf("req.Messages[1].ToolCallID = %q, want call_123", req.Messages[1].ToolCallID)
+		}
+		if len(req.Tools) != 1 || req.Tools[0].Function.Name != "get_weather" {
+			t.Fatalf("req.Tools = %#v, want single get_weather tool", req.Tools)
+		}
+		if !req.Tools[0].Function.Strict {
+			t.Fatalf("req.Tools[0].Function.Strict = %v, want true", req.Tools[0].Function.Strict)
+		}
+		if req.ToolChoice != "auto" {
+			t.Fatalf("req.ToolChoice = %q, want auto", req.ToolChoice)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id":     "chatcmpl-1",
@@ -440,6 +885,11 @@ func TestOpenAICompatibleChatCompletionSendsToolCallingFields(t *testing.T) {
 	p := NewOpenAICompatible("openai", server.URL, []string{"test-key"}, server.Client())
 	_, err := p.ChatCompletion(context.Background(), runtime.Request{
 		Model: "gpt-4o-mini",
+		Tools: []runtime.ToolDefinition{{
+			Name:        "get_weather",
+			Description: "Query weather by city",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
+		}},
 		Messages: []runtime.Message{{
 			Role: runtime.MessageRoleAssistant,
 			ToolCalls: []runtime.ToolCall{{
