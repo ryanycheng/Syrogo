@@ -1,6 +1,9 @@
 package runtime
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 type ContentPartType string
 
@@ -15,6 +18,8 @@ type FinishReason string
 type StreamEventType string
 
 type RoutingStrategy string
+
+type contextKey string
 
 const (
 	ContentPartTypeText ContentPartType = "text"
@@ -42,6 +47,8 @@ const (
 
 	RoutingStrategyFailover   RoutingStrategy = "failover"
 	RoutingStrategyRoundRobin RoutingStrategy = "round_robin"
+
+	ContextKeyRequestID contextKey = "request_id"
 )
 
 type ContentPart struct {
@@ -55,6 +62,12 @@ type ToolCall struct {
 	Arguments string
 }
 
+type ToolDefinition struct {
+	Name        string
+	Description string
+	InputSchema json.RawMessage
+}
+
 type Message struct {
 	Role       MessageRole
 	Parts      []ContentPart
@@ -63,9 +76,12 @@ type Message struct {
 }
 
 type Request struct {
-	Model    string
-	Messages []Message
-	Stream   bool
+	Model     string
+	System    string
+	MaxTokens int
+	Messages  []Message
+	Tools     []ToolDefinition
+	Stream    bool
 }
 
 type Usage struct {

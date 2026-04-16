@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -268,6 +270,92 @@ func TestBuildRuntimeRequestPreservesAnthropicToolBlocks(t *testing.T) {
 	}
 }
 
+func TestBuildRuntimeRequestPreservesAnthropicTools(t *testing.T) {
+	req := inboundRequest{
+		Model: "claude-sonnet-4-5",
+		Tools: []inboundToolDefinition{{
+			Name:        "get_weather",
+			Description: "Query weather by city",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
+		}},
+		Messages: []inboundMessage{{
+			Role:    "user",
+			Content: json.RawMessage(`"hello"`),
+		}},
+	}
+
+	got, err := buildRuntimeRequest(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequest() error = %v", err)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("len(got.Tools) = %d, want 1", len(got.Tools))
+	}
+	if got.Tools[0].Name != "get_weather" || got.Tools[0].Description != "Query weather by city" {
+		t.Fatalf("got.Tools[0] = %#v, want preserved tool metadata", got.Tools[0])
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(got.Tools[0].InputSchema, &schema); err != nil {
+		t.Fatalf("json.Unmarshal(got.Tools[0].InputSchema) error = %v", err)
+	}
+	if schema["type"] != "object" {
+		t.Fatalf("schema[type] = %#v, want object", schema["type"])
+	}
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema[properties] = %#v, want object", schema["properties"])
+	}
+	city, ok := properties["city"].(map[string]any)
+	if !ok || city["type"] != "string" {
+		t.Fatalf("schema city = %#v, want string property", properties["city"])
+	}
+}
+
+func TestBuildRuntimeRequestPreservesAnthropicSystemAndMaxTokens(t *testing.T) {
+	req := inboundRequest{
+		Model:     "claude-sonnet-4-5",
+		System:    json.RawMessage(`"You are a careful assistant."`),
+		MaxTokens: 256,
+		Messages: []inboundMessage{{
+			Role:    "user",
+			Content: json.RawMessage(`"hello"`),
+		}},
+	}
+
+	got, err := buildRuntimeRequest(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequest() error = %v", err)
+	}
+	if got.System != "You are a careful assistant." {
+		t.Fatalf("got.System = %q, want preserved system prompt", got.System)
+	}
+	if got.MaxTokens != 256 {
+		t.Fatalf("got.MaxTokens = %d, want 256", got.MaxTokens)
+	}
+}
+
+func TestBuildRuntimeRequestSupportsAnthropicSystemTextBlocks(t *testing.T) {
+	req := inboundRequest{
+		Model: "claude-sonnet-4-5",
+		System: json.RawMessage(`[
+			{"type":"text","text":"You are a careful assistant."},
+			{"type":"text","text":"Answer briefly."}
+		]`),
+		Messages: []inboundMessage{{
+			Role:    "user",
+			Content: json.RawMessage(`"hello"`),
+		}},
+	}
+
+	got, err := buildRuntimeRequest(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequest() error = %v", err)
+	}
+	if got.System != "You are a careful assistant.\nAnswer briefly." {
+		t.Fatalf("got.System = %q, want joined anthropic system text blocks", got.System)
+	}
+}
+
 func TestBuildRuntimeRequestFromResponsesSupportsStringInput(t *testing.T) {
 	req := openAIResponsesRequest{
 		Model:  "gpt-4o-mini",
@@ -487,8 +575,31 @@ func TestAnthropicMessagesUsesDispatcherBackedPlan(t *testing.T) {
 	}
 }
 
-func TestAnthropicMessagesStreamsSSE(t *testing.T) {
-	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testDualProtocolInbounds(), testOutbounds())
+func TestAnthropicMessagesStreamsToolUseAndSnakeCaseUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_tool",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       "claude-sonnet-4-5",
+			"stop_reason": "tool_use",
+			"content": []map[string]any{{
+				"type":  "tool_use",
+				"id":    "toolu_123",
+				"name":  "get_weather",
+				"input": map[string]any{"city": "shanghai"},
+			}},
+			"usage": map[string]any{
+				"input_tokens":  11,
+				"output_tokens": 7,
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"anthropic": provider.NewAnthropicMessagesCompatible("anthropic", upstream.URL, []string{"test-key"}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"anthropic-tag"}, Strategy: "failover"}}}, testDualProtocolInbounds(), []config.OutboundSpec{{Name: "anthropic", Protocol: "anthropic_messages", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "anthropic-tag"}})
 	mux := http.NewServeMux()
 	h.Register(mux)
 
@@ -502,11 +613,68 @@ func TestAnthropicMessagesStreamsSSE(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"type":"message_start"`) {
-		t.Fatalf("body = %q, want anthropic message_start payload", w.Body.String())
+	got := w.Body.String()
+	if !strings.Contains(got, "event: message_start\n") || !strings.Contains(got, `"usage":{"input_tokens":11,"output_tokens":0}`) {
+		t.Fatalf("body = %q, want message_start with initial anthropic usage", got)
 	}
-	if !strings.Contains(w.Body.String(), "event: done\ndata: {}\n\n") {
-		t.Fatalf("body = %q, want anthropic done event", w.Body.String())
+	if !strings.Contains(got, "event: content_block_start\n") || !strings.Contains(got, `"type":"tool_use"`) {
+		t.Fatalf("body = %q, want anthropic tool_use frame", got)
+	}
+	if !strings.Contains(got, `"index":0`) {
+		t.Fatalf("body = %q, want content block index in anthropic frames", got)
+	}
+	if !strings.Contains(got, "event: content_block_stop\n") {
+		t.Fatalf("body = %q, want content_block_stop frame", got)
+	}
+	if !strings.Contains(got, `"input_tokens":11`) || !strings.Contains(got, `"output_tokens":7`) || strings.Contains(got, `"InputTokens"`) {
+		t.Fatalf("body = %q, want snake_case anthropic usage", got)
+	}
+	if !strings.Contains(got, `"stop_reason":"tool_use"`) {
+		t.Fatalf("body = %q, want stop_reason in message_delta", got)
+	}
+	if !strings.Contains(got, "event: message_stop\n") || !strings.Contains(got, "event: done\n") {
+		t.Fatalf("body = %q, want closing anthropic events", got)
+	}
+}
+
+func TestAnthropicMessagesStreamingAlwaysEmitsUsageShape(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_text",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       "claude-sonnet-4-5",
+			"stop_reason": "end_turn",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "hello from upstream",
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"anthropic": provider.NewAnthropicMessagesCompatible("anthropic", upstream.URL, []string{"test-key"}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"anthropic-tag"}, Strategy: "failover"}}}, testDualProtocolInbounds(), []config.OutboundSpec{{Name: "anthropic", Protocol: "anthropic_messages", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "anthropic-tag"}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "claude-sonnet-4-5", "stream": true, "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `"usage":{"input_tokens":0,"output_tokens":0}`) {
+		t.Fatalf("body = %q, want stable zero usage object for anthropic client compatibility", got)
+	}
+	if !strings.Contains(got, `"stop_reason":"stop"`) {
+		t.Fatalf("body = %q, want normalized anthropic stop reason", got)
 	}
 }
 
@@ -557,6 +725,127 @@ func TestChatCompletionsStreamsToolCallDelta(t *testing.T) {
 	}
 }
 
+func TestAnthropicMessagesWritesDebugSnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() error = %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("os.Chdir() error = %v", err)
+	}
+	defer func() { _ = os.Chdir(wd) }()
+	defer func() { _ = os.Unsetenv("SYROGO_TRACE") }()
+	if err := os.Setenv("SYROGO_TRACE", "inbound"); err != nil {
+		t.Fatalf("os.Setenv() error = %v", err)
+	}
+
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testDualProtocolInbounds(), testOutbounds())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model":      "claude-sonnet-4-5",
+		"system":     "You are a careful assistant.",
+		"max_tokens": 128,
+		"messages":   []map[string]string{{"role": "user", "content": "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+
+	matches, err := filepath.Glob(filepath.Join(tmpDir, "tmp", "trace", "*.inbound.json"))
+	if err != nil {
+		t.Fatalf("filepath.Glob() error = %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("debug snapshot count = %d, want 1", len(matches))
+	}
+
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+
+	var snap struct {
+		Path         string         `json:"path"`
+		Inbound      string         `json:"inbound"`
+		ClientTag    string         `json:"client_tag"`
+		RawBody      map[string]any `json:"raw_body"`
+		Parsed       map[string]any `json:"parsed"`
+		Runtime      map[string]any `json:"runtime"`
+		PlannedModel string         `json:"planned_model"`
+		ResolvedTo   []string       `json:"resolved_to"`
+	}
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if snap.Path != "/v1/messages" || snap.Inbound != "anthropic-entry" || snap.ClientTag != "office" {
+		t.Fatalf("snapshot meta = %#v, want anthropic request metadata", snap)
+	}
+	if snap.PlannedModel != "claude-sonnet-4-5" {
+		t.Fatalf("snap.PlannedModel = %q, want claude-sonnet-4-5", snap.PlannedModel)
+	}
+	if len(snap.ResolvedTo) != 1 || snap.ResolvedTo[0] != "mock-tag" {
+		t.Fatalf("snap.ResolvedTo = %#v, want [mock-tag]", snap.ResolvedTo)
+	}
+	if snap.RawBody["model"] != "claude-sonnet-4-5" {
+		t.Fatalf("snap.RawBody = %#v, want model preserved", snap.RawBody)
+	}
+	if snap.Parsed["system"] != "You are a careful assistant." {
+		t.Fatalf("snap.Parsed = %#v, want parsed system", snap.Parsed)
+	}
+	if snap.Runtime["system"] != "You are a careful assistant." {
+		t.Fatalf("snap.Runtime = %#v, want runtime system", snap.Runtime)
+	}
+}
+
+func TestAnthropicMessagesDebugSnapshotDisabledByDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() error = %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("os.Chdir() error = %v", err)
+	}
+	defer func() { _ = os.Chdir(wd) }()
+	defer func() { _ = os.Unsetenv("SYROGO_TRACE") }()
+	_ = os.Unsetenv("SYROGO_TRACE")
+
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testDualProtocolInbounds(), testOutbounds())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model":      "claude-sonnet-4-5",
+		"messages":   []map[string]string{{"role": "user", "content": "hello"}},
+		"max_tokens": 64,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+
+	matches, err := filepath.Glob(filepath.Join(tmpDir, "tmp", "trace", "*.inbound.json"))
+	if err != nil {
+		t.Fatalf("filepath.Glob() error = %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("debug snapshot count = %d, want 0 when trace disabled", len(matches))
+	}
+}
 func TestChatCompletionsFallsBackToBackupProvider(t *testing.T) {
 	routing := config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"primary-tag", "fallback-tag"}, Strategy: "failover"}}}
 	outbounds := []config.OutboundSpec{{Name: "primary", Protocol: "mock", Tag: "primary-tag"}, {Name: "fallback", Protocol: "mock", Tag: "fallback-tag"}}

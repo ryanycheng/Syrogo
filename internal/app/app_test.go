@@ -78,16 +78,16 @@ func TestNewSucceedsWithOpenAICompatibleProvider(t *testing.T) {
 	}
 }
 
-func TestNewSucceedsWithOpenAIResponsesProvider(t *testing.T) {
+func TestNewSucceedsWithAnthropicMessagesProvider(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Outbounds = []config.OutboundSpec{{
-		Name:      "responses",
-		Protocol:  "openai_responses",
+		Name:      "anthropic",
+		Protocol:  "anthropic_messages",
 		Endpoint:  "https://example.com/v1",
 		AuthToken: "key-1",
-		Tag:       "responses-tag",
+		Tag:       "anthropic-tag",
 	}}
-	cfg.Routing.Rules[0].ToTags = []string{"responses-tag"}
+	cfg.Routing.Rules[0].ToTags = []string{"anthropic-tag"}
 
 	app, err := New(cfg)
 	if err != nil {

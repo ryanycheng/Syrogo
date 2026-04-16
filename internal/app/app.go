@@ -27,6 +27,8 @@ func New(cfg config.Config) (*App, error) {
 			providers[spec.Name] = provider.NewOpenAICompatible(spec.Name, spec.Endpoint, []string{spec.AuthToken}, nil)
 		case "openai_responses":
 			providers[spec.Name] = provider.NewOpenAIResponsesCompatible(spec.Name, spec.Endpoint, []string{spec.AuthToken}, nil)
+		case "anthropic_messages":
+			providers[spec.Name] = provider.NewAnthropicMessagesCompatible(spec.Name, spec.Endpoint, []string{spec.AuthToken}, nil)
 		default:
 			return nil, fmt.Errorf("unsupported provider protocol %q", spec.Protocol)
 		}

@@ -1,11 +1,14 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -55,10 +58,19 @@ type inboundToolCall struct {
 	} `json:"function"`
 }
 
+type inboundToolDefinition struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"input_schema"`
+}
+
 type inboundRequest struct {
-	Model    string           `json:"model"`
-	Messages []inboundMessage `json:"messages"`
-	Stream   bool             `json:"stream"`
+	Model     string                  `json:"model"`
+	System    json.RawMessage         `json:"system"`
+	MaxTokens int                     `json:"max_tokens"`
+	Messages  []inboundMessage        `json:"messages"`
+	Tools     []inboundToolDefinition `json:"tools"`
+	Stream    bool                    `json:"stream"`
 }
 
 type openAIResponsesRequest struct {
@@ -82,6 +94,153 @@ type openAIResponsesContentPart struct {
 	Text string `json:"text,omitempty"`
 }
 
+type inboundDebugSnapshot struct {
+	RequestID    string          `json:"request_id,omitempty"`
+	Path         string          `json:"path"`
+	Inbound      string          `json:"inbound"`
+	ClientTag    string          `json:"client_tag"`
+	ReceivedAt   string          `json:"received_at"`
+	RawBody      json.RawMessage `json:"raw_body"`
+	Parsed       map[string]any  `json:"parsed,omitempty"`
+	Runtime      map[string]any  `json:"runtime,omitempty"`
+	PlannedModel string          `json:"planned_model,omitempty"`
+	ResolvedTo   []string        `json:"resolved_to,omitempty"`
+	Error        string          `json:"error,omitempty"`
+}
+
+func traceInboundEnabled() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("SYROGO_TRACE")))
+	return value == "1" || value == "full" || value == "inbound"
+}
+
+func withRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, runtime.ContextKeyRequestID, requestID)
+}
+
+func writeInboundDebugSnapshot(snapshot inboundDebugSnapshot) error {
+	if !traceInboundEnabled() {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Join("tmp", "trace"), 0o755); err != nil {
+		return err
+	}
+
+	payload, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	base := snapshot.RequestID
+	if base == "" {
+		base = time.Now().Format("20060102-150405.000")
+	}
+	fileName := fmt.Sprintf("%s.inbound.json", base)
+	return os.WriteFile(filepath.Join("tmp", "trace", fileName), payload, 0o644)
+}
+
+func debugInboundRequest(req inboundRequest) map[string]any {
+	messages := make([]map[string]any, 0, len(req.Messages))
+	for _, msg := range req.Messages {
+		entry := map[string]any{"role": msg.Role}
+		if len(msg.Content) > 0 {
+			var content any
+			if err := json.Unmarshal(msg.Content, &content); err == nil {
+				entry["content"] = content
+			} else {
+				entry["content_raw"] = string(msg.Content)
+			}
+		}
+		if len(msg.ToolCalls) > 0 {
+			entry["tool_calls"] = msg.ToolCalls
+		}
+		if msg.ToolCallID != "" {
+			entry["tool_call_id"] = msg.ToolCallID
+		}
+		messages = append(messages, entry)
+	}
+
+	tools := make([]map[string]any, 0, len(req.Tools))
+	for _, tool := range req.Tools {
+		entry := map[string]any{
+			"name":        tool.Name,
+			"description": tool.Description,
+		}
+		if len(tool.InputSchema) > 0 {
+			var schema any
+			if err := json.Unmarshal(tool.InputSchema, &schema); err == nil {
+				entry["input_schema"] = schema
+			} else {
+				entry["input_schema_raw"] = string(tool.InputSchema)
+			}
+		}
+		tools = append(tools, entry)
+	}
+
+	parsed := map[string]any{
+		"model":      req.Model,
+		"max_tokens": req.MaxTokens,
+		"stream":     req.Stream,
+		"messages":   messages,
+		"tools":      tools,
+	}
+	if len(req.System) > 0 {
+		var system any
+		if err := json.Unmarshal(req.System, &system); err == nil {
+			parsed["system"] = system
+		} else {
+			parsed["system_raw"] = string(req.System)
+		}
+	}
+	return parsed
+}
+
+func debugRuntimeRequest(req runtime.Request) map[string]any {
+	messages := make([]map[string]any, 0, len(req.Messages))
+	for _, msg := range req.Messages {
+		entry := map[string]any{"role": string(msg.Role)}
+		if len(msg.Parts) > 0 {
+			parts := make([]map[string]any, 0, len(msg.Parts))
+			for _, part := range msg.Parts {
+				parts = append(parts, map[string]any{"type": string(part.Type), "text": part.Text})
+			}
+			entry["parts"] = parts
+		}
+		if len(msg.ToolCalls) > 0 {
+			entry["tool_calls"] = msg.ToolCalls
+		}
+		if msg.ToolCallID != "" {
+			entry["tool_call_id"] = msg.ToolCallID
+		}
+		messages = append(messages, entry)
+	}
+
+	tools := make([]map[string]any, 0, len(req.Tools))
+	for _, tool := range req.Tools {
+		entry := map[string]any{
+			"name":        tool.Name,
+			"description": tool.Description,
+		}
+		if len(tool.InputSchema) > 0 {
+			var schema any
+			if err := json.Unmarshal(tool.InputSchema, &schema); err == nil {
+				entry["input_schema"] = schema
+			} else {
+				entry["input_schema_raw"] = string(tool.InputSchema)
+			}
+		}
+		tools = append(tools, entry)
+	}
+
+	return map[string]any{
+		"model":      req.Model,
+		"system":     req.System,
+		"max_tokens": req.MaxTokens,
+		"stream":     req.Stream,
+		"messages":   messages,
+		"tools":      tools,
+	}
+}
+
 func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
@@ -93,7 +252,6 @@ func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.I
 		logger:     logger,
 	}
 }
-
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/healthz", h.handleHealthz)
 	mux.HandleFunc("/", h.handleRequest)
@@ -111,6 +269,8 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	startedAt := time.Now()
 	lw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+	requestID := startedAt.Format("20060102-150405.000000000")
+	r = r.WithContext(withRequestID(r.Context(), requestID))
 
 	inbound, client, ok := h.matchInbound(r)
 	if !ok {
@@ -131,6 +291,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestLogger := h.logger.With(
+		slog.String("request_id", requestID),
 		slog.String("method", r.Method),
 		slog.String("path", r.URL.Path),
 		slog.String("inbound", inbound.Name),
@@ -356,6 +517,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *Handler) handleAnthropicMessages(w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) {
+	requestID, _ := r.Context().Value(runtime.ContextKeyRequestID).(string)
 	if r.Method != http.MethodPost {
 		logger.Warn("request rejected", slog.String("reason", "method not allowed"))
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -392,8 +554,22 @@ func (h *Handler) handleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	debugSnapshot := inboundDebugSnapshot{
+		RequestID:  requestID,
+		Path:       r.URL.Path,
+		Inbound:    inbound.Name,
+		ClientTag:  client.Tag,
+		ReceivedAt: time.Now().Format(time.RFC3339Nano),
+		RawBody:    append(json.RawMessage(nil), body...),
+		Parsed:     debugInboundRequest(req),
+	}
+
 	internalReq, err := buildRuntimeRequest(req)
 	if err != nil {
+		debugSnapshot.Error = err.Error()
+		if snapErr := writeInboundDebugSnapshot(debugSnapshot); snapErr != nil {
+			logger.Warn("anthropic debug snapshot write failed", slog.Any("error", snapErr))
+		}
 		logger.Warn("request normalize failed",
 			slog.String("model", req.Model),
 			slog.Any("error", err),
@@ -402,9 +578,14 @@ func (h *Handler) handleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	debugSnapshot.Runtime = debugRuntimeRequest(internalReq)
 
 	plan, err := h.planRequest(internalReq, inbound, client)
 	if err != nil {
+		debugSnapshot.Error = err.Error()
+		if snapErr := writeInboundDebugSnapshot(debugSnapshot); snapErr != nil {
+			logger.Warn("anthropic debug snapshot write failed", slog.Any("error", snapErr))
+		}
 		logger.Warn("request routing failed",
 			slog.String("model", req.Model),
 			slog.Any("error", err),
@@ -412,6 +593,12 @@ func (h *Handler) handleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	debugSnapshot.PlannedModel = plannedModel(plan)
+	debugSnapshot.ResolvedTo = append([]string(nil), plan.ResolvedToTags...)
+	if snapErr := writeInboundDebugSnapshot(debugSnapshot); snapErr != nil {
+		logger.Warn("anthropic debug snapshot write failed", slog.Any("error", snapErr))
+	}
+
 	logger.Info("request routed",
 		slog.String("requested_model", req.Model),
 		slog.String("planned_model", plannedModel(plan)),
@@ -441,10 +628,22 @@ func (h *Handler) handleAnthropicMessages(w http.ResponseWriter, r *http.Request
 }
 
 func buildRuntimeRequest(req inboundRequest) (runtime.Request, error) {
+	system, err := parseInboundSystem(req.System)
+	if err != nil {
+		return runtime.Request{}, err
+	}
+	tools, err := parseInboundTools(req.Tools)
+	if err != nil {
+		return runtime.Request{}, err
+	}
+
 	internalReq := runtime.Request{
-		Model:    req.Model,
-		Messages: make([]runtime.Message, 0, len(req.Messages)),
-		Stream:   req.Stream,
+		Model:     req.Model,
+		System:    system,
+		MaxTokens: req.MaxTokens,
+		Messages:  make([]runtime.Message, 0, len(req.Messages)),
+		Tools:     tools,
+		Stream:    req.Stream,
 	}
 
 	for _, msg := range req.Messages {
@@ -461,6 +660,63 @@ func buildRuntimeRequest(req inboundRequest) (runtime.Request, error) {
 	}
 
 	return internalReq, nil
+}
+
+func parseInboundSystem(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text, nil
+	}
+
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		parts := make([]string, 0, len(blocks))
+		for _, block := range blocks {
+			if block.Type == "text" {
+				parts = append(parts, block.Text)
+			}
+		}
+		if len(parts) == 0 {
+			return "", fmt.Errorf("system content must include at least one text block")
+		}
+		return strings.Join(parts, "\n"), nil
+	}
+
+	return "", fmt.Errorf("unsupported system content")
+}
+
+func parseInboundTools(raw []inboundToolDefinition) ([]runtime.ToolDefinition, error) {
+	tools := make([]runtime.ToolDefinition, 0, len(raw))
+	for _, tool := range raw {
+		if tool.Name == "" {
+			return nil, fmt.Errorf("tool name is required")
+		}
+		inputSchema := json.RawMessage(`{}`)
+		if len(tool.InputSchema) > 0 {
+			var schema any
+			if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+				return nil, fmt.Errorf("invalid tool input_schema for %q: %w", tool.Name, err)
+			}
+			encoded, err := json.Marshal(schema)
+			if err != nil {
+				return nil, fmt.Errorf("marshal tool input_schema for %q: %w", tool.Name, err)
+			}
+			inputSchema = encoded
+		}
+		tools = append(tools, runtime.ToolDefinition{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: inputSchema,
+		})
+	}
+	return tools, nil
 }
 
 func buildRuntimeRequestFromResponses(req openAIResponsesRequest) (runtime.Request, error) {
@@ -810,13 +1066,18 @@ func (h *Handler) handleAnthropicStreaming(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	allEvents := make([]runtime.StreamEvent, 0, 8)
+	for event := range events {
+		allEvents = append(allEvents, event)
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	for event := range events {
-		if err := writeSSE(w, event.Type, anthropicStreamChunk(event)); err != nil {
+	for _, frame := range anthropicStreamFrames(allEvents) {
+		if err := writeAnthropicSSE(w, frame.event, frame.payload); err != nil {
 			logger.Error("stream write failed", slog.Any("error", err))
 			return
 		}
@@ -950,14 +1211,21 @@ func writeAnthropicMessageResponse(w http.ResponseWriter, resp runtime.Response)
 		content = append(content, map[string]any{"type": "text", "text": ""})
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"id":          resp.ID,
 		"type":        "message",
 		"role":        string(resp.Message.Role),
 		"model":       resp.Model,
 		"content":     content,
 		"stop_reason": string(resp.FinishReason),
-	})
+	}
+	if resp.Usage != nil {
+		body["usage"] = map[string]any{
+			"input_tokens":  resp.Usage.InputTokens,
+			"output_tokens": resp.Usage.OutputTokens,
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func openAIStreamChunk(event runtime.StreamEvent) any {
@@ -1155,45 +1423,161 @@ func openAIResponsesStreamFrames(events <-chan runtime.StreamEvent) []openAIResp
 	return frames
 }
 
-func anthropicStreamChunk(event runtime.StreamEvent) any {
-	switch event.Type {
-	case runtime.StreamEventMessageStart:
-		return map[string]any{"type": "message_start", "message": map[string]any{"id": event.ResponseID, "role": string(event.MessageRole), "model": event.Model}}
-	case runtime.StreamEventContentDelta:
+type anthropicSSEFrame struct {
+	event   string
+	payload any
+}
+
+func anthropicStreamFrames(events []runtime.StreamEvent) []anthropicSSEFrame {
+	frames := make([]anthropicSSEFrame, 0, 8)
+	responseID := ""
+	model := ""
+	messageRole := runtime.MessageRoleAssistant
+	finishReason := runtime.FinishReasonStop
+	usage := &runtime.Usage{}
+	textBlockIndex := -1
+	nextBlockIndex := 0
+	hasToolUse := false
+
+	for _, event := range events {
+		if event.ResponseID != "" {
+			responseID = event.ResponseID
+		}
+		if event.Model != "" {
+			model = event.Model
+		}
+		if event.MessageRole != "" {
+			messageRole = event.MessageRole
+		}
+		if event.Usage != nil {
+			usage = event.Usage
+		}
+		if event.Type == runtime.StreamEventMessageEnd && event.FinishReason != "" {
+			finishReason = event.FinishReason
+		}
 		if event.ToolCall != nil {
-			var input any
-			if err := json.Unmarshal([]byte(event.ToolCall.Arguments), &input); err != nil {
-				input = map[string]any{}
-			}
-			return map[string]any{
-				"type":  "content_block_start",
-				"index": event.ToolCallIndex,
-				"content_block": map[string]any{
-					"type":  "tool_use",
-					"id":    event.ToolCall.ID,
-					"name":  event.ToolCall.Name,
-					"input": input,
-				},
-			}
+			hasToolUse = true
 		}
-		text := ""
-		if event.Delta != nil {
-			text = event.Delta.Text
-		}
-		return map[string]any{"type": "content_block_delta", "delta": map[string]any{"type": "text_delta", "text": text}}
-	case runtime.StreamEventMessageEnd:
-		return map[string]any{"type": "message_stop", "stop_reason": string(event.FinishReason)}
-	case runtime.StreamEventUsage:
-		return map[string]any{"type": "message_delta", "usage": event.Usage}
-	case runtime.StreamEventError:
-		message := "stream error"
-		if event.Err != nil {
-			message = event.Err.Error()
-		}
-		return map[string]any{"type": "error", "error": map[string]any{"message": message}}
-	default:
-		return map[string]any{"type": string(event.Type)}
 	}
+	if hasToolUse && finishReason == runtime.FinishReasonStop {
+		finishReason = "tool_use"
+	}
+
+	frames = append(frames, anthropicSSEFrame{
+		event: "message_start",
+		payload: map[string]any{
+			"type": "message_start",
+			"message": map[string]any{
+				"id":            responseID,
+				"type":          "message",
+				"role":          string(messageRole),
+				"model":         model,
+				"content":       []any{},
+				"stop_reason":   nil,
+				"stop_sequence": nil,
+				"usage": map[string]any{
+					"input_tokens":  usage.InputTokens,
+					"output_tokens": 0,
+				},
+			},
+		},
+	})
+
+	for _, event := range events {
+		switch event.Type {
+		case runtime.StreamEventContentDelta:
+			if event.Delta != nil {
+				if textBlockIndex == -1 {
+					textBlockIndex = nextBlockIndex
+					nextBlockIndex++
+					frames = append(frames, anthropicSSEFrame{
+						event: "content_block_start",
+						payload: map[string]any{
+							"type":  "content_block_start",
+							"index": textBlockIndex,
+							"content_block": map[string]any{
+								"type": "text",
+								"text": "",
+							},
+						},
+					})
+				}
+				frames = append(frames, anthropicSSEFrame{
+					event: "content_block_delta",
+					payload: map[string]any{
+						"type":  "content_block_delta",
+						"index": textBlockIndex,
+						"delta": map[string]any{"type": "text_delta", "text": event.Delta.Text},
+					},
+				})
+			}
+			if event.ToolCall != nil {
+				var input any
+				if err := json.Unmarshal([]byte(event.ToolCall.Arguments), &input); err != nil {
+					input = map[string]any{}
+				}
+				toolIndex := nextBlockIndex
+				nextBlockIndex++
+				frames = append(frames,
+					anthropicSSEFrame{
+						event: "content_block_start",
+						payload: map[string]any{
+							"type":  "content_block_start",
+							"index": toolIndex,
+							"content_block": map[string]any{
+								"type":  "tool_use",
+								"id":    event.ToolCall.ID,
+								"name":  event.ToolCall.Name,
+								"input": input,
+							},
+						},
+					},
+					anthropicSSEFrame{
+						event:   "content_block_stop",
+						payload: map[string]any{"type": "content_block_stop", "index": toolIndex},
+					},
+				)
+			}
+		case runtime.StreamEventUsage:
+			if event.Usage != nil {
+				usage = event.Usage
+			}
+		case runtime.StreamEventError:
+			message := "stream error"
+			if event.Err != nil {
+				message = event.Err.Error()
+			}
+			return append(frames, anthropicSSEFrame{
+				event:   "error",
+				payload: map[string]any{"type": "error", "error": map[string]any{"message": message}},
+			})
+		}
+	}
+
+	if textBlockIndex != -1 {
+		frames = append(frames, anthropicSSEFrame{
+			event:   "content_block_stop",
+			payload: map[string]any{"type": "content_block_stop", "index": textBlockIndex},
+		})
+	}
+
+	messageDelta := map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   string(finishReason),
+			"stop_sequence": nil,
+		},
+		"usage": map[string]any{
+			"input_tokens":  usage.InputTokens,
+			"output_tokens": usage.OutputTokens,
+		},
+	}
+	frames = append(frames,
+		anthropicSSEFrame{event: "message_delta", payload: messageDelta},
+		anthropicSSEFrame{event: "message_stop", payload: map[string]any{"type": "message_stop"}},
+	)
+
+	return frames
 }
 
 func gatewayError(err error) (int, string) {
@@ -1207,6 +1591,20 @@ func gatewayError(err error) (int, string) {
 	default:
 		return http.StatusInternalServerError, err.Error()
 	}
+}
+
+func writeAnthropicSSE(w http.ResponseWriter, event string, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\n", event); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		return err
+	}
+	return nil
 }
 
 func writeOpenAISSE(w http.ResponseWriter, payload any) error {

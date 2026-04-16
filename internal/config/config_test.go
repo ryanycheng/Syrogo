@@ -190,19 +190,29 @@ func TestConfigValidateSupportsOpenAIResponsesOutbound(t *testing.T) {
 	}
 }
 
-func TestConfigValidateOpenAIResponsesRequiresEndpointAndAuthToken(t *testing.T) {
+func TestConfigValidateSupportsAnthropicMessagesOutbound(t *testing.T) {
 	cfg := validConfig()
-	cfg.Outbounds[0] = OutboundSpec{Name: "responses", Protocol: "openai_responses", Tag: "responses-tag"}
-	cfg.Routing.Rules[0].ToTags = []string{"responses-tag"}
+	cfg.Outbounds[0] = OutboundSpec{Name: "anthropic", Protocol: "anthropic_messages", Tag: "anthropic-tag", Endpoint: "https://example.com/v1", AuthToken: "key-1"}
+	cfg.Routing.Rules[0].ToTags = []string{"anthropic-tag"}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigValidateAnthropicMessagesRequiresEndpointAndAuthToken(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0] = OutboundSpec{Name: "anthropic", Protocol: "anthropic_messages", Tag: "anthropic-tag"}
+	cfg.Routing.Rules[0].ToTags = []string{"anthropic-tag"}
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "outbounds.responses.endpoint is required" {
+	if err == nil || err.Error() != "outbounds.anthropic.endpoint is required" {
 		t.Fatalf("Validate() error = %v, want missing endpoint error", err)
 	}
 
 	cfg.Outbounds[0].Endpoint = "https://example.com/v1"
 	err = cfg.Validate()
-	if err == nil || err.Error() != "outbounds.responses.auth_token is required" {
+	if err == nil || err.Error() != "outbounds.anthropic.auth_token is required" {
 		t.Fatalf("Validate() error = %v, want missing auth_token error", err)
 	}
 }

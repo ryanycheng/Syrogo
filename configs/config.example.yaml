@@ -28,7 +28,7 @@ inbounds:
     path: "/v1/messages"
     clients:
       - token: "${SYROGO_ANTHROPIC_CLIENT_TOKEN}"
-        tag: "office"
+        tag: "anthropic"
 
 routing:
   rules:
@@ -56,6 +56,14 @@ routing:
         - "responses-primary"
       strategy: "failover"
 
+    - name: "anthropic-route"
+      from_tags:
+        - "anthropic"
+      to_tags:
+        - "anthropic-primary"
+      strategy: "failover"
+      target_model: "claude-sonnet-4-5"
+
 outbounds:
   - name: "mock"
     protocol: "mock"
@@ -78,3 +86,9 @@ outbounds:
     endpoint: "https://api.openai.com/v1"
     auth_token: "${OPENAI_RESPONSES_API_KEY_PRIMARY}"
     tag: "responses-primary"
+
+  - name: "anthropic-primary"
+    protocol: "anthropic_messages"
+    endpoint: "https://cliproxyapi.todayto.com/v1"
+    auth_token: "${ANTHROPIC_API_KEY_PRIMARY}"
+    tag: "anthropic-primary"

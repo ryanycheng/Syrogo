@@ -150,7 +150,7 @@ func (c Config) Validate() error {
 		}
 		switch outbound.Protocol {
 		case "mock":
-		case "openai_chat", "openai_responses":
+		case "openai_chat", "openai_responses", "anthropic_messages":
 			if outbound.Endpoint == "" {
 				return fmt.Errorf("outbounds.%s.endpoint is required", outbound.Name)
 			}
