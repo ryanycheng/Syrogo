@@ -6,7 +6,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 	"syrogo/internal/protocol"
-	"syrogo/internal/provider"
 )
 
 type Config struct {
@@ -143,7 +142,6 @@ func (c Config) Validate() error {
 
 	outboundNames := make(map[string]struct{}, len(c.Outbounds))
 	outboundTags := make(map[string]struct{}, len(c.Outbounds))
-	providerRegistry := provider.DefaultFactoryRegistry()
 	for _, outbound := range c.Outbounds {
 		if outbound.Name == "" {
 			return fmt.Errorf("outbounds.name is required")
@@ -151,7 +149,7 @@ func (c Config) Validate() error {
 		if outbound.Protocol == "" {
 			return fmt.Errorf("outbounds.%s.protocol is required", outbound.Name)
 		}
-		if !providerRegistry.Has(outbound.Protocol) {
+		if !protocol.IsSupportedOutbound(outbound.Protocol) {
 			return fmt.Errorf("outbounds.%s.protocol %q is unsupported", outbound.Name, outbound.Protocol)
 		}
 		if outbound.Tag == "" {

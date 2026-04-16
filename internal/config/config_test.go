@@ -102,6 +102,16 @@ func TestConfigValidateRequiresInboundProtocol(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRejectsUnsupportedInboundProtocol(t *testing.T) {
+	cfg := validConfig()
+	cfg.Inbounds[0].Protocol = "unsupported"
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "inbounds.openai-entry.protocol \"unsupported\" is unsupported" {
+		t.Fatalf("Validate() error = %v, want unsupported inbound protocol error", err)
+	}
+}
+
 func TestConfigValidateSupportsAnthropicInboundProtocol(t *testing.T) {
 	cfg := validConfig()
 	cfg.Inbounds = append(cfg.Inbounds, InboundSpec{
@@ -160,6 +170,17 @@ func TestConfigValidateRequiresOutboundTag(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil || err.Error() != "outbounds.mock.tag is required" {
 		t.Fatalf("Validate() error = %v, want missing outbound tag error", err)
+	}
+}
+
+func TestConfigValidateRejectsUnsupportedOutboundProtocol(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0] = OutboundSpec{Name: "unknown", Protocol: "unsupported", Tag: "unknown-tag"}
+	cfg.Routing.Rules[0].ToTags = []string{"unknown-tag"}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "outbounds.unknown.protocol \"unsupported\" is unsupported" {
+		t.Fatalf("Validate() error = %v, want unsupported outbound protocol error", err)
 	}
 }
 
