@@ -5,6 +5,8 @@ import (
 	"os"
 
 	"gopkg.in/yaml.v3"
+	"syrogo/internal/protocol"
+	"syrogo/internal/provider"
 )
 
 type Config struct {
@@ -95,6 +97,9 @@ func (c Config) Validate() error {
 		if inbound.Protocol == "" {
 			return fmt.Errorf("inbounds.%s.protocol is required", inbound.Name)
 		}
+		if !protocol.IsSupportedInbound(inbound.Protocol) {
+			return fmt.Errorf("inbounds.%s.protocol %q is unsupported", inbound.Name, inbound.Protocol)
+		}
 		if inbound.Path == "" {
 			return fmt.Errorf("inbounds.%s.path is required", inbound.Name)
 		}
@@ -138,12 +143,16 @@ func (c Config) Validate() error {
 
 	outboundNames := make(map[string]struct{}, len(c.Outbounds))
 	outboundTags := make(map[string]struct{}, len(c.Outbounds))
+	providerRegistry := provider.DefaultFactoryRegistry()
 	for _, outbound := range c.Outbounds {
 		if outbound.Name == "" {
 			return fmt.Errorf("outbounds.name is required")
 		}
 		if outbound.Protocol == "" {
 			return fmt.Errorf("outbounds.%s.protocol is required", outbound.Name)
+		}
+		if !providerRegistry.Has(outbound.Protocol) {
+			return fmt.Errorf("outbounds.%s.protocol %q is unsupported", outbound.Name, outbound.Protocol)
 		}
 		if outbound.Tag == "" {
 			return fmt.Errorf("outbounds.%s.tag is required", outbound.Name)
@@ -157,8 +166,6 @@ func (c Config) Validate() error {
 			if outbound.AuthToken == "" {
 				return fmt.Errorf("outbounds.%s.auth_token is required", outbound.Name)
 			}
-		default:
-			return fmt.Errorf("outbounds.%s.protocol %q is unsupported", outbound.Name, outbound.Protocol)
 		}
 		outboundNames[outbound.Name] = struct{}{}
 		outboundTags[outbound.Tag] = struct{}{}
