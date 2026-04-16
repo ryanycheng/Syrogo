@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -19,19 +18,13 @@ type App struct {
 
 func New(cfg config.Config) (*App, error) {
 	providers := make(map[string]provider.Provider, len(cfg.Outbounds))
+	registry := provider.DefaultFactoryRegistry()
 	for _, spec := range cfg.Outbounds {
-		switch spec.Protocol {
-		case "mock":
-			providers[spec.Name] = provider.NewMock(spec.Name)
-		case "openai_chat":
-			providers[spec.Name] = provider.NewOpenAICompatible(spec.Name, spec.Endpoint, []string{spec.AuthToken}, nil)
-		case "openai_responses":
-			providers[spec.Name] = provider.NewOpenAIResponsesCompatible(spec.Name, spec.Endpoint, []string{spec.AuthToken}, nil)
-		case "anthropic_messages":
-			providers[spec.Name] = provider.NewAnthropicMessagesCompatible(spec.Name, spec.Endpoint, []string{spec.AuthToken}, nil)
-		default:
-			return nil, fmt.Errorf("unsupported provider protocol %q", spec.Protocol)
+		instance, err := registry.New(spec.Protocol, spec.Name, spec.Endpoint, spec.AuthToken)
+		if err != nil {
+			return nil, err
 		}
+		providers[spec.Name] = instance
 	}
 
 	r, err := router.New(cfg.Routing, providers, cfg.Outbounds)
