@@ -19,7 +19,8 @@ Syrogo 是一个多模型 AI Gateway / Semantic Router。
 - HTTP 服务与优雅退出
 - 配置加载与校验
 - `/healthz`
-- 最小多协议入口（当前已含 `openai_chat` / `anthropic_messages`）
+- 最小多协议入口（当前已含 `openai_chat` / `openai_responses` / `anthropic_messages`）
+- 最小多协议 outbound（当前已含 `openai_chat` / `openai_responses` / `anthropic_messages`）
 - tag-first routing 与基础 failover / round_robin
 - router / provider / gateway 边界稳定
 

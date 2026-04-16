@@ -10,10 +10,10 @@
 - 服务启动与优雅退出
 - 配置加载与基础校验
 - `GET /healthz`
-- 多协议 HTTP 入口的最小闭环（当前重点是 `POST /v1/chat/completions` 与 `POST /v1/messages`）
+- 多协议 HTTP 入口的最小闭环（当前重点是 `POST /v1/chat/completions`、`POST /v1/responses` 与 `POST /v1/messages`）
 - tag-first routing：`from_tags -> to_tags`
 - 单条规则内的 `failover` / `round_robin`
-- 用 mock / OpenAI-compatible provider 打通调用链路
+- 用 mock、OpenAI-compatible provider 与 Anthropic-compatible provider 打通调用链路
 - 为后续 provider-specific transform 预留清晰位置
 
 ## Not priorities for now

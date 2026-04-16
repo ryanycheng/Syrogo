@@ -46,21 +46,24 @@ Syrogo 是一个面向多模型场景的 AI Gateway / Semantic Router。
   - `mock`
   - `openai_chat`
   - `openai_responses`
+  - `anthropic_messages`
 - OpenAI-compatible 上游调用
+- Anthropic-compatible 上游调用
 - 基础流式 SSE 返回
 - 最小 tool calling 映射闭环
+- Anthropic inbound 调试快照落盘
 - 单元测试、回归测试与关键链路测试
 
 ---
 
 ## 当前不在范围内
 
-当前阶段还**不追求**：
+当前还**不追求**：
 
 - 复杂插件系统
 - gRPC / MCP / WebSocket 等额外接入方式
 - 完整 semantic routing 能力
-- 完整 Anthropic 上游透传
+- Anthropic 上游原生 SSE 逐事件透传
 - multimodal 全量支持
 - Responses API 全量 item type 无损透传
 - 对外 Go SDK 或 `pkg` 级公共库抽象
@@ -129,6 +132,13 @@ client request
 - 路由上下文 `RouteContext`
 - 执行计划 `ExecutionPlan`
 
+当前请求层已承接最小公共字段，例如：
+- `model`
+- `messages`
+- `system`
+- `max_tokens`
+- `stream`
+
 这里尽量不放 OpenAI / Anthropic 的专属结构。
 
 ### 3. routing
@@ -152,6 +162,7 @@ provider 负责：
 - `mock`
 - `openai_chat`
 - `openai_responses`
+- `anthropic_messages`
 
 provider-specific transform 也放在这一层，而不是放到 gateway 或 router。
 
@@ -169,6 +180,7 @@ provider-specific transform 也放在这一层，而不是放到 gateway 或 rou
 - `openai_chat`、`openai_responses` 与 `anthropic_messages` 多入口
 - `failover` 与 `round_robin` 两种路由策略
 - 多个 OpenAI-compatible outbound
+- Anthropic-compatible outbound
 - `target_model` 覆盖
 
 这个文件偏“展示当前能力边界”，适合阅读和参考，不建议直接拿来作为你的本地手测配置。
@@ -340,6 +352,12 @@ outbounds:
     endpoint: "https://api.openai.com/v1"
     auth_token: "sk-xxx"
     tag: "responses-primary"
+
+  - name: "anthropic-primary"
+    protocol: "anthropic_messages"
+    endpoint: "https://cliproxyapi.todayto.com/v1"
+    auth_token: "sk-ant-xxx"
+    tag: "anthropic-primary"
 ```
 
 含义：
@@ -347,8 +365,6 @@ outbounds:
 - 一个 key 对应一个 outbound
 - 不在单个 outbound 内塞多个 key
 - 多 key 轮询应该通过多个 outbound + 路由策略表达
-
----
 
 ## OpenAI Responses 兼容范围
 
@@ -374,6 +390,19 @@ outbounds:
 - 还不支持 Responses 全量 item type
 - 当前 stream 仍是“先拿完整响应，再本地拆成事件”的兼容型伪流式
 - 更细粒度的原生事件语义暂未完全保留
+
+### Anthropic 调试快照
+
+当你在排查 `POST /v1/messages` 的兼容性问题时，Syrogo 会在 `tmp/` 下写入 `anthropic-inbound-*.json`。
+
+快照里会包含：
+- 原始请求体 `raw_body`
+- 解析后的请求结构 `parsed`
+- 转换后的中立请求 `runtime`
+- 命中的 `planned_model`
+- 路由解析后的 `resolved_to`
+
+这适合用于核对客户端真实入参与 gateway / runtime 的转换结果。
 
 ---
 
@@ -585,9 +614,10 @@ curl -N http://127.0.0.1:8080/v1/messages \
 - `clients` 当前是 `token + tag`
 - tag 当前按单字符串活动 tag 处理，而不是多标签并行求值
 - `mock` outbound 主要用于打通链路与测试
-- `anthropic_messages` 当前已支持作为 inbound protocol
+- `anthropic_messages` 当前已支持作为 inbound 与 outbound protocol
+- Anthropic stream 当前是兼容型伪流式，会输出 Anthropic 风格事件序列，但不是上游原生 SSE 透传
+- 调试 Anthropic 入口请求时，会在 `tmp/` 下写入 `anthropic-inbound-*.json` 快照
 - `openai_responses` 当前已支持作为 inbound 与 outbound protocol
-- 当前还没有实现 anthropic outbound provider
 - 当前流式能力以最小 SSE 闭环为主，不追求完整上游事件透传
 - Responses stream 当前是兼容型伪流式，不是上游原生 SSE 透传
 - 当前还没有实现 `.env` 自动加载与 `${VAR}` 自动展开
