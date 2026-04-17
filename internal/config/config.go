@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"gopkg.in/yaml.v3"
 	"syrogo/internal/protocol"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {

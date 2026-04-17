@@ -36,11 +36,11 @@ const (
 	FallbackOnRetryable     FallbackCondition = "retryable"
 	FallbackOnQuotaExceeded FallbackCondition = "quota_exceeded"
 
-	FinishReasonStop     FinishReason = "stop"
-	FinishReasonLength   FinishReason = "length"
-	FinishReasonError    FinishReason = "error"
-	FinishReasonToolUse  FinishReason = "tool_use"
-	FinishReasonEndTurn  FinishReason = "end_turn"
+	FinishReasonStop    FinishReason = "stop"
+	FinishReasonLength  FinishReason = "length"
+	FinishReasonError   FinishReason = "error"
+	FinishReasonToolUse FinishReason = "tool_use"
+	FinishReasonEndTurn FinishReason = "end_turn"
 
 	StreamEventMessageStart StreamEventType = "message_start"
 	StreamEventContentDelta StreamEventType = "content_delta"
