@@ -537,6 +537,113 @@ func TestBuildRuntimeRequestFromResponsesSupportsStringInput(t *testing.T) {
 	}
 }
 
+func TestBuildRuntimeRequestFromResponsesFunctionOutputDropsNonTextParts(t *testing.T) {
+	req := openAIResponsesRequest{
+		Model: "gpt-4o-mini",
+		Input: json.RawMessage(`[
+			{"type":"function_call_output","call_id":"call_123","output":[
+				{"type":"output_text","text":"partial text"},
+				{"type":"json","value":{"city":"shanghai"}}
+			]}
+		]`),
+	}
+
+	got, err := buildRuntimeRequestFromResponses(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequestFromResponses() error = %v", err)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("len(got.Messages) = %d, want 1", len(got.Messages))
+	}
+	if got.Messages[0].Role != runtime.MessageRoleTool {
+		t.Fatalf("got.Messages[0].Role = %q, want tool", got.Messages[0].Role)
+	}
+	if got.Messages[0].ToolCallID != "call_123" {
+		t.Fatalf("got.Messages[0].ToolCallID = %q, want call_123", got.Messages[0].ToolCallID)
+	}
+	if len(got.Messages[0].Parts) != 1 {
+		t.Fatalf("len(got.Messages[0].Parts) = %d, want 1", len(got.Messages[0].Parts))
+	}
+	if got.Messages[0].Parts[0].Type != runtime.ContentPartTypeText || got.Messages[0].Parts[0].Text != "partial text" {
+		t.Fatalf("got.Messages[0].Parts = %#v, want only text part preserved", got.Messages[0].Parts)
+	}
+}
+
+func TestBuildRuntimeRequestPreservesAnthropicMixedToolResultContentOrder(t *testing.T) {
+	req := inboundRequest{
+		Model: "claude-sonnet-4-5",
+		Messages: []inboundMessage{{
+			Role: "tool",
+			Content: json.RawMessage(`[
+				{"type":"tool_result","tool_use_id":"toolu_123","content":[
+					{"type":"text","text":"lookup failed"},
+					{"type":"json","value":{"city":"shanghai","forecast":"sunny"}}
+				]}
+			]`),
+		}},
+	}
+
+	got, err := buildRuntimeRequest(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequest() error = %v", err)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("len(got.Messages) = %d, want 1", len(got.Messages))
+	}
+	if got.Messages[0].ToolCallID != "toolu_123" {
+		t.Fatalf("got.Messages[0].ToolCallID = %q, want toolu_123", got.Messages[0].ToolCallID)
+	}
+	if len(got.Messages[0].Parts) != 2 {
+		t.Fatalf("len(got.Messages[0].Parts) = %d, want 2", len(got.Messages[0].Parts))
+	}
+	if got.Messages[0].Parts[0].Type != runtime.ContentPartTypeText || got.Messages[0].Parts[0].Text != "lookup failed" {
+		t.Fatalf("got.Messages[0].Parts[0] = %#v, want first text part", got.Messages[0].Parts[0])
+	}
+	if got.Messages[0].Parts[1].Type != runtime.ContentPartTypeJSON {
+		t.Fatalf("got.Messages[0].Parts[1].Type = %q, want json", got.Messages[0].Parts[1].Type)
+	}
+	if string(got.Messages[0].Parts[1].Data) != `{"city":"shanghai","forecast":"sunny"}` {
+		t.Fatalf("got.Messages[0].Parts[1].Data = %s, want raw json payload", got.Messages[0].Parts[1].Data)
+	}
+}
+
+func TestBuildRuntimeRequestAnthropicMixedAssistantContentSplitsTextAndToolCall(t *testing.T) {
+	req := inboundRequest{
+		Model: "claude-sonnet-4-5",
+		Messages: []inboundMessage{{
+			Role: "assistant",
+			Content: json.RawMessage(`[
+				{"type":"text","text":"thinking"},
+				{"type":"tool_use","id":"toolu_123","name":"get_weather","input":{"city":"shanghai"}},
+				{"type":"text","text":"done"}
+			]`),
+		}},
+	}
+
+	got, err := buildRuntimeRequest(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequest() error = %v", err)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("len(got.Messages) = %d, want 1", len(got.Messages))
+	}
+	if got.Messages[0].Role != runtime.MessageRoleAssistant {
+		t.Fatalf("got.Messages[0].Role = %q, want assistant", got.Messages[0].Role)
+	}
+	if len(got.Messages[0].Parts) != 2 {
+		t.Fatalf("len(got.Messages[0].Parts) = %d, want 2", len(got.Messages[0].Parts))
+	}
+	if got.Messages[0].Parts[0].Text != "thinking" || got.Messages[0].Parts[1].Text != "done" {
+		t.Fatalf("got.Messages[0].Parts = %#v, want preserved text parts", got.Messages[0].Parts)
+	}
+	if len(got.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("len(got.Messages[0].ToolCalls) = %d, want 1", len(got.Messages[0].ToolCalls))
+	}
+	if got.Messages[0].ToolCalls[0].ID != "toolu_123" || got.Messages[0].ToolCalls[0].Arguments != `{"city":"shanghai"}` {
+		t.Fatalf("got.Messages[0].ToolCalls = %#v, want preserved tool call", got.Messages[0].ToolCalls)
+	}
+}
+
 func TestBuildRuntimeRequestFromResponsesSupportsItemArray(t *testing.T) {
 	req := openAIResponsesRequest{
 		Model: "gpt-4o-mini",
