@@ -105,9 +105,6 @@ func TestEncodeOpenAIChatRequestIncludesToolDefinitions(t *testing.T) {
 	if tools[0].Type != "function" || tools[0].Function.Name != "get_weather" || tools[0].Function.Description != "Query weather by city" {
 		t.Fatalf("tools[0] = %#v, want encoded tool definition", tools[0])
 	}
-	if !tools[0].Function.Strict {
-		t.Fatalf("tools[0].Function.Strict = %v, want true", tools[0].Function.Strict)
-	}
 	var params map[string]any
 	if err := json.Unmarshal(tools[0].Function.Parameters, &params); err != nil {
 		t.Fatalf("json.Unmarshal(tools[0].Function.Parameters) error = %v", err)
@@ -117,25 +114,21 @@ func TestEncodeOpenAIChatRequestIncludesToolDefinitions(t *testing.T) {
 	}
 }
 
-func TestEncodeOpenAIChatRequestDropsAllClaudeCodeBuiltinTools(t *testing.T) {
+func TestEncodeOpenAIChatRequestDropsClaudeCodeBuiltinTools(t *testing.T) {
 	payload := encodeOpenAIChatRequest(runtime.Request{
 		Model: "gpt-4o-mini",
 		Tools: []runtime.ToolDefinition{{
 			Name:        "CronCreate",
-			Description: "Claude Code builtin scheduler",
+			Description: "Claude Code control scheduler",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"cron":{"type":"string"}},"required":["cron"]}`),
-		}, {
-			Name:        "Bash",
-			Description: "Execute shell commands",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
 		}, {
 			Name:        "Read",
 			Description: "Read file contents",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}`),
 		}, {
-			Name:        "Glob",
-			Description: "Find files by glob",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]}`),
+			Name:        "TodoWrite",
+			Description: "Manage todo list",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"todos":{"type":"array"}},"required":["todos"]}`),
 		}, {
 			Name:        "get_weather",
 			Description: "Query weather by city",
@@ -228,7 +221,8 @@ func TestDecodeOpenAIChatResponseMapsAssistantMessage(t *testing.T) {
 		Object: "chat.completion",
 		Model:  "gpt-4o-mini",
 		Choices: []struct {
-			Message openAIChatMessage `json:"message"`
+			FinishReason string            `json:"finish_reason"`
+			Message      openAIChatMessage `json:"message"`
 		}{
 			{Message: openAIChatMessage{Role: "assistant", Content: "hello from upstream"}},
 		},
@@ -250,7 +244,8 @@ func TestDecodeOpenAIChatResponseMapsAssistantToolCalls(t *testing.T) {
 		Object: "chat.completion",
 		Model:  "gpt-4o-mini",
 		Choices: []struct {
-			Message openAIChatMessage `json:"message"`
+			FinishReason string            `json:"finish_reason"`
+			Message      openAIChatMessage `json:"message"`
 		}{
 			{Message: openAIChatMessage{
 				Role: "assistant",
@@ -274,24 +269,36 @@ func TestDecodeOpenAIChatResponseMapsAssistantToolCalls(t *testing.T) {
 	if resp.Message.ToolCalls[0].ID != "call_123" || resp.Message.ToolCalls[0].Name != "get_weather" {
 		t.Fatalf("resp.Message.ToolCalls = %#v, want decoded tool call", resp.Message.ToolCalls)
 	}
+	if resp.FinishReason != runtime.FinishReasonToolUse {
+		t.Fatalf("resp.FinishReason = %q, want tool_use", resp.FinishReason)
+	}
 }
 
-func TestDecodeOpenAIChatResponseRejectsEmptyAssistantMessage(t *testing.T) {
-	_, err := decodeOpenAIChatResponse(openAIChatResponseEnvelope{
-		ID:     "chatcmpl-1",
-		Object: "chat.completion",
-		Model:  "gpt-4o-mini",
-		Choices: []struct {
-			Message openAIChatMessage `json:"message"`
-		}{
-			{Message: openAIChatMessage{Role: "assistant"}},
-		},
+func TestEncodeOpenAIChatRequestPreservesJSONToolResultPayload(t *testing.T) {
+	payload := encodeOpenAIChatRequest(runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role:       runtime.MessageRoleTool,
+			ToolCallID: "call_123",
+			Parts: []runtime.ContentPart{{
+				Type: runtime.ContentPartTypeText,
+				Text: "lookup failed",
+			}, {
+				Type: runtime.ContentPartTypeJSON,
+				Data: json.RawMessage(`{"city":"shanghai","forecast":"sunny"}`),
+			}},
+		}},
 	})
-	if err == nil {
-		t.Fatal("decodeOpenAIChatResponse() error = nil, want error")
+
+	body := payload.(openAIChatRequest)
+	if len(body.Messages) != 1 {
+		t.Fatalf("len(body.Messages) = %d, want 1", len(body.Messages))
 	}
-	if got := err.Error(); got != "upstream returned no content and no tool calls" {
-		t.Fatalf("decodeOpenAIChatResponse() error = %q, want upstream returned no content and no tool calls", got)
+	if body.Messages[0].Role != "tool" || body.Messages[0].ToolCallID != "call_123" {
+		t.Fatalf("body.Messages[0] = %#v, want tool message with tool_call_id", body.Messages[0])
+	}
+	if body.Messages[0].Content != "lookup failed\n{\"city\":\"shanghai\",\"forecast\":\"sunny\"}" {
+		t.Fatalf("body.Messages[0].Content = %q, want text plus compact json", body.Messages[0].Content)
 	}
 }
 
@@ -314,8 +321,8 @@ func TestEncodeOpenAIResponsesRequestKeepsOnlyFirstToolOutputTextPart(t *testing
 		}},
 	})
 
-	body := payload.(map[string]any)
-	input := body["input"].([]openAIResponsesInputItem)
+	body := payload.(openAIResponsesRequest)
+	input := body.Input
 	if len(input) != 1 {
 		t.Fatalf("len(input) = %d, want 1", len(input))
 	}
@@ -434,7 +441,18 @@ func TestDecodeOpenAIResponsesResponseDropsEmptyTextParts(t *testing.T) {
 
 func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 	payload := encodeOpenAIResponsesRequest(runtime.Request{
-		Model: "gpt-4o-mini",
+		Model:     "gpt-4o-mini",
+		System:    "be concise",
+		MaxTokens: 256,
+		Tools: []runtime.ToolDefinition{{
+			Name:        "Read",
+			Description: "Read file contents",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}`),
+		}, {
+			Name:        "get_weather",
+			Description: "Query weather by city",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
+		}},
 		Messages: []runtime.Message{{
 			Role:  runtime.MessageRoleUser,
 			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
@@ -452,8 +470,26 @@ func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 		}},
 	})
 
-	body := payload.(map[string]any)
-	input := body["input"].([]openAIResponsesInputItem)
+	body := payload.(openAIResponsesRequest)
+	if body.Model != "gpt-4o-mini" {
+		t.Fatalf("body.Model = %q, want gpt-4o-mini", body.Model)
+	}
+	if body.Instructions != "be concise" {
+		t.Fatalf("body.Instructions = %q, want be concise", body.Instructions)
+	}
+	if body.MaxOutputTokens != 256 {
+		t.Fatalf("body.MaxOutputTokens = %d, want 256", body.MaxOutputTokens)
+	}
+	if body.ToolChoice != "auto" {
+		t.Fatalf("body.ToolChoice = %#v, want auto", body.ToolChoice)
+	}
+	if len(body.Tools) != 2 {
+		t.Fatalf("len(body.Tools) = %d, want 2", len(body.Tools))
+	}
+	if body.Tools[0].Name != "Read" || body.Tools[1].Name != "get_weather" {
+		t.Fatalf("body.Tools = %#v, want builtin Read and custom get_weather", body.Tools)
+	}
+	input := body.Input
 	if len(input) != 3 {
 		t.Fatalf("len(input) = %d, want 3", len(input))
 	}
@@ -674,14 +710,7 @@ func TestOpenAIResponsesCompatibleChatCompletionSuccess(t *testing.T) {
 			t.Fatalf("Authorization = %q, want Bearer test-key", got)
 		}
 
-		var req struct {
-			Model string `json:"model"`
-			Input []struct {
-				Type    string                    `json:"type"`
-				Role    string                    `json:"role"`
-				Content []openAIResponsesTextPart `json:"content"`
-			} `json:"input"`
-		}
+		var req openAIResponsesRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("Decode() error = %v", err)
 		}
@@ -1022,9 +1051,6 @@ func TestOpenAICompatibleChatCompletionSendsToolCallingFields(t *testing.T) {
 		}
 		if len(req.Tools) != 1 || req.Tools[0].Function.Name != "get_weather" {
 			t.Fatalf("req.Tools = %#v, want single get_weather tool", req.Tools)
-		}
-		if !req.Tools[0].Function.Strict {
-			t.Fatalf("req.Tools[0].Function.Strict = %v, want true", req.Tools[0].Function.Strict)
 		}
 		if req.ToolChoice != "auto" {
 			t.Fatalf("req.ToolChoice = %q, want auto", req.ToolChoice)

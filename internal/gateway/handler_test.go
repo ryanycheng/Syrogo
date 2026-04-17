@@ -271,11 +271,75 @@ func TestBuildRuntimeRequestPreservesAnthropicToolBlocks(t *testing.T) {
 	}
 }
 
+func TestBuildRuntimeRequestNormalizesAnthropicUserToolResultToToolMessage(t *testing.T) {
+	req := inboundRequest{
+		Model: "claude-sonnet-4-5",
+		Messages: []inboundMessage{{
+			Role: "assistant",
+			Content: json.RawMessage(`[
+				{"type":"tool_use","id":"call_123","name":"Read","input":{"file_path":"/tmp/x"}}
+			]`),
+		}, {
+			Role: "user",
+			Content: json.RawMessage(`[
+				{"type":"tool_result","tool_use_id":"call_123","content":"MIT License","is_error":false}
+			]`),
+		}},
+	}
+
+	got, err := buildRuntimeRequest(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequest() error = %v", err)
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("len(Messages) = %d, want 2", len(got.Messages))
+	}
+	if got.Messages[1].Role != runtime.MessageRoleTool {
+		t.Fatalf("Messages[1].Role = %q, want tool", got.Messages[1].Role)
+	}
+	if got.Messages[1].ToolCallID != "call_123" {
+		t.Fatalf("Messages[1].ToolCallID = %q, want call_123", got.Messages[1].ToolCallID)
+	}
+	if len(got.Messages[1].Parts) != 1 || got.Messages[1].Parts[0].Text != "MIT License" {
+		t.Fatalf("Messages[1].Parts = %#v, want MIT License", got.Messages[1].Parts)
+	}
+}
+
+func TestBuildRuntimeRequestSplitsAnthropicUserToolResultsIntoSeparateToolMessages(t *testing.T) {
+	req := inboundRequest{
+		Model: "claude-sonnet-4-5",
+		Messages: []inboundMessage{{
+			Role: "user",
+			Content: json.RawMessage(`[
+				{"type":"tool_result","tool_use_id":"call_todo","content":"todo error","is_error":true},
+				{"type":"tool_result","tool_use_id":"call_read","content":"read error","is_error":true}
+			]`),
+		}},
+	}
+
+	got, err := buildRuntimeRequest(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequest() error = %v", err)
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("len(Messages) = %d, want 2", len(got.Messages))
+	}
+	if got.Messages[0].Role != runtime.MessageRoleTool || got.Messages[1].Role != runtime.MessageRoleTool {
+		t.Fatalf("Messages roles = %#v, want two tool messages", []runtime.MessageRole{got.Messages[0].Role, got.Messages[1].Role})
+	}
+	if got.Messages[0].ToolCallID != "call_todo" || got.Messages[1].ToolCallID != "call_read" {
+		t.Fatalf("Messages ToolCallID = %#v, want split tool ids", []string{got.Messages[0].ToolCallID, got.Messages[1].ToolCallID})
+	}
+	if got.Messages[0].Parts[0].Text != "todo error" || got.Messages[1].Parts[0].Text != "read error" {
+		t.Fatalf("Messages Parts = %#v, want preserved tool results", []string{got.Messages[0].Parts[0].Text, got.Messages[1].Parts[0].Text})
+	}
+}
+
 func TestBuildRuntimeRequestPreservesAnthropicJSONToolResultPayload(t *testing.T) {
 	req := inboundRequest{
 		Model: "claude-sonnet-4-5",
 		Messages: []inboundMessage{{
-			Role: "tool",
+			Role: "user",
 			Content: json.RawMessage(`[
 				{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"json","value":{"city":"shanghai","forecast":"sunny"}}]}
 			]`),
@@ -288,6 +352,9 @@ func TestBuildRuntimeRequestPreservesAnthropicJSONToolResultPayload(t *testing.T
 	}
 	if len(got.Messages) != 1 {
 		t.Fatalf("len(Messages) = %d, want 1", len(got.Messages))
+	}
+	if got.Messages[0].Role != runtime.MessageRoleTool {
+		t.Fatalf("Messages[0].Role = %q, want tool", got.Messages[0].Role)
 	}
 	if got.Messages[0].ToolCallID != "toolu_123" {
 		t.Fatalf("Messages[0].ToolCallID = %q, want toolu_123", got.Messages[0].ToolCallID)

@@ -31,7 +31,6 @@ type openAIToolSpecDefinition struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters"`
-	Strict      bool            `json:"strict,omitempty"`
 }
 
 type openAIToolCall struct {
@@ -50,7 +49,8 @@ type openAIChatResponseEnvelope struct {
 	Object  string `json:"object"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Message openAIChatMessage `json:"message"`
+		FinishReason string            `json:"finish_reason"`
+		Message      openAIChatMessage `json:"message"`
 	} `json:"choices"`
 }
 
@@ -63,9 +63,13 @@ func encodeOpenAIChatRequest(req runtime.Request) any {
 		})
 	}
 	for _, msg := range req.Messages {
+		content := joinedTextParts(msg)
+		if msg.Role == runtime.MessageRoleTool {
+			content = joinedToolResultParts(msg)
+		}
 		encoded := openAIChatMessage{
 			Role:       string(msg.Role),
-			Content:    joinedTextParts(msg),
+			Content:    content,
 			ToolCallID: msg.ToolCallID,
 		}
 		if len(msg.ToolCalls) > 0 {
@@ -103,7 +107,6 @@ func encodeOpenAIChatRequest(req runtime.Request) any {
 					Name:        tool.Name,
 					Description: tool.Description,
 					Parameters:  normalizedToolSchema(tool.InputSchema),
-					Strict:      true,
 				},
 			})
 		}
@@ -115,10 +118,7 @@ func encodeOpenAIChatRequest(req runtime.Request) any {
 }
 
 func shouldDropOpenAIChatTool(tool runtime.ToolDefinition) bool {
-	if _, ok := claudeCodeControlToolNames[tool.Name]; ok {
-		return true
-	}
-	if isClaudeCodeBuiltinToolName(tool.Name) {
+	if _, ok := claudeCodeBuiltinToolNames[tool.Name]; ok {
 		return true
 	}
 
@@ -130,15 +130,6 @@ func shouldDropOpenAIChatTool(tool runtime.ToolDefinition) bool {
 	}
 
 	return false
-}
-
-func isClaudeCodeBuiltinToolName(name string) bool {
-	switch name {
-	case "Agent", "AskUserQuestion", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterPlanMode", "EnterWorktree", "ExitPlanMode", "ExitWorktree", "Glob", "Grep", "LSP", "NotebookEdit", "Read", "ScheduleWakeup", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "WebFetch", "WebSearch", "Write", "multi_tool_use", "parallel":
-		return true
-	default:
-		return false
-	}
 }
 
 func decodeOpenAIChatResponse(resp openAIChatResponseEnvelope) (runtime.Response, error) {
@@ -167,11 +158,26 @@ func decodeOpenAIChatResponse(resp openAIChatResponseEnvelope) (runtime.Response
 		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream returned no content and no tool calls"))
 	}
 
+	finishReason := runtime.FinishReasonStop
+	if len(message.ToolCalls) > 0 {
+		finishReason = runtime.FinishReasonToolUse
+	}
+	switch resp.Choices[0].FinishReason {
+	case "tool_calls", "function_call":
+		finishReason = runtime.FinishReasonToolUse
+	case "length":
+		finishReason = runtime.FinishReasonLength
+	case "stop", "", "content_filter":
+		if len(message.ToolCalls) == 0 {
+			finishReason = runtime.FinishReasonStop
+		}
+	}
+
 	return runtime.Response{
 		ID:           resp.ID,
 		Object:       resp.Object,
 		Model:        resp.Model,
-		FinishReason: runtime.FinishReasonStop,
+		FinishReason: finishReason,
 		Message:      message,
 	}, nil
 }

@@ -627,10 +627,10 @@ claude -p "只回复 pong"
 - 后续 `tool_result` 再入站时，继续桥接到 OpenAI chat 历史消息
 
 当前明确会过滤：
-- Claude Code builtin / control tools，例如 `Bash`、`Read`、`Edit`、`Write`、`Glob`、`Grep`、`Task*`、`Cron*` 等
+- Claude Code builtin / control tools，例如 `Read`、`Bash`、`Glob`、`TodoWrite`、`Agent`、`AskUserQuestion`、`Cron*`、`EnterPlanMode`、`ExitPlanMode`、`ScheduleWakeup`、`Skill` 等
 - 非 `type: object` 的工具输入 schema
 
-也就是说，当前能力是“远端工具桥接”，不是“Syrogo 本地执行 Claude Code 工具”。
+也就是说，当前能力是“自定义 function tools 的桥接”，不会把 Claude Code 本地工具直接透传到 OpenAI Chat Completions 上游。
 
 你可以先用自定义 function tool 做验证，例如：
 
@@ -665,7 +665,7 @@ curl -s http://127.0.0.1:8080/v1/messages \
   }'
 ```
 
-如果你直接用 Claude Code 做端到端，请注意：Claude Code 自带 builtin tools 不会被透传给上游；当前更适合验证普通消息链路，或配合自定义 function tool 请求体验证 bridge 行为。
+如果你直接用 Claude Code 做端到端，请注意：Claude Code builtin tools（例如 `Read`、`Bash`、`Glob`）当前不会透传到 OpenAI Chat Completions 上游；这一桥接当前主要验证自定义 function tools 的往返行为。
 
 ### Anthropic 流式
 

@@ -458,13 +458,10 @@ func TestNewBridgesAnthropicToolsToOpenAIChatOutbound(t *testing.T) {
 		t.Fatalf("upstream tool_choice = %q, want auto", upstreamBody.ToolChoice)
 	}
 	if len(upstreamBody.Tools) != 1 {
-		t.Fatalf("len(upstream tools) = %d, want 1 after builtin filtering", len(upstreamBody.Tools))
+		t.Fatalf("len(upstream tools) = %d, want 1 after builtin-tool filtering", len(upstreamBody.Tools))
 	}
 	if upstreamBody.Tools[0].Type != "function" || upstreamBody.Tools[0].Function.Name != "get_weather" {
-		t.Fatalf("upstream tools[0] = %#v, want only custom function tool", upstreamBody.Tools[0])
-	}
-	if !upstreamBody.Tools[0].Function.Strict {
-		t.Fatalf("upstream tools[0].Function.Strict = %v, want true", upstreamBody.Tools[0].Function.Strict)
+		t.Fatalf("upstream tools[0] = %#v, want custom function tool", upstreamBody.Tools[0])
 	}
 	if !strings.Contains(w.Body.String(), `"type":"tool_use"`) || !strings.Contains(w.Body.String(), `"name":"get_weather"`) {
 		t.Fatalf("body = %q, want anthropic tool_use response", w.Body.String())
@@ -617,6 +614,141 @@ func TestNewStreamsAnthropicSSEFromListener(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"type":"message_start"`) || !strings.Contains(w.Body.String(), "event: done\ndata: {}\n\n") {
 		t.Fatalf("body = %q, want anthropic SSE lifecycle + done", w.Body.String())
+	}
+}
+
+func TestNewBridgesAnthropicToolsToOpenAIResponsesOutbound(t *testing.T) {
+	var upstreamBody struct {
+		Model           string `json:"model"`
+		Instructions    string `json:"instructions"`
+		MaxOutputTokens int    `json:"max_output_tokens"`
+		Input           []struct {
+			Type      string `json:"type"`
+			Role      string `json:"role"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+			Output    string `json:"output"`
+			Content   []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"input"`
+		Tools []struct {
+			Type        string          `json:"type"`
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			Parameters  json.RawMessage `json:"parameters"`
+		} `json:"tools"`
+		ToolChoice string `json:"tool_choice"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q, want /v1/responses", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_123",
+			"object": "response",
+			"model":  upstreamBody.Model,
+			"output": []map[string]any{{
+				"type":      "function_call",
+				"call_id":   "call_123",
+				"name":      "get_weather",
+				"arguments": `{"city":"shanghai"}`,
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds[1].Clients[0].Tag = "anthropic-to-responses"
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "anthropic-to-responses-route",
+		FromTags:    []string{"anthropic-to-responses"},
+		ToTags:      []string{"responses-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "cliproxy-responses",
+		Protocol:  "openai_responses",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "responses-primary",
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model":      "claude-sonnet-4-6",
+		"max_tokens": 256,
+		"system": []map[string]any{{
+			"type": "text",
+			"text": "You are Claude Code, Anthropic's official CLI for Claude.",
+		}},
+		"tools": []map[string]any{{
+			"name":        "Read",
+			"description": "Read file contents",
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"file_path": map[string]any{"type": "string"}},
+			},
+		}, {
+			"name":        "get_weather",
+			"description": "Get weather by city",
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"city": map[string]any{"type": "string"}},
+				"required":   []string{"city"},
+			},
+		}},
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "查询上海天气，必要时调用工具。",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("route status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if upstreamBody.Model != "gpt-5.4" {
+		t.Fatalf("upstream model = %q, want gpt-5.4", upstreamBody.Model)
+	}
+	if upstreamBody.Instructions != "You are Claude Code, Anthropic's official CLI for Claude." {
+		t.Fatalf("upstream instructions = %q, want bridged system", upstreamBody.Instructions)
+	}
+	if upstreamBody.MaxOutputTokens != 256 {
+		t.Fatalf("upstream max_output_tokens = %d, want 256", upstreamBody.MaxOutputTokens)
+	}
+	if upstreamBody.ToolChoice != "auto" {
+		t.Fatalf("upstream tool_choice = %#v, want auto", upstreamBody.ToolChoice)
+	}
+	if len(upstreamBody.Tools) != 2 {
+		t.Fatalf("len(upstream tools) = %d, want 2 including builtin Read", len(upstreamBody.Tools))
+	}
+	if upstreamBody.Tools[0].Name != "Read" || upstreamBody.Tools[1].Name != "get_weather" {
+		t.Fatalf("upstream tools = %#v, want Read and get_weather", upstreamBody.Tools)
+	}
+	if len(upstreamBody.Input) != 1 || upstreamBody.Input[0].Type != "message" || upstreamBody.Input[0].Role != "user" || upstreamBody.Input[0].Content[0].Text != "查询上海天气，必要时调用工具。" {
+		t.Fatalf("upstream input = %#v, want bridged user message", upstreamBody.Input)
+	}
+	if !strings.Contains(w.Body.String(), `"type":"tool_use"`) || !strings.Contains(w.Body.String(), `"name":"get_weather"`) {
+		t.Fatalf("body = %q, want anthropic tool_use response", w.Body.String())
 	}
 }
 

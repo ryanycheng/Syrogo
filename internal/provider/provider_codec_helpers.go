@@ -47,6 +47,23 @@ func joinedTextParts(msg runtime.Message) string {
 	return strings.Join(parts, "\n")
 }
 
+func joinedToolResultParts(msg runtime.Message) string {
+	parts := make([]string, 0, len(msg.Parts))
+	for _, part := range msg.Parts {
+		switch part.Type {
+		case runtime.ContentPartTypeText:
+			if part.Text != "" {
+				parts = append(parts, part.Text)
+			}
+		case runtime.ContentPartTypeJSON:
+			if len(part.Data) > 0 {
+				parts = append(parts, compactJSONOrEmpty(part.Data))
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 func firstTextPart(msg runtime.Message) string {
 	for _, part := range msg.Parts {
 		if part.Type == runtime.ContentPartTypeText {

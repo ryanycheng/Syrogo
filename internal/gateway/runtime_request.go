@@ -72,11 +72,11 @@ func buildSemanticRequest(req inboundRequest) (semantic.Request, error) {
 	}
 
 	for _, msg := range req.Messages {
-		turn, err := parseInboundMessage(msg)
+		turns, err := parseInboundMessages(msg)
 		if err != nil {
 			return semantic.Request{}, err
 		}
-		result.Turns = append(result.Turns, turn)
+		result.Turns = append(result.Turns, turns...)
 	}
 	return result, nil
 }
@@ -140,14 +140,14 @@ func parseInboundTools(raw []inboundToolDefinition) ([]semantic.ToolDefinition, 
 	return tools, nil
 }
 
-func parseInboundMessage(msg inboundMessage) (semantic.Turn, error) {
+func parseInboundMessages(msg inboundMessage) ([]semantic.Turn, error) {
 	segments, toolCallID, err := parseInboundContent(msg.Role, msg.Content)
 	if err != nil {
-		return semantic.Turn{}, err
+		return nil, err
 	}
 	for _, call := range msg.ToolCalls {
 		if call.Type != "" && call.Type != "function" {
-			return semantic.Turn{}, fmt.Errorf("unsupported tool call type %q", call.Type)
+			return nil, fmt.Errorf("unsupported tool call type %q", call.Type)
 		}
 		segments = append(segments, semantic.Segment{Kind: semantic.SegmentToolCall, ToolCall: &semantic.ToolCall{
 			ID:        call.ID,
@@ -158,11 +158,39 @@ func parseInboundMessage(msg inboundMessage) (semantic.Turn, error) {
 	if msg.ToolCallID != "" {
 		toolCallID = msg.ToolCallID
 	}
-	turn := semantic.Turn{Role: semantic.Role(msg.Role), Segments: segments}
-	if toolCallID != "" {
-		turn.Segments = normalizeToolTurnSegments(toolCallID, turn.Segments)
+	role := semantic.Role(msg.Role)
+	if role != semantic.RoleTool && hasMultipleToolResultSegments(segments) {
+		turns := make([]semantic.Turn, 0, len(segments))
+		for _, segment := range segments {
+			if segment.Kind == semantic.SegmentToolResult && segment.ToolResult != nil {
+				turns = append(turns, semantic.Turn{Role: semantic.RoleTool, Segments: []semantic.Segment{segment}})
+				continue
+			}
+			if len(turns) == 0 || turns[len(turns)-1].Role != role {
+				turns = append(turns, semantic.Turn{Role: role})
+			}
+			turns[len(turns)-1].Segments = append(turns[len(turns)-1].Segments, segment)
+		}
+		return turns, nil
 	}
-	return turn, nil
+	if toolCallID != "" {
+		segments = normalizeToolTurnSegments(toolCallID, segments)
+		role = semantic.RoleTool
+	}
+	return []semantic.Turn{{Role: role, Segments: segments}}, nil
+}
+
+func hasMultipleToolResultSegments(segments []semantic.Segment) bool {
+	count := 0
+	for _, segment := range segments {
+		if segment.Kind == semantic.SegmentToolResult && segment.ToolResult != nil {
+			count++
+			if count > 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func normalizeToolTurnSegments(toolCallID string, segments []semantic.Segment) []semantic.Segment {

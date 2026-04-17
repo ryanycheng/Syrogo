@@ -22,6 +22,22 @@ type openAIResponsesInputItem struct {
 	Output    string                    `json:"output,omitempty"`
 }
 
+type openAIResponsesTool struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+type openAIResponsesRequest struct {
+	Model           string                     `json:"model"`
+	Instructions    string                     `json:"instructions,omitempty"`
+	MaxOutputTokens int                        `json:"max_output_tokens,omitempty"`
+	Input           []openAIResponsesInputItem `json:"input,omitempty"`
+	Tools           []openAIResponsesTool      `json:"tools,omitempty"`
+	ToolChoice      string                     `json:"tool_choice,omitempty"`
+}
+
 type openAIResponsesOutputItem struct {
 	Type      string                    `json:"type"`
 	Role      string                    `json:"role,omitempty"`
@@ -73,10 +89,46 @@ func encodeOpenAIResponsesRequest(req runtime.Request) any {
 			})
 		}
 	}
-	return map[string]any{
-		"model": req.Model,
-		"input": input,
+
+	payload := openAIResponsesRequest{
+		Model: req.Model,
+		Input: input,
 	}
+	if req.System != "" {
+		payload.Instructions = req.System
+	}
+	if req.MaxTokens > 0 {
+		payload.MaxOutputTokens = req.MaxTokens
+	}
+	if len(req.Tools) > 0 {
+		payload.Tools = make([]openAIResponsesTool, 0, len(req.Tools))
+		for _, tool := range req.Tools {
+			if shouldDropOpenAIResponsesTool(tool) {
+				continue
+			}
+			payload.Tools = append(payload.Tools, openAIResponsesTool{
+				Type:        "function",
+				Name:        tool.Name,
+				Description: tool.Description,
+				Parameters:  normalizedToolSchema(tool.InputSchema),
+			})
+		}
+		if len(payload.Tools) > 0 {
+			payload.ToolChoice = "auto"
+		}
+	}
+	return payload
+}
+
+func shouldDropOpenAIResponsesTool(tool runtime.ToolDefinition) bool {
+	var schema map[string]any
+	if len(tool.InputSchema) > 0 && json.Unmarshal(tool.InputSchema, &schema) == nil {
+		if kind, _ := schema["type"].(string); kind != "" && kind != "object" {
+			return true
+		}
+	}
+
+	return false
 }
 
 func decodeOpenAIResponsesResponse(resp openAIResponsesEnvelope) (runtime.Response, error) {
