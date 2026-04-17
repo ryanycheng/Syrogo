@@ -178,6 +178,7 @@ provider-specific transform 也放在这一层，而不是放到 gateway 或 rou
 它用于展示当前已经支持的配置组织方式，包括：
 - 一个 listener 同时挂多个 inbound
 - `openai_chat`、`openai_responses` 与 `anthropic_messages` 多入口
+- Anthropic / Claude Code 入口桥接到 OpenAI-compatible `chat/completions`
 - `failover` 与 `round_robin` 两种路由策略
 - 多个 OpenAI-compatible outbound
 - Anthropic-compatible outbound
@@ -317,6 +318,15 @@ routing:
         - "openai-backup"
       strategy: "failover"
       target_model: "gpt-4o-mini"
+
+    - name: "anthropic-to-chat-route"
+      from_tags:
+        - "anthropic-to-chat"
+      to_tags:
+        - "openai-primary"
+        - "openai-backup"
+      strategy: "failover"
+      target_model: "gpt-5.4"
 
     - name: "responses-route"
       from_tags:
@@ -577,17 +587,85 @@ curl -s http://127.0.0.1:8080/v1/responses \
 
 ### Anthropic Messages
 
+这是当前推荐的 Claude Code 最小桥接请求形状：
+
 ```bash
 curl -s http://127.0.0.1:8080/v1/messages \
   -H 'Authorization: Bearer your-anthropic-client-token' \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "claude-sonnet-4-5",
+    "model": "claude-sonnet-4-6",
+    "max_tokens": 256,
+    "system": [
+      {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}
+    ],
     "messages": [
-      {"role": "user", "content": "hello"}
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "只回复 pong"}
+        ]
+      }
     ]
   }'
 ```
+
+如果你本地已经把 Syrogo 热重载跑在 `127.0.0.1:23234`，也可以直接让 Claude Code 走这条入口做端到端验证：
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:23234 \
+ANTHROPIC_AUTH_TOKEN='your-anthropic-client-token' \
+claude -p "只回复 pong"
+```
+
+### Anthropic Tools Bridge
+
+当前第二阶段支持的是：
+- `anthropic_messages` / Claude Code 风格请求里的顶层 `tools`
+- 透传普通 function tools 到 `openai_chat` 上游
+- 上游返回 `tool_calls` 后，再回写成 Anthropic `tool_use`
+- 后续 `tool_result` 再入站时，继续桥接到 OpenAI chat 历史消息
+
+当前明确会过滤：
+- Claude Code builtin / control tools，例如 `Bash`、`Read`、`Edit`、`Write`、`Glob`、`Grep`、`Task*`、`Cron*` 等
+- 非 `type: object` 的工具输入 schema
+
+也就是说，当前能力是“远端工具桥接”，不是“Syrogo 本地执行 Claude Code 工具”。
+
+你可以先用自定义 function tool 做验证，例如：
+
+```bash
+curl -s http://127.0.0.1:8080/v1/messages \
+  -H 'Authorization: Bearer your-anthropic-client-token' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "max_tokens": 256,
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Get weather by city",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string"}
+          },
+          "required": ["city"]
+        }
+      }
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "查询上海天气，必要时调用工具。"}
+        ]
+      }
+    ]
+  }'
+```
+
+如果你直接用 Claude Code 做端到端，请注意：Claude Code 自带 builtin tools 不会被透传给上游；当前更适合验证普通消息链路，或配合自定义 function tool 请求体验证 bridge 行为。
 
 ### Anthropic 流式
 

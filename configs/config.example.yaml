@@ -28,7 +28,7 @@ inbounds:
     path: "/v1/messages"
     clients:
       - token: "${SYROGO_ANTHROPIC_CLIENT_TOKEN}"
-        tag: "anthropic"
+        tag: "anthropic-to-chat"
 
 routing:
   rules:
@@ -56,13 +56,14 @@ routing:
         - "responses-primary"
       strategy: "failover"
 
-    - name: "anthropic-route"
+    - name: "anthropic-to-chat-route"
       from_tags:
-        - "anthropic"
+        - "anthropic-to-chat"
       to_tags:
-        - "anthropic-primary"
+        - "openai-primary"
+        - "openai-backup"
       strategy: "failover"
-      target_model: "claude-sonnet-4-5"
+      target_model: "gpt-5.4"
 
 outbounds:
   - name: "mock"

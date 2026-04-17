@@ -644,6 +644,51 @@ func TestBuildRuntimeRequestAnthropicMixedAssistantContentSplitsTextAndToolCall(
 	}
 }
 
+func TestBuildRuntimeRequestRejectsToolWithoutName(t *testing.T) {
+	req := inboundRequest{
+		Model: "claude-sonnet-4-5",
+		Tools: []inboundToolDefinition{{
+			Description: "missing name",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		}},
+		Messages: []inboundMessage{{
+			Role:    "user",
+			Content: json.RawMessage(`"hello"`),
+		}},
+	}
+
+	_, err := buildRuntimeRequest(req)
+	if err == nil {
+		t.Fatal("buildRuntimeRequest() error = nil, want error")
+	}
+	if got := err.Error(); got != "tool name is required" {
+		t.Fatalf("buildRuntimeRequest() error = %q, want tool name is required", got)
+	}
+}
+
+func TestBuildRuntimeRequestRejectsInvalidToolInputSchema(t *testing.T) {
+	req := inboundRequest{
+		Model: "claude-sonnet-4-5",
+		Tools: []inboundToolDefinition{{
+			Name:        "get_weather",
+			Description: "invalid schema",
+			InputSchema: json.RawMessage(`{"type":`),
+		}},
+		Messages: []inboundMessage{{
+			Role:    "user",
+			Content: json.RawMessage(`"hello"`),
+		}},
+	}
+
+	_, err := buildRuntimeRequest(req)
+	if err == nil {
+		t.Fatal("buildRuntimeRequest() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), `invalid tool input_schema for "get_weather"`) {
+		t.Fatalf("buildRuntimeRequest() error = %q, want invalid tool input_schema message", err.Error())
+	}
+}
+
 func TestBuildRuntimeRequestFromResponsesSupportsItemArray(t *testing.T) {
 	req := openAIResponsesRequest{
 		Model: "gpt-4o-mini",
