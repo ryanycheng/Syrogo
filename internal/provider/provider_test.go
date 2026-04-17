@@ -295,6 +295,143 @@ func TestDecodeOpenAIChatResponseRejectsEmptyAssistantMessage(t *testing.T) {
 	}
 }
 
+func TestEncodeOpenAIResponsesRequestKeepsOnlyFirstToolOutputTextPart(t *testing.T) {
+	payload := encodeOpenAIResponsesRequest(runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role:       runtime.MessageRoleTool,
+			ToolCallID: "call_123",
+			Parts: []runtime.ContentPart{{
+				Type: runtime.ContentPartTypeText,
+				Text: "first text",
+			}, {
+				Type: runtime.ContentPartTypeJSON,
+				Data: json.RawMessage(`{"city":"shanghai"}`),
+			}, {
+				Type: runtime.ContentPartTypeText,
+				Text: "second text",
+			}},
+		}},
+	})
+
+	body := payload.(map[string]any)
+	input := body["input"].([]openAIResponsesInputItem)
+	if len(input) != 1 {
+		t.Fatalf("len(input) = %d, want 1", len(input))
+	}
+	if input[0].Type != "function_call_output" || input[0].CallID != "call_123" {
+		t.Fatalf("input[0] = %#v, want function_call_output", input[0])
+	}
+	if input[0].Output != "first text" {
+		t.Fatalf("input[0].Output = %q, want first text", input[0].Output)
+	}
+}
+
+func TestEncodeAnthropicMessagesRequestPreservesMixedToolResultOrder(t *testing.T) {
+	payload := encodeAnthropicMessagesRequest(runtime.Request{
+		Model: "claude-sonnet-4-5",
+		Messages: []runtime.Message{{
+			Role:       runtime.MessageRoleTool,
+			ToolCallID: "tool_123",
+			Parts: []runtime.ContentPart{{
+				Type: runtime.ContentPartTypeText,
+				Text: "lookup failed",
+			}, {
+				Type: runtime.ContentPartTypeJSON,
+				Data: json.RawMessage(`{"city":"shanghai","forecast":"sunny"}`),
+			}},
+		}},
+	})
+
+	body, ok := payload.(anthropicMessagesRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want anthropicMessagesRequest", payload)
+	}
+	got := body.Messages[0].Content[0]
+	blocks, ok := got.Content.([]map[string]any)
+	if !ok {
+		t.Fatalf("got.Content type = %T, want []map[string]any", got.Content)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("len(blocks) = %d, want 2", len(blocks))
+	}
+	if blocks[0]["type"] != "text" || blocks[0]["text"] != "lookup failed" {
+		t.Fatalf("blocks[0] = %#v, want first text block", blocks[0])
+	}
+	if blocks[1]["type"] != "json" {
+		t.Fatalf("blocks[1] = %#v, want json block", blocks[1])
+	}
+	value, ok := blocks[1]["value"].(map[string]any)
+	if !ok {
+		t.Fatalf("blocks[1][value] = %#v, want object", blocks[1]["value"])
+	}
+	if value["city"] != "shanghai" || value["forecast"] != "sunny" {
+		t.Fatalf("value = %#v, want preserved json payload", value)
+	}
+}
+
+func TestDecodeAnthropicMessagesResponseSplitsMixedTextAndToolUse(t *testing.T) {
+	resp, err := decodeAnthropicMessagesResponse(anthropicMessagesEnvelope{
+		ID:         "msg_123",
+		Type:       "message",
+		Role:       "assistant",
+		Model:      "claude-sonnet-4-5",
+		StopReason: "tool_use",
+		Content: []anthropicContentBlock{{
+			Type: "text",
+			Text: "thinking",
+		}, {
+			Type:  "tool_use",
+			ID:    "tool_123",
+			Name:  "get_weather",
+			Input: json.RawMessage(`{"city":"shanghai"}`),
+		}, {
+			Type: "text",
+			Text: "done",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("decodeAnthropicMessagesResponse() error = %v", err)
+	}
+	if len(resp.Message.Parts) != 2 {
+		t.Fatalf("len(resp.Message.Parts) = %d, want 2", len(resp.Message.Parts))
+	}
+	if resp.Message.Parts[0].Text != "thinking" || resp.Message.Parts[1].Text != "done" {
+		t.Fatalf("resp.Message.Parts = %#v, want preserved text parts", resp.Message.Parts)
+	}
+	if len(resp.Message.ToolCalls) != 1 || resp.Message.ToolCalls[0].ID != "tool_123" || resp.Message.ToolCalls[0].Arguments != `{"city":"shanghai"}` {
+		t.Fatalf("resp.Message.ToolCalls = %#v, want preserved tool call", resp.Message.ToolCalls)
+	}
+}
+
+func TestDecodeOpenAIResponsesResponseDropsEmptyTextParts(t *testing.T) {
+	resp, err := decodeOpenAIResponsesResponse(openAIResponsesEnvelope{
+		ID:     "resp_123",
+		Object: "response",
+		Model:  "gpt-4o-mini",
+		Output: []openAIResponsesOutputItem{{
+			Type: "message",
+			Role: "assistant",
+			Content: []openAIResponsesTextPart{{
+				Type: "output_text",
+				Text: "",
+			}, {
+				Type: "output_text",
+				Text: "hello from upstream",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("decodeOpenAIResponsesResponse() error = %v", err)
+	}
+	if len(resp.Message.Parts) != 1 {
+		t.Fatalf("len(resp.Message.Parts) = %d, want 1", len(resp.Message.Parts))
+	}
+	if resp.Message.Parts[0].Text != "hello from upstream" {
+		t.Fatalf("resp.Message.Parts[0].Text = %q, want hello from upstream", resp.Message.Parts[0].Text)
+	}
+}
+
 func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 	payload := encodeOpenAIResponsesRequest(runtime.Request{
 		Model: "gpt-4o-mini",
