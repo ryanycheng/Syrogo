@@ -159,14 +159,19 @@ func encodeAnthropicMessagesRequest(req runtime.Request) any {
 				Content: []anthropicContentBlock{{
 					Type:      "tool_result",
 					ToolUseID: msg.ToolCallID,
-					Content:   firstTextPart(msg),
+					Content:   anthropicToolResultContent(msg),
 				}},
 			})
 		default:
 			encoded := anthropicMessage{Role: string(msg.Role)}
 			for _, part := range msg.Parts {
-				if part.Type == runtime.ContentPartTypeText && part.Text != "" {
-					encoded.Content = append(encoded.Content, anthropicContentBlock{Type: "text", Text: part.Text})
+				switch part.Type {
+				case runtime.ContentPartTypeText:
+					if part.Text != "" {
+						encoded.Content = append(encoded.Content, anthropicContentBlock{Type: "text", Text: part.Text})
+					}
+				case runtime.ContentPartTypeJSON:
+					encoded.Content = append(encoded.Content, anthropicContentBlock{Type: "text", Text: string(part.Data)})
 				}
 			}
 			for _, call := range msg.ToolCalls {
@@ -230,16 +235,7 @@ func decodeAnthropicMessagesResponse(resp anthropicMessagesEnvelope) (runtime.Re
 		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream returned no content and no tool calls"))
 	}
 
-	finishReason := runtime.FinishReasonStop
-	switch resp.StopReason {
-	case "max_tokens":
-		finishReason = runtime.FinishReasonLength
-	case "end_turn", "tool_use", "":
-		finishReason = runtime.FinishReasonStop
-	default:
-		finishReason = runtime.FinishReasonStop
-	}
-
+	finishReason := anthropicFinishReason(resp.StopReason)
 	response := runtime.Response{
 		ID:           resp.ID,
 		Object:       resp.Type,
@@ -255,4 +251,41 @@ func decodeAnthropicMessagesResponse(resp anthropicMessagesEnvelope) (runtime.Re
 		}
 	}
 	return response, nil
+}
+
+func anthropicToolResultContent(msg runtime.Message) any {
+	blocks := make([]map[string]any, 0, len(msg.Parts))
+	for _, part := range msg.Parts {
+		switch part.Type {
+		case runtime.ContentPartTypeText:
+			blocks = append(blocks, map[string]any{"type": "text", "text": part.Text})
+		case runtime.ContentPartTypeJSON:
+			var value any
+			if err := json.Unmarshal(part.Data, &value); err != nil {
+				blocks = append(blocks, map[string]any{"type": "text", "text": string(part.Data)})
+				continue
+			}
+			blocks = append(blocks, map[string]any{"type": "json", "value": value})
+		}
+	}
+	if len(blocks) == 1 && blocks[0]["type"] == "text" {
+		return blocks[0]["text"]
+	}
+	if len(blocks) == 0 {
+		return ""
+	}
+	return blocks
+}
+
+func anthropicFinishReason(reason string) runtime.FinishReason {
+	switch reason {
+	case "tool_use":
+		return runtime.FinishReasonToolUse
+	case "max_tokens":
+		return runtime.FinishReasonLength
+	case "end_turn", "":
+		return runtime.FinishReasonEndTurn
+	default:
+		return runtime.FinishReasonStop
+	}
 }

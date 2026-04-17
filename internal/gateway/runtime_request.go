@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"syrogo/internal/runtime"
+	"syrogo/internal/semantic"
 )
 
 type inboundMessage struct {
@@ -61,48 +62,54 @@ type openAIResponsesContentPart struct {
 }
 
 func buildRuntimeRequest(req inboundRequest) (runtime.Request, error) {
-	system, err := parseInboundSystem(req.System)
+	semanticReq, err := buildSemanticRequest(req)
 	if err != nil {
 		return runtime.Request{}, err
+	}
+	return lowerSemanticRequest(semanticReq), nil
+}
+
+func buildSemanticRequest(req inboundRequest) (semantic.Request, error) {
+	instructions, systemText, err := parseInboundSystem(req.System)
+	if err != nil {
+		return semantic.Request{}, err
 	}
 	tools, err := parseInboundTools(req.Tools)
 	if err != nil {
-		return runtime.Request{}, err
+		return semantic.Request{}, err
 	}
 
-	internalReq := runtime.Request{
-		Model:     req.Model,
-		System:    system,
-		MaxTokens: req.MaxTokens,
-		Messages:  make([]runtime.Message, 0, len(req.Messages)),
-		Tools:     tools,
-		Stream:    req.Stream,
+	result := semantic.Request{
+		Model:        req.Model,
+		Instructions: instructions,
+		Tools:        tools,
+		Options: semantic.GenerateOptions{
+			MaxTokens: req.MaxTokens,
+			Stream:    req.Stream,
+		},
+	}
+	if systemText != "" && len(result.Instructions) == 0 {
+		result.Instructions = []semantic.Segment{{Kind: semantic.SegmentText, Text: systemText}}
 	}
 
 	for _, msg := range req.Messages {
-		parts, toolCalls, toolCallID, err := parseInboundMessage(msg)
+		turn, err := parseInboundMessage(msg)
 		if err != nil {
-			return runtime.Request{}, err
+			return semantic.Request{}, err
 		}
-		internalReq.Messages = append(internalReq.Messages, runtime.Message{
-			Role:       runtime.MessageRole(msg.Role),
-			Parts:      parts,
-			ToolCalls:  toolCalls,
-			ToolCallID: toolCallID,
-		})
+		result.Turns = append(result.Turns, turn)
 	}
-
-	return internalReq, nil
+	return result, nil
 }
 
-func parseInboundSystem(raw json.RawMessage) (string, error) {
+func parseInboundSystem(raw json.RawMessage) ([]semantic.Segment, string, error) {
 	if len(raw) == 0 {
-		return "", nil
+		return nil, "", nil
 	}
 
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
-		return text, nil
+		return []semantic.Segment{{Kind: semantic.SegmentText, Text: text}}, text, nil
 	}
 
 	var blocks []struct {
@@ -110,23 +117,25 @@ func parseInboundSystem(raw json.RawMessage) (string, error) {
 		Text string `json:"text"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err == nil {
+		segments := make([]semantic.Segment, 0, len(blocks))
 		parts := make([]string, 0, len(blocks))
 		for _, block := range blocks {
 			if block.Type == "text" {
+				segments = append(segments, semantic.Segment{Kind: semantic.SegmentText, Text: block.Text})
 				parts = append(parts, block.Text)
 			}
 		}
 		if len(parts) == 0 {
-			return "", fmt.Errorf("system content must include at least one text block")
+			return nil, "", fmt.Errorf("system content must include at least one text block")
 		}
-		return strings.Join(parts, "\n"), nil
+		return segments, strings.Join(parts, "\n"), nil
 	}
 
-	return "", fmt.Errorf("unsupported system content")
+	return nil, "", fmt.Errorf("unsupported system content")
 }
 
-func parseInboundTools(raw []inboundToolDefinition) ([]runtime.ToolDefinition, error) {
-	tools := make([]runtime.ToolDefinition, 0, len(raw))
+func parseInboundTools(raw []inboundToolDefinition) ([]semantic.ToolDefinition, error) {
+	tools := make([]semantic.ToolDefinition, 0, len(raw))
 	for _, tool := range raw {
 		if tool.Name == "" {
 			return nil, fmt.Errorf("tool name is required")
@@ -143,7 +152,7 @@ func parseInboundTools(raw []inboundToolDefinition) ([]runtime.ToolDefinition, e
 			}
 			inputSchema = encoded
 		}
-		tools = append(tools, runtime.ToolDefinition{
+		tools = append(tools, semantic.ToolDefinition{
 			Name:        tool.Name,
 			Description: tool.Description,
 			InputSchema: inputSchema,
@@ -153,45 +162,74 @@ func parseInboundTools(raw []inboundToolDefinition) ([]runtime.ToolDefinition, e
 }
 
 func buildRuntimeRequestFromResponses(req openAIResponsesRequest) (runtime.Request, error) {
-	messages, err := parseOpenAIResponsesInput(req.Input)
+	semanticReq, err := buildSemanticRequestFromResponses(req)
 	if err != nil {
 		return runtime.Request{}, err
 	}
-	return runtime.Request{Model: req.Model, Messages: messages, Stream: req.Stream}, nil
+	return lowerSemanticRequest(semanticReq), nil
 }
 
-func parseInboundMessage(msg inboundMessage) ([]runtime.ContentPart, []runtime.ToolCall, string, error) {
-	parts, toolCalls, toolCallID, err := parseInboundContent(msg.Role, msg.Content)
+func buildSemanticRequestFromResponses(req openAIResponsesRequest) (semantic.Request, error) {
+	turns, err := parseOpenAIResponsesInput(req.Input)
 	if err != nil {
-		return nil, nil, "", err
+		return semantic.Request{}, err
 	}
-	if len(msg.ToolCalls) > 0 {
-		toolCalls = make([]runtime.ToolCall, 0, len(msg.ToolCalls))
-		for _, call := range msg.ToolCalls {
-			if call.Type != "" && call.Type != "function" {
-				return nil, nil, "", fmt.Errorf("unsupported tool call type %q", call.Type)
-			}
-			toolCalls = append(toolCalls, runtime.ToolCall{
-				ID:        call.ID,
-				Name:      call.Function.Name,
-				Arguments: call.Function.Arguments,
-			})
+	return semantic.Request{
+		Model: req.Model,
+		Turns: turns,
+		Options: semantic.GenerateOptions{
+			Stream: req.Stream,
+		},
+	}, nil
+}
+
+func parseInboundMessage(msg inboundMessage) (semantic.Turn, error) {
+	segments, toolCallID, err := parseInboundContent(msg.Role, msg.Content)
+	if err != nil {
+		return semantic.Turn{}, err
+	}
+	for _, call := range msg.ToolCalls {
+		if call.Type != "" && call.Type != "function" {
+			return semantic.Turn{}, fmt.Errorf("unsupported tool call type %q", call.Type)
 		}
+		segments = append(segments, semantic.Segment{Kind: semantic.SegmentToolCall, ToolCall: &semantic.ToolCall{
+			ID:        call.ID,
+			Name:      call.Function.Name,
+			Arguments: normalizedJSONOrRaw(json.RawMessage(call.Function.Arguments)),
+		}})
 	}
 	if msg.ToolCallID != "" {
 		toolCallID = msg.ToolCallID
 	}
-	return parts, toolCalls, toolCallID, nil
+	turn := semantic.Turn{Role: semantic.Role(msg.Role), Segments: segments}
+	if toolCallID != "" {
+		turn.Segments = normalizeToolTurnSegments(toolCallID, turn.Segments)
+	}
+	return turn, nil
 }
 
-func parseInboundContent(role string, raw json.RawMessage) ([]runtime.ContentPart, []runtime.ToolCall, string, error) {
+func normalizeToolTurnSegments(toolCallID string, segments []semantic.Segment) []semantic.Segment {
+	if len(segments) == 1 && segments[0].Kind == semantic.SegmentToolResult && segments[0].ToolResult != nil {
+		segments[0].ToolResult.ToolCallID = toolCallID
+		return segments
+	}
+	return []semantic.Segment{{
+		Kind: semantic.SegmentToolResult,
+		ToolResult: &semantic.ToolResult{
+			ToolCallID: toolCallID,
+			Content:    cloneSegmentsAsToolResultContent(segments),
+		},
+	}}
+}
+
+func parseInboundContent(role string, raw json.RawMessage) ([]semantic.Segment, string, error) {
 	if len(raw) == 0 {
-		return []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: ""}}, nil, "", nil
+		return []semantic.Segment{{Kind: semantic.SegmentText, Text: ""}}, "", nil
 	}
 
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
-		return []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: text}}, nil, "", nil
+		return []semantic.Segment{{Kind: semantic.SegmentText, Text: text}}, "", nil
 	}
 
 	var blocks []struct {
@@ -202,49 +240,50 @@ func parseInboundContent(role string, raw json.RawMessage) ([]runtime.ContentPar
 		Name      string          `json:"name"`
 		Input     json.RawMessage `json:"input"`
 		Content   json.RawMessage `json:"content"`
+		IsError   bool            `json:"is_error"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err == nil {
-		parts := make([]runtime.ContentPart, 0, len(blocks))
-		toolCalls := make([]runtime.ToolCall, 0, len(blocks))
+		segments := make([]semantic.Segment, 0, len(blocks))
 		toolCallID := ""
 		for _, block := range blocks {
 			switch block.Type {
 			case "text":
-				parts = append(parts, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: block.Text})
+				segments = append(segments, semantic.Segment{Kind: semantic.SegmentText, Text: block.Text})
 			case "tool_use":
-				arguments, err := marshalCompactJSON(block.Input)
-				if err != nil {
-					return nil, nil, "", fmt.Errorf("invalid tool_use input: %w", err)
-				}
-				toolCalls = append(toolCalls, runtime.ToolCall{ID: block.ID, Name: block.Name, Arguments: arguments})
+				segments = append(segments, semantic.Segment{Kind: semantic.SegmentToolCall, ToolCall: &semantic.ToolCall{
+					ID:        block.ID,
+					Name:      block.Name,
+					Arguments: normalizedJSONOrRaw(block.Input),
+				}})
 			case "tool_result":
 				toolCallID = block.ToolUseID
-				resultText, err := parseToolResultContent(block.Content)
+				content, err := parseToolResultContent(block.Content)
 				if err != nil {
-					return nil, nil, "", err
+					return nil, "", err
 				}
-				parts = append(parts, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: resultText})
+				segments = append(segments, semantic.Segment{Kind: semantic.SegmentToolResult, ToolResult: &semantic.ToolResult{
+					ToolCallID: block.ToolUseID,
+					Content:    content,
+					IsError:    block.IsError,
+				}})
 			}
 		}
-		if len(parts) == 0 && len(toolCalls) == 0 {
-			return nil, nil, "", fmt.Errorf("message content must include at least one text or tool block")
+		if len(segments) == 0 {
+			return nil, "", fmt.Errorf("message content must include at least one text or tool block")
 		}
 		if role == string(runtime.MessageRoleTool) && toolCallID == "" {
-			return nil, nil, "", fmt.Errorf("tool message must include tool_call_id")
+			return nil, "", fmt.Errorf("tool message must include tool_call_id")
 		}
-		return parts, toolCalls, toolCallID, nil
+		return segments, toolCallID, nil
 	}
 
-	return nil, nil, "", fmt.Errorf("unsupported message content")
+	return nil, "", fmt.Errorf("unsupported message content")
 }
 
-func parseOpenAIResponsesInput(raw json.RawMessage) ([]runtime.Message, error) {
+func parseOpenAIResponsesInput(raw json.RawMessage) ([]semantic.Turn, error) {
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
-		return []runtime.Message{{
-			Role:  runtime.MessageRoleUser,
-			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: text}},
-		}}, nil
+		return []semantic.Turn{{Role: semantic.RoleUser, Segments: []semantic.Segment{{Kind: semantic.SegmentText, Text: text}}}}, nil
 	}
 
 	var items []openAIResponsesInputItem
@@ -255,56 +294,41 @@ func parseOpenAIResponsesInput(raw json.RawMessage) ([]runtime.Message, error) {
 		return nil, fmt.Errorf("input is required")
 	}
 
-	messages := make([]runtime.Message, 0, len(items))
+	turns := make([]semantic.Turn, 0, len(items))
 	for _, item := range items {
 		switch item.Type {
 		case "message":
-			parts, err := parseOpenAIResponsesMessageContent(item.Content)
+			segments, err := parseOpenAIResponsesMessageContent(item.Content)
 			if err != nil {
 				return nil, err
 			}
-			role := runtime.MessageRole(item.Role)
+			role := semantic.Role(item.Role)
 			if role == "" {
-				role = runtime.MessageRoleUser
+				role = semantic.RoleUser
 			}
-			messages = append(messages, runtime.Message{Role: role, Parts: parts})
+			turns = append(turns, semantic.Turn{Role: role, Segments: segments})
 		case "function_call":
-			arguments, err := marshalCompactJSON(item.Input)
-			if err != nil {
-				return nil, fmt.Errorf("invalid function_call input: %w", err)
-			}
-			messages = append(messages, runtime.Message{
-				Role: runtime.MessageRoleAssistant,
-				ToolCalls: []runtime.ToolCall{{
-					ID:        item.CallID,
-					Name:      item.Name,
-					Arguments: arguments,
-				}},
-			})
+			turns = append(turns, semantic.Turn{Role: semantic.RoleAssistant, Segments: []semantic.Segment{{Kind: semantic.SegmentToolCall, ToolCall: &semantic.ToolCall{ID: item.CallID, Name: item.Name, Arguments: normalizedJSONOrRaw(item.Input)}}}})
 		case "function_call_output":
-			output, err := parseOpenAIResponsesFunctionOutput(item.Output)
+			content, err := parseOpenAIResponsesFunctionOutput(item.Output)
 			if err != nil {
 				return nil, err
 			}
 			if item.CallID == "" {
 				return nil, fmt.Errorf("function_call_output.call_id is required")
 			}
-			messages = append(messages, runtime.Message{
-				Role:       runtime.MessageRoleTool,
-				ToolCallID: item.CallID,
-				Parts:      []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: output}},
-			})
+			turns = append(turns, semantic.Turn{Role: semantic.RoleTool, Segments: []semantic.Segment{{Kind: semantic.SegmentToolResult, ToolResult: &semantic.ToolResult{ToolCallID: item.CallID, Content: content}}}})
 		default:
 			return nil, fmt.Errorf("unsupported responses input item type %q", item.Type)
 		}
 	}
-	return messages, nil
+	return turns, nil
 }
 
-func parseOpenAIResponsesMessageContent(raw json.RawMessage) ([]runtime.ContentPart, error) {
+func parseOpenAIResponsesMessageContent(raw json.RawMessage) ([]semantic.Segment, error) {
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
-		return []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: text}}, nil
+		return []semantic.Segment{{Kind: semantic.SegmentText, Text: text}}, nil
 	}
 
 	var parts []openAIResponsesContentPart
@@ -315,65 +339,182 @@ func parseOpenAIResponsesMessageContent(raw json.RawMessage) ([]runtime.ContentP
 		return nil, fmt.Errorf("message content must include at least one text part")
 	}
 
-	result := make([]runtime.ContentPart, 0, len(parts))
+	result := make([]semantic.Segment, 0, len(parts))
 	for _, part := range parts {
 		if part.Type != "input_text" && part.Type != "output_text" && part.Type != "text" {
 			return nil, fmt.Errorf("unsupported responses content part type %q", part.Type)
 		}
-		result = append(result, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: part.Text})
+		result = append(result, semantic.Segment{Kind: semantic.SegmentText, Text: part.Text})
 	}
 	return result, nil
 }
 
-func parseOpenAIResponsesFunctionOutput(raw json.RawMessage) (string, error) {
+func parseOpenAIResponsesFunctionOutput(raw json.RawMessage) ([]semantic.Segment, error) {
 	if len(raw) == 0 {
-		return "", nil
+		return nil, nil
 	}
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
-		return text, nil
+		return []semantic.Segment{{Kind: semantic.SegmentText, Text: text}}, nil
 	}
 	var parts []openAIResponsesContentPart
 	if err := json.Unmarshal(raw, &parts); err == nil {
-		texts := make([]string, 0, len(parts))
+		segments := make([]semantic.Segment, 0, len(parts))
 		for _, part := range parts {
 			if part.Type == "output_text" || part.Type == "text" || part.Type == "input_text" {
-				texts = append(texts, part.Text)
+				segments = append(segments, semantic.Segment{Kind: semantic.SegmentText, Text: part.Text})
 			}
 		}
-		if len(texts) == 0 {
-			return "", fmt.Errorf("function_call_output.output must include at least one text part")
+		if len(segments) == 0 {
+			return nil, fmt.Errorf("function_call_output.output must include at least one text part")
 		}
-		return strings.Join(texts, "\n"), nil
+		return segments, nil
 	}
-	return "", fmt.Errorf("unsupported function_call_output.output")
+	return nil, fmt.Errorf("unsupported function_call_output.output")
 }
 
-func parseToolResultContent(raw json.RawMessage) (string, error) {
+func parseToolResultContent(raw json.RawMessage) ([]semantic.Segment, error) {
 	if len(raw) == 0 {
-		return "", nil
+		return nil, nil
 	}
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
-		return text, nil
+		return []semantic.Segment{{Kind: semantic.SegmentText, Text: text}}, nil
 	}
 	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type    string          `json:"type"`
+		Text    string          `json:"text"`
+		Value   json.RawMessage `json:"value"`
+		Content json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err == nil {
-		parts := make([]string, 0, len(blocks))
+		segments := make([]semantic.Segment, 0, len(blocks))
 		for _, block := range blocks {
 			if block.Type == "text" {
-				parts = append(parts, block.Text)
+				segments = append(segments, semantic.Segment{Kind: semantic.SegmentText, Text: block.Text})
+				continue
+			}
+			payload := block.Value
+			if len(payload) == 0 {
+				payload = block.Content
+			}
+			if len(payload) == 0 {
+				payload = json.RawMessage(`{}`)
+			}
+			segments = append(segments, semantic.Segment{Kind: semantic.SegmentData, Data: &semantic.DataPart{Format: block.Type, Value: append(json.RawMessage(nil), payload...)}})
+		}
+		if len(segments) == 0 {
+			return nil, fmt.Errorf("tool_result content must include at least one block")
+		}
+		return segments, nil
+	}
+	return []semantic.Segment{{Kind: semantic.SegmentData, Data: &semantic.DataPart{Format: "json", Value: normalizedJSONOrRaw(raw)}}}, nil
+}
+
+func lowerSemanticRequest(req semantic.Request) runtime.Request {
+	result := runtime.Request{
+		Model:     req.Model,
+		System:    joinSegmentTexts(req.Instructions),
+		MaxTokens: req.Options.MaxTokens,
+		Stream:    req.Options.Stream,
+		Messages:  make([]runtime.Message, 0, len(req.Turns)),
+		Tools:     make([]runtime.ToolDefinition, 0, len(req.Tools)),
+	}
+	for _, tool := range req.Tools {
+		result.Tools = append(result.Tools, runtime.ToolDefinition{Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema})
+	}
+	for _, turn := range req.Turns {
+		result.Messages = append(result.Messages, lowerSemanticTurn(turn))
+	}
+	return result
+}
+
+func lowerSemanticTurn(turn semantic.Turn) runtime.Message {
+	message := runtime.Message{Role: runtime.MessageRole(turn.Role)}
+	for _, segment := range turn.Segments {
+		switch segment.Kind {
+		case semantic.SegmentText:
+			message.Parts = append(message.Parts, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: segment.Text})
+		case semantic.SegmentToolCall:
+			if segment.ToolCall != nil {
+				message.ToolCalls = append(message.ToolCalls, runtime.ToolCall{ID: segment.ToolCall.ID, Name: segment.ToolCall.Name, Arguments: marshalCompactJSONOrEmpty(segment.ToolCall.Arguments)})
+			}
+		case semantic.SegmentToolResult:
+			if segment.ToolResult != nil {
+				message.ToolCallID = segment.ToolResult.ToolCallID
+				message.Parts = append(message.Parts, lowerToolResultContent(segment.ToolResult.Content)...)
+			}
+		case semantic.SegmentData:
+			if segment.Data != nil {
+				message.Parts = append(message.Parts, runtime.ContentPart{Type: runtime.ContentPartTypeJSON, Data: append(json.RawMessage(nil), segment.Data.Value...)})
 			}
 		}
-		if len(parts) == 0 {
-			return "", fmt.Errorf("tool_result content must include at least one text block")
-		}
-		return strings.Join(parts, "\n"), nil
 	}
-	return "", fmt.Errorf("unsupported tool_result content")
+	if len(message.Parts) == 0 && len(message.ToolCalls) == 0 {
+		message.Parts = append(message.Parts, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: ""})
+	}
+	return message
+}
+
+func lowerToolResultContent(segments []semantic.Segment) []runtime.ContentPart {
+	parts := make([]runtime.ContentPart, 0, len(segments))
+	for _, segment := range segments {
+		switch segment.Kind {
+		case semantic.SegmentText:
+			parts = append(parts, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: segment.Text})
+		case semantic.SegmentData:
+			if segment.Data != nil {
+				parts = append(parts, runtime.ContentPart{Type: runtime.ContentPartTypeJSON, Data: append(json.RawMessage(nil), segment.Data.Value...)})
+			}
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: ""})
+	}
+	return parts
+}
+
+func cloneSegmentsAsToolResultContent(segments []semantic.Segment) []semantic.Segment {
+	cloned := make([]semantic.Segment, 0, len(segments))
+	for _, segment := range segments {
+		copySegment := segment
+		if segment.ToolCall != nil {
+			copySegment.ToolCall = &semantic.ToolCall{ID: segment.ToolCall.ID, Name: segment.ToolCall.Name, Arguments: append(json.RawMessage(nil), segment.ToolCall.Arguments...)}
+		}
+		if segment.ToolResult != nil {
+			copySegment.ToolResult = &semantic.ToolResult{ToolCallID: segment.ToolResult.ToolCallID, Content: cloneSegmentsAsToolResultContent(segment.ToolResult.Content), IsError: segment.ToolResult.IsError}
+		}
+		if segment.Data != nil {
+			copySegment.Data = &semantic.DataPart{Format: segment.Data.Format, Value: append(json.RawMessage(nil), segment.Data.Value...)}
+		}
+		cloned = append(cloned, copySegment)
+	}
+	return cloned
+}
+
+func joinSegmentTexts(segments []semantic.Segment) string {
+	parts := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		if segment.Kind == semantic.SegmentText && segment.Text != "" {
+			parts = append(parts, segment.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func normalizedJSONOrRaw(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return append(json.RawMessage(nil), raw...)
+	}
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return append(json.RawMessage(nil), raw...)
+	}
+	return encoded
 }
 
 func marshalCompactJSON(raw json.RawMessage) (string, error) {
@@ -389,4 +530,15 @@ func marshalCompactJSON(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	return string(encoded), nil
+}
+
+func marshalCompactJSONOrEmpty(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "{}"
+	}
+	encoded, err := marshalCompactJSON(raw)
+	if err != nil {
+		return string(raw)
+	}
+	return encoded
 }

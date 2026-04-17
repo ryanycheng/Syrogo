@@ -23,6 +23,7 @@ type contextKey string
 
 const (
 	ContentPartTypeText ContentPartType = "text"
+	ContentPartTypeJSON ContentPartType = "json"
 
 	MessageRoleSystem    MessageRole = "system"
 	MessageRoleUser      MessageRole = "user"
@@ -35,9 +36,11 @@ const (
 	FallbackOnRetryable     FallbackCondition = "retryable"
 	FallbackOnQuotaExceeded FallbackCondition = "quota_exceeded"
 
-	FinishReasonStop   FinishReason = "stop"
-	FinishReasonLength FinishReason = "length"
-	FinishReasonError  FinishReason = "error"
+	FinishReasonStop     FinishReason = "stop"
+	FinishReasonLength   FinishReason = "length"
+	FinishReasonError    FinishReason = "error"
+	FinishReasonToolUse  FinishReason = "tool_use"
+	FinishReasonEndTurn  FinishReason = "end_turn"
 
 	StreamEventMessageStart StreamEventType = "message_start"
 	StreamEventContentDelta StreamEventType = "content_delta"
@@ -54,6 +57,7 @@ const (
 type ContentPart struct {
 	Type ContentPartType
 	Text string
+	Data json.RawMessage
 }
 
 type ToolCall struct {

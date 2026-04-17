@@ -107,13 +107,18 @@ func buildOpenAIResponsesOutput(resp runtime.Response) []map[string]any {
 func writeAnthropicMessageResponse(w http.ResponseWriter, resp runtime.Response) {
 	content := make([]map[string]any, 0, len(resp.Message.Parts)+len(resp.Message.ToolCalls))
 	for _, part := range resp.Message.Parts {
-		if part.Type != runtime.ContentPartTypeText {
-			continue
+		switch part.Type {
+		case runtime.ContentPartTypeText:
+			content = append(content, map[string]any{
+				"type": "text",
+				"text": part.Text,
+			})
+		case runtime.ContentPartTypeJSON:
+			content = append(content, map[string]any{
+				"type": "text",
+				"text": string(part.Data),
+			})
 		}
-		content = append(content, map[string]any{
-			"type": "text",
-			"text": part.Text,
-		})
 	}
 	for _, call := range resp.Message.ToolCalls {
 		var input any
@@ -137,7 +142,7 @@ func writeAnthropicMessageResponse(w http.ResponseWriter, resp runtime.Response)
 		"role":        string(resp.Message.Role),
 		"model":       resp.Model,
 		"content":     content,
-		"stop_reason": string(resp.FinishReason),
+		"stop_reason": anthropicStopReason(resp.FinishReason),
 	}
 	if resp.Usage != nil {
 		body["usage"] = map[string]any{
@@ -303,18 +308,12 @@ func openAIResponsesStreamFrames(events <-chan runtime.StreamEvent) []openAIResp
 					},
 				})
 			}
-			frames = append(frames, openAIResponsesSSEFrame{
-				event:   "response.output_item.done",
-				payload: map[string]any{"output_index": messageOutputIndex, "item_id": messageItemID},
-			})
+			frames = append(frames, openAIResponsesSSEFrame{event: "response.output_item.done", payload: map[string]any{"output_index": messageOutputIndex, "item_id": messageItemID}})
 			for toolCallID, done := range toolItemsDone {
 				if done {
 					continue
 				}
-				frames = append(frames, openAIResponsesSSEFrame{
-					event:   "response.output_item.done",
-					payload: map[string]any{"item_id": toolCallID},
-				})
+				frames = append(frames, openAIResponsesSSEFrame{event: "response.output_item.done", payload: map[string]any{"item_id": toolCallID}})
 				toolItemsDone[toolCallID] = true
 			}
 			frames = append(frames, openAIResponsesSSEFrame{
@@ -333,10 +332,7 @@ func openAIResponsesStreamFrames(events <-chan runtime.StreamEvent) []openAIResp
 			if event.Err != nil {
 				message = event.Err.Error()
 			}
-			frames = append(frames, openAIResponsesSSEFrame{
-				event:   "error",
-				payload: map[string]any{"message": message},
-			})
+			frames = append(frames, openAIResponsesSSEFrame{event: "error", payload: map[string]any{"message": message}})
 		}
 	}
 
@@ -380,7 +376,7 @@ func anthropicStreamFrames(events []runtime.StreamEvent) []anthropicSSEFrame {
 		}
 	}
 	if hasToolUse && finishReason == runtime.FinishReasonStop {
-		finishReason = "tool_use"
+		finishReason = runtime.FinishReasonToolUse
 	}
 
 	frames = append(frames, anthropicSSEFrame{
@@ -410,26 +406,9 @@ func anthropicStreamFrames(events []runtime.StreamEvent) []anthropicSSEFrame {
 				if textBlockIndex == -1 {
 					textBlockIndex = nextBlockIndex
 					nextBlockIndex++
-					frames = append(frames, anthropicSSEFrame{
-						event: "content_block_start",
-						payload: map[string]any{
-							"type":  "content_block_start",
-							"index": textBlockIndex,
-							"content_block": map[string]any{
-								"type": "text",
-								"text": "",
-							},
-						},
-					})
+					frames = append(frames, anthropicSSEFrame{event: "content_block_start", payload: map[string]any{"type": "content_block_start", "index": textBlockIndex, "content_block": map[string]any{"type": "text", "text": ""}}})
 				}
-				frames = append(frames, anthropicSSEFrame{
-					event: "content_block_delta",
-					payload: map[string]any{
-						"type":  "content_block_delta",
-						"index": textBlockIndex,
-						"delta": map[string]any{"type": "text_delta", "text": event.Delta.Text},
-					},
-				})
+				frames = append(frames, anthropicSSEFrame{event: "content_block_delta", payload: map[string]any{"type": "content_block_delta", "index": textBlockIndex, "delta": map[string]any{"type": "text_delta", "text": event.Delta.Text}}})
 			}
 			if event.ToolCall != nil {
 				var input any
@@ -439,23 +418,8 @@ func anthropicStreamFrames(events []runtime.StreamEvent) []anthropicSSEFrame {
 				toolIndex := nextBlockIndex
 				nextBlockIndex++
 				frames = append(frames,
-					anthropicSSEFrame{
-						event: "content_block_start",
-						payload: map[string]any{
-							"type":  "content_block_start",
-							"index": toolIndex,
-							"content_block": map[string]any{
-								"type":  "tool_use",
-								"id":    event.ToolCall.ID,
-								"name":  event.ToolCall.Name,
-								"input": input,
-							},
-						},
-					},
-					anthropicSSEFrame{
-						event:   "content_block_stop",
-						payload: map[string]any{"type": "content_block_stop", "index": toolIndex},
-					},
+					anthropicSSEFrame{event: "content_block_start", payload: map[string]any{"type": "content_block_start", "index": toolIndex, "content_block": map[string]any{"type": "tool_use", "id": event.ToolCall.ID, "name": event.ToolCall.Name, "input": input}}},
+					anthropicSSEFrame{event: "content_block_stop", payload: map[string]any{"type": "content_block_stop", "index": toolIndex}},
 				)
 			}
 		case runtime.StreamEventUsage:
@@ -467,24 +431,18 @@ func anthropicStreamFrames(events []runtime.StreamEvent) []anthropicSSEFrame {
 			if event.Err != nil {
 				message = event.Err.Error()
 			}
-			return append(frames, anthropicSSEFrame{
-				event:   "error",
-				payload: map[string]any{"type": "error", "error": map[string]any{"message": message}},
-			})
+			return append(frames, anthropicSSEFrame{event: "error", payload: map[string]any{"type": "error", "error": map[string]any{"message": message}}})
 		}
 	}
 
 	if textBlockIndex != -1 {
-		frames = append(frames, anthropicSSEFrame{
-			event:   "content_block_stop",
-			payload: map[string]any{"type": "content_block_stop", "index": textBlockIndex},
-		})
+		frames = append(frames, anthropicSSEFrame{event: "content_block_stop", payload: map[string]any{"type": "content_block_stop", "index": textBlockIndex}})
 	}
 
 	messageDelta := map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
-			"stop_reason":   string(finishReason),
+			"stop_reason":   anthropicStopReason(finishReason),
 			"stop_sequence": nil,
 		},
 		"usage": map[string]any{
@@ -498,4 +456,28 @@ func anthropicStreamFrames(events []runtime.StreamEvent) []anthropicSSEFrame {
 	)
 
 	return frames
+}
+
+func anthropicStopReason(reason runtime.FinishReason) string {
+	switch reason {
+	case runtime.FinishReasonToolUse:
+		return "tool_use"
+	case runtime.FinishReasonLength:
+		return "max_tokens"
+	case runtime.FinishReasonEndTurn, runtime.FinishReasonStop, "":
+		return "end_turn"
+	default:
+		return "end_turn"
+	}
+}
+
+func decodeJSONPart(part runtime.ContentPart) any {
+	if len(part.Data) == 0 {
+		return map[string]any{}
+	}
+	var value any
+	if err := json.Unmarshal(part.Data, &value); err != nil {
+		return string(part.Data)
+	}
+	return value
 }

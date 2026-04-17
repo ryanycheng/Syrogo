@@ -270,6 +270,70 @@ func TestBuildRuntimeRequestPreservesAnthropicToolBlocks(t *testing.T) {
 	}
 }
 
+func TestBuildRuntimeRequestPreservesAnthropicJSONToolResultPayload(t *testing.T) {
+	req := inboundRequest{
+		Model: "claude-sonnet-4-5",
+		Messages: []inboundMessage{{
+			Role: "tool",
+			Content: json.RawMessage(`[
+				{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"json","value":{"city":"shanghai","forecast":"sunny"}}]}
+			]`),
+		}},
+	}
+
+	got, err := buildRuntimeRequest(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequest() error = %v", err)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("len(Messages) = %d, want 1", len(got.Messages))
+	}
+	if got.Messages[0].ToolCallID != "toolu_123" {
+		t.Fatalf("Messages[0].ToolCallID = %q, want toolu_123", got.Messages[0].ToolCallID)
+	}
+	if len(got.Messages[0].Parts) != 1 || got.Messages[0].Parts[0].Type != runtime.ContentPartTypeJSON {
+		t.Fatalf("Messages[0].Parts = %#v, want single json content part", got.Messages[0].Parts)
+	}
+	if string(got.Messages[0].Parts[0].Data) != `{"city":"shanghai","forecast":"sunny"}` {
+		t.Fatalf("Messages[0].Parts[0].Data = %s, want raw json payload", got.Messages[0].Parts[0].Data)
+	}
+}
+
+func TestWriteAnthropicMessageResponseMapsToolUseStopReason(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeAnthropicMessageResponse(w, runtime.Response{
+		ID:           "msg_123",
+		Object:       "message",
+		Model:        "claude-sonnet-4-5",
+		FinishReason: runtime.FinishReasonToolUse,
+		Message: runtime.Message{
+			Role:      runtime.MessageRoleAssistant,
+			ToolCalls: []runtime.ToolCall{{ID: "tool_123", Name: "get_weather", Arguments: `{"city":"shanghai"}`}},
+		},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var body struct {
+		StopReason string `json:"stop_reason"`
+		Content    []struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if body.StopReason != "tool_use" {
+		t.Fatalf("body.StopReason = %q, want tool_use", body.StopReason)
+	}
+	if len(body.Content) != 1 || body.Content[0].Type != "tool_use" || body.Content[0].ID != "tool_123" {
+		t.Fatalf("body.Content = %#v, want assistant tool_use block", body.Content)
+	}
+}
+
 func TestBuildRuntimeRequestPreservesAnthropicTools(t *testing.T) {
 	req := inboundRequest{
 		Model: "claude-sonnet-4-5",
@@ -673,7 +737,7 @@ func TestAnthropicMessagesStreamingAlwaysEmitsUsageShape(t *testing.T) {
 	if !strings.Contains(got, `"usage":{"input_tokens":0,"output_tokens":0}`) {
 		t.Fatalf("body = %q, want stable zero usage object for anthropic client compatibility", got)
 	}
-	if !strings.Contains(got, `"stop_reason":"stop"`) {
+	if !strings.Contains(got, `"stop_reason":"end_turn"`) {
 		t.Fatalf("body = %q, want normalized anthropic stop reason", got)
 	}
 }

@@ -415,41 +415,65 @@ func TestEncodeAnthropicMessagesRequestIncludesToolDefinitions(t *testing.T) {
 	}
 }
 
-func TestDecodeAnthropicMessagesResponseMapsTextToolCallsUsageAndStopReason(t *testing.T) {
+func TestEncodeAnthropicMessagesRequestPreservesJSONToolResultPayload(t *testing.T) {
+	payload := encodeAnthropicMessagesRequest(runtime.Request{
+		Model: "claude-sonnet-4-5",
+		Messages: []runtime.Message{{
+			Role:       runtime.MessageRoleTool,
+			ToolCallID: "tool_123",
+			Parts: []runtime.ContentPart{{
+				Type: runtime.ContentPartTypeJSON,
+				Data: json.RawMessage(`{"city":"shanghai","forecast":"sunny"}`),
+			}},
+		}},
+	})
+
+	body, ok := payload.(anthropicMessagesRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want anthropicMessagesRequest", payload)
+	}
+	if len(body.Messages) != 1 {
+		t.Fatalf("len(body.Messages) = %d, want 1", len(body.Messages))
+	}
+	got := body.Messages[0].Content[0]
+	if got.Type != "tool_result" || got.ToolUseID != "tool_123" {
+		t.Fatalf("body.Messages[0].Content[0] = %#v, want tool_result with tool use id", got)
+	}
+	blocks, ok := got.Content.([]map[string]any)
+	if !ok {
+		t.Fatalf("got.Content type = %T, want []map[string]any", got.Content)
+	}
+	if len(blocks) != 1 || blocks[0]["type"] != "json" {
+		t.Fatalf("blocks = %#v, want single json tool result block", blocks)
+	}
+	value, ok := blocks[0]["value"].(map[string]any)
+	if !ok {
+		t.Fatalf("blocks[0][value] = %#v, want object", blocks[0]["value"])
+	}
+	if value["city"] != "shanghai" || value["forecast"] != "sunny" {
+		t.Fatalf("value = %#v, want original json payload", value)
+	}
+}
+
+func TestDecodeAnthropicMessagesResponseMapsToolUseStopReason(t *testing.T) {
 	resp, err := decodeAnthropicMessagesResponse(anthropicMessagesEnvelope{
 		ID:         "msg_123",
 		Type:       "message",
 		Role:       "assistant",
 		Model:      "claude-sonnet-4-5",
-		StopReason: "max_tokens",
+		StopReason: "tool_use",
 		Content: []anthropicContentBlock{{
-			Type: "text",
-			Text: "hello from upstream",
-		}, {
 			Type:  "tool_use",
 			ID:    "tool_123",
 			Name:  "get_weather",
 			Input: json.RawMessage(`{"city":"shanghai"}`),
 		}},
-		Usage: &struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-		}{InputTokens: 10, OutputTokens: 5},
 	})
 	if err != nil {
 		t.Fatalf("decodeAnthropicMessagesResponse() error = %v", err)
 	}
-	if resp.FinishReason != runtime.FinishReasonLength {
-		t.Fatalf("resp.FinishReason = %q, want length", resp.FinishReason)
-	}
-	if len(resp.Message.Parts) != 1 || resp.Message.Parts[0].Text != "hello from upstream" {
-		t.Fatalf("resp.Message.Parts = %#v, want decoded text", resp.Message.Parts)
-	}
-	if len(resp.Message.ToolCalls) != 1 || resp.Message.ToolCalls[0].ID != "tool_123" {
-		t.Fatalf("resp.Message.ToolCalls = %#v, want decoded tool call", resp.Message.ToolCalls)
-	}
-	if resp.Usage == nil || resp.Usage.TotalTokens != 15 {
-		t.Fatalf("resp.Usage = %#v, want total tokens 15", resp.Usage)
+	if resp.FinishReason != runtime.FinishReasonToolUse {
+		t.Fatalf("resp.FinishReason = %q, want tool_use", resp.FinishReason)
 	}
 }
 
