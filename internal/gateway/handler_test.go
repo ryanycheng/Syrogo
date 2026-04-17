@@ -18,6 +18,7 @@ import (
 	"syrogo/internal/provider"
 	"syrogo/internal/router"
 	"syrogo/internal/runtime"
+	"syrogo/internal/semantic"
 )
 
 type failingProvider struct {
@@ -296,6 +297,103 @@ func TestBuildRuntimeRequestPreservesAnthropicJSONToolResultPayload(t *testing.T
 	}
 	if string(got.Messages[0].Parts[0].Data) != `{"city":"shanghai","forecast":"sunny"}` {
 		t.Fatalf("Messages[0].Parts[0].Data = %s, want raw json payload", got.Messages[0].Parts[0].Data)
+	}
+}
+
+func TestLowerSemanticTurnPreservesMixedTextAndToolCallOrderWithinRuntimeShape(t *testing.T) {
+	message := lowerSemanticTurn(semantic.Turn{
+		Role: semantic.RoleAssistant,
+		Segments: []semantic.Segment{{
+			Kind: semantic.SegmentText,
+			Text: "thinking",
+		}, {
+			Kind: semantic.SegmentToolCall,
+			ToolCall: &semantic.ToolCall{
+				ID:        "call_123",
+				Name:      "get_weather",
+				Arguments: json.RawMessage(`{"city":"shanghai"}`),
+			},
+		}, {
+			Kind: semantic.SegmentText,
+			Text: "done",
+		}},
+	})
+
+	if message.Role != runtime.MessageRoleAssistant {
+		t.Fatalf("message.Role = %q, want assistant", message.Role)
+	}
+	if len(message.Parts) != 2 {
+		t.Fatalf("len(message.Parts) = %d, want 2", len(message.Parts))
+	}
+	if message.Parts[0].Text != "thinking" || message.Parts[1].Text != "done" {
+		t.Fatalf("message.Parts = %#v, want preserved text parts", message.Parts)
+	}
+	if len(message.ToolCalls) != 1 {
+		t.Fatalf("len(message.ToolCalls) = %d, want 1", len(message.ToolCalls))
+	}
+	if message.ToolCalls[0].ID != "call_123" || message.ToolCalls[0].Name != "get_weather" || message.ToolCalls[0].Arguments != `{"city":"shanghai"}` {
+		t.Fatalf("message.ToolCalls = %#v, want preserved tool call", message.ToolCalls)
+	}
+}
+
+func TestLowerSemanticTurnLowersToolResultMixedContentToToolMessage(t *testing.T) {
+	message := lowerSemanticTurn(semantic.Turn{
+		Role: semantic.RoleTool,
+		Segments: []semantic.Segment{{
+			Kind: semantic.SegmentToolResult,
+			ToolResult: &semantic.ToolResult{
+				ToolCallID: "toolu_123",
+				Content: []semantic.Segment{{
+					Kind: semantic.SegmentText,
+					Text: "lookup failed",
+				}, {
+					Kind: semantic.SegmentData,
+					Data: &semantic.DataPart{
+						Format: "json",
+						Value:  json.RawMessage(`{"city":"shanghai","forecast":"sunny"}`),
+					},
+				}},
+			},
+		}},
+	})
+
+	if message.Role != runtime.MessageRoleTool {
+		t.Fatalf("message.Role = %q, want tool", message.Role)
+	}
+	if message.ToolCallID != "toolu_123" {
+		t.Fatalf("message.ToolCallID = %q, want toolu_123", message.ToolCallID)
+	}
+	if len(message.Parts) != 2 {
+		t.Fatalf("len(message.Parts) = %d, want 2", len(message.Parts))
+	}
+	if message.Parts[0].Type != runtime.ContentPartTypeText || message.Parts[0].Text != "lookup failed" {
+		t.Fatalf("message.Parts[0] = %#v, want text part", message.Parts[0])
+	}
+	if message.Parts[1].Type != runtime.ContentPartTypeJSON {
+		t.Fatalf("message.Parts[1].Type = %q, want json", message.Parts[1].Type)
+	}
+	if string(message.Parts[1].Data) != `{"city":"shanghai","forecast":"sunny"}` {
+		t.Fatalf("message.Parts[1].Data = %s, want raw json payload", message.Parts[1].Data)
+	}
+}
+
+func TestLowerSemanticTurnFallsBackToEmptyTextWhenToolResultContentIsEmpty(t *testing.T) {
+	message := lowerSemanticTurn(semantic.Turn{
+		Role: semantic.RoleTool,
+		Segments: []semantic.Segment{{
+			Kind: semantic.SegmentToolResult,
+			ToolResult: &semantic.ToolResult{ToolCallID: "toolu_123"},
+		}},
+	})
+
+	if message.ToolCallID != "toolu_123" {
+		t.Fatalf("message.ToolCallID = %q, want toolu_123", message.ToolCallID)
+	}
+	if len(message.Parts) != 1 {
+		t.Fatalf("len(message.Parts) = %d, want 1", len(message.Parts))
+	}
+	if message.Parts[0].Type != runtime.ContentPartTypeText || message.Parts[0].Text != "" {
+		t.Fatalf("message.Parts[0] = %#v, want empty text fallback", message.Parts[0])
 	}
 }
 
