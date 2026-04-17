@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"syrogo/internal/config"
+	"syrogo/internal/runtime"
 )
 
 type openAIChatCodec struct{}
@@ -87,4 +88,90 @@ func (openAIChatCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeOpenAIChatResponse(w, resp)
+}
+
+func writeOpenAIChatResponse(w http.ResponseWriter, resp runtime.Response) {
+	message := map[string]any{
+		"role":    string(resp.Message.Role),
+		"content": firstTextPart(resp.Message),
+	}
+	if len(resp.Message.ToolCalls) > 0 {
+		toolCalls := make([]map[string]any, 0, len(resp.Message.ToolCalls))
+		for _, call := range resp.Message.ToolCalls {
+			toolCalls = append(toolCalls, map[string]any{
+				"id":   call.ID,
+				"type": "function",
+				"function": map[string]any{
+					"name":      call.Name,
+					"arguments": call.Arguments,
+				},
+			})
+		}
+		message["tool_calls"] = toolCalls
+	}
+	if resp.Message.ToolCallID != "" {
+		message["tool_call_id"] = resp.Message.ToolCallID
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":     resp.ID,
+		"object": resp.Object,
+		"model":  resp.Model,
+		"choices": []map[string]any{{
+			"index":   0,
+			"message": message,
+		}},
+	})
+}
+
+func openAIStreamChunk(event runtime.StreamEvent) any {
+	chunk := map[string]any{
+		"id":     event.ResponseID,
+		"object": "chat.completion.chunk",
+		"model":  event.Model,
+	}
+
+	switch event.Type {
+	case runtime.StreamEventMessageStart:
+		chunk["choices"] = []map[string]any{{
+			"index": 0,
+			"delta": map[string]any{"role": string(event.MessageRole)},
+		}}
+	case runtime.StreamEventContentDelta:
+		delta := map[string]any{}
+		if event.Delta != nil {
+			delta["content"] = event.Delta.Text
+		}
+		if event.ToolCall != nil {
+			delta["tool_calls"] = []map[string]any{{
+				"index": event.ToolCallIndex,
+				"id":    event.ToolCall.ID,
+				"type":  "function",
+				"function": map[string]any{
+					"name":      event.ToolCall.Name,
+					"arguments": event.ToolCall.Arguments,
+				},
+			}}
+		}
+		chunk["choices"] = []map[string]any{{
+			"index": 0,
+			"delta": delta,
+		}}
+	case runtime.StreamEventUsage:
+		chunk["usage"] = event.Usage
+	case runtime.StreamEventMessageEnd:
+		chunk["choices"] = []map[string]any{{
+			"index":         0,
+			"delta":         map[string]any{},
+			"finish_reason": string(event.FinishReason),
+		}}
+	case runtime.StreamEventError:
+		message := "stream error"
+		if event.Err != nil {
+			message = event.Err.Error()
+		}
+		chunk = map[string]any{"error": message}
+	}
+
+	return chunk
 }
