@@ -381,7 +381,7 @@ func TestLowerSemanticTurnFallsBackToEmptyTextWhenToolResultContentIsEmpty(t *te
 	message := lowerSemanticTurn(semantic.Turn{
 		Role: semantic.RoleTool,
 		Segments: []semantic.Segment{{
-			Kind: semantic.SegmentToolResult,
+			Kind:       semantic.SegmentToolResult,
 			ToolResult: &semantic.ToolResult{ToolCallID: "toolu_123"},
 		}},
 	})
