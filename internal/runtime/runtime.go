@@ -73,10 +73,11 @@ type ToolDefinition struct {
 }
 
 type Message struct {
-	Role       MessageRole
-	Parts      []ContentPart
-	ToolCalls  []ToolCall
-	ToolCallID string
+	Role              MessageRole
+	Parts             []ContentPart
+	ToolCalls         []ToolCall
+	ToolCallID        string
+	ToolResultIsError bool
 }
 
 type Request struct {

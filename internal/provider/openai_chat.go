@@ -192,21 +192,28 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, payload
 		return streamResponse(decoded), nil
 	}
 
-	rawBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		_ = httpResp.Body.Close()
-		return nil, NewRetryableError(fmt.Errorf("read stream response body: %w", err))
+	traceWriter := newProviderTraceWriter(trace.RequestID, trace.Provider, trace.Protocol, "stream")
+	streamBody := io.Reader(httpResp.Body)
+	if traceWriter != nil {
+		streamBody = io.TeeReader(httpResp.Body, traceWriter)
 	}
-	appendProviderTraceText(trace.RequestID, trace.Provider, trace.Protocol, "stream", rawBody)
-	_ = httpResp.Body.Close()
-
-	events, err := decodeOpenAIChatStream(bytes.NewReader(rawBody))
+	events, err := decodeOpenAIChatStream(streamBody)
 	if err != nil {
+		if traceWriter != nil {
+			_ = traceWriter.Close()
+		}
+		_ = httpResp.Body.Close()
 		return nil, NewRetryableError(err)
 	}
 	out := make(chan runtime.StreamEvent)
 	go func() {
 		defer close(out)
+		defer httpResp.Body.Close()
+		defer func() {
+			if traceWriter != nil {
+				_ = traceWriter.Close()
+			}
+		}()
 		for event := range events {
 			out <- event
 		}

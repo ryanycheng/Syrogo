@@ -48,51 +48,7 @@ func decodeOpenAIChatStream(body io.Reader) (<-chan runtime.StreamEvent, error) 
 		arguments strings.Builder
 	}
 
-	var chunks []openAIChatStreamChunk
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, ":") {
-			continue
-		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "[DONE]" {
-			break
-		}
-		var chunk openAIChatStreamChunk
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			return nil, fmt.Errorf("decode stream chunk: %w", err)
-		}
-		chunks = append(chunks, chunk)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read stream chunk: %w", err)
-	}
-
-	eventCount := 2
-	toolCalls := map[int]*toolState{}
-	for _, chunk := range chunks {
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		choice := chunk.Choices[0]
-		if choice.Delta.Content != "" {
-			eventCount++
-		}
-		for _, call := range choice.Delta.ToolCalls {
-			if _, ok := toolCalls[call.Index]; !ok {
-				toolCalls[call.Index] = &toolState{}
-				eventCount++
-			}
-		}
-		if chunk.Usage != nil {
-			eventCount++
-		}
-	}
-
-	ch := make(chan runtime.StreamEvent, eventCount)
+	ch := make(chan runtime.StreamEvent, 16)
 	go func() {
 		defer close(ch)
 		messageID := ""
@@ -102,7 +58,23 @@ func decodeOpenAIChatStream(body io.Reader) (<-chan runtime.StreamEvent, error) 
 		usage := (*runtime.Usage)(nil)
 		states := map[int]*toolState{}
 		started := false
-		for _, chunk := range chunks {
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, ":") {
+				continue
+			}
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "[DONE]" {
+				break
+			}
+			var chunk openAIChatStreamChunk
+			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+				ch <- runtime.StreamEvent{Type: runtime.StreamEventError, ResponseID: messageID, Model: model, MessageRole: role, Err: fmt.Errorf("decode stream chunk: %w", err)}
+				return
+			}
 			if chunk.ID != "" {
 				messageID = chunk.ID
 			}
@@ -164,6 +136,10 @@ func decodeOpenAIChatStream(body io.Reader) (<-chan runtime.StreamEvent, error) 
 					finishReason = runtime.FinishReasonStop
 				}
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			ch <- runtime.StreamEvent{Type: runtime.StreamEventError, ResponseID: messageID, Model: model, MessageRole: role, Err: fmt.Errorf("read stream chunk: %w", err)}
+			return
 		}
 		if !started {
 			ch <- runtime.StreamEvent{Type: runtime.StreamEventMessageStart, ResponseID: messageID, Model: model, MessageRole: role}

@@ -12,6 +12,7 @@ type openAIChatMessage struct {
 	Content    string           `json:"content,omitempty"`
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
+	Status     string           `json:"status,omitempty"`
 }
 
 type openAIChatRequest struct {
@@ -71,6 +72,9 @@ func encodeOpenAIChatRequest(req runtime.Request) any {
 			Role:       string(msg.Role),
 			Content:    content,
 			ToolCallID: msg.ToolCallID,
+		}
+		if msg.Role == runtime.MessageRoleTool && msg.ToolResultIsError {
+			encoded.Status = "error"
 		}
 		if len(msg.ToolCalls) > 0 {
 			encoded.ToolCalls = make([]openAIToolCall, 0, len(msg.ToolCalls))

@@ -588,6 +588,7 @@ func TestNewBridgesAnthropicToolResultToOpenAIChatHistory(t *testing.T) {
 				} `json:"function"`
 			} `json:"tool_calls"`
 			ToolCallID string `json:"tool_call_id"`
+			Status     string `json:"status"`
 		} `json:"messages"`
 	}, 0, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -603,6 +604,7 @@ func TestNewBridgesAnthropicToolResultToOpenAIChatHistory(t *testing.T) {
 					} `json:"function"`
 				} `json:"tool_calls"`
 				ToolCallID string `json:"tool_call_id"`
+				Status     string `json:"status"`
 			} `json:"messages"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

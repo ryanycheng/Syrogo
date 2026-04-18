@@ -1034,6 +1034,7 @@ func TestOpenAICompatibleChatCompletionSendsToolCallingFields(t *testing.T) {
 				Content    string           `json:"content"`
 				ToolCalls  []openAIToolCall `json:"tool_calls"`
 				ToolCallID string           `json:"tool_call_id"`
+				Status     string           `json:"status"`
 			} `json:"messages"`
 			Tools      []openAIToolDefinition `json:"tools"`
 			ToolChoice string                 `json:"tool_choice"`
@@ -1049,6 +1050,9 @@ func TestOpenAICompatibleChatCompletionSendsToolCallingFields(t *testing.T) {
 		}
 		if req.Messages[1].ToolCallID != "call_123" {
 			t.Fatalf("req.Messages[1].ToolCallID = %q, want call_123", req.Messages[1].ToolCallID)
+		}
+		if req.Messages[1].Status != "error" {
+			t.Fatalf("req.Messages[1].Status = %q, want error", req.Messages[1].Status)
 		}
 		if len(req.Tools) != 1 || req.Tools[0].Function.Name != "get_weather" {
 			t.Fatalf("req.Tools = %#v, want single get_weather tool", req.Tools)
@@ -1086,9 +1090,10 @@ func TestOpenAICompatibleChatCompletionSendsToolCallingFields(t *testing.T) {
 				Arguments: `{"city":"shanghai"}`,
 			}},
 		}, {
-			Role:       runtime.MessageRoleTool,
-			ToolCallID: "call_123",
-			Parts:      []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "sunny"}},
+			Role:              runtime.MessageRoleTool,
+			ToolCallID:        "call_123",
+			ToolResultIsError: true,
+			Parts:             []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "sunny"}},
 		}},
 	})
 	if err != nil {

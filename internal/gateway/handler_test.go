@@ -330,6 +330,9 @@ func TestBuildRuntimeRequestSplitsAnthropicUserToolResultsIntoSeparateToolMessag
 	if got.Messages[0].ToolCallID != "call_todo" || got.Messages[1].ToolCallID != "call_read" {
 		t.Fatalf("Messages ToolCallID = %#v, want split tool ids", []string{got.Messages[0].ToolCallID, got.Messages[1].ToolCallID})
 	}
+	if !got.Messages[0].ToolResultIsError || !got.Messages[1].ToolResultIsError {
+		t.Fatalf("Messages ToolResultIsError = %#v, want true for both", []bool{got.Messages[0].ToolResultIsError, got.Messages[1].ToolResultIsError})
+	}
 	if got.Messages[0].Parts[0].Text != "todo error" || got.Messages[1].Parts[0].Text != "read error" {
 		t.Fatalf("Messages Parts = %#v, want preserved tool results", []string{got.Messages[0].Parts[0].Text, got.Messages[1].Parts[0].Text})
 	}
@@ -461,6 +464,30 @@ func TestLowerSemanticTurnFallsBackToEmptyTextWhenToolResultContentIsEmpty(t *te
 	}
 	if message.Parts[0].Type != runtime.ContentPartTypeText || message.Parts[0].Text != "" {
 		t.Fatalf("message.Parts[0] = %#v, want empty text fallback", message.Parts[0])
+	}
+}
+
+func TestLowerSemanticTurnPreservesToolResultErrorFlag(t *testing.T) {
+	message := lowerSemanticTurn(semantic.Turn{
+		Role: semantic.RoleTool,
+		Segments: []semantic.Segment{{
+			Kind: semantic.SegmentToolResult,
+			ToolResult: &semantic.ToolResult{
+				ToolCallID: "toolu_error",
+				IsError:    true,
+				Content: []semantic.Segment{{
+					Kind: semantic.SegmentText,
+					Text: "lookup failed",
+				}},
+			},
+		}},
+	})
+
+	if !message.ToolResultIsError {
+		t.Fatalf("message.ToolResultIsError = %v, want true", message.ToolResultIsError)
+	}
+	if message.ToolCallID != "toolu_error" {
+		t.Fatalf("message.ToolCallID = %q, want toolu_error", message.ToolCallID)
 	}
 }
 

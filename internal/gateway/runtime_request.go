@@ -334,6 +334,7 @@ func lowerSemanticTurn(turn semantic.Turn) runtime.Message {
 		case semantic.SegmentToolResult:
 			if segment.ToolResult != nil {
 				message.ToolCallID = segment.ToolResult.ToolCallID
+				message.ToolResultIsError = segment.ToolResult.IsError
 				message.Parts = append(message.Parts, lowerToolResultContent(segment.ToolResult.Content)...)
 			}
 		case semantic.SegmentData:

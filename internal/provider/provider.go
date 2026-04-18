@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -172,18 +173,51 @@ func appendProviderTraceText(requestID, providerName, protocol, suffix string, p
 	if !traceModeEnabled() {
 		return
 	}
+	writer := newProviderTraceWriter(requestID, providerName, protocol, suffix)
+	if writer == nil {
+		return
+	}
+	_, _ = writer.Write(payload)
+	_ = writer.Close()
+}
+
+type providerTraceWriter struct {
+	file *os.File
+}
+
+func newProviderTraceWriter(requestID, providerName, protocol, suffix string) io.WriteCloser {
+	if !traceModeEnabled() {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Join("tmp", "trace"), 0o755); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "provider trace write failed provider=%s protocol=%s err=%v\n", providerName, protocol, err)
-		return
+		return nil
 	}
 	base := requestID
 	if base == "" {
 		base = time.Now().Format("20060102-150405.000")
 	}
 	fileName := fmt.Sprintf("%s.outbound-%s-%s.%s.txt", base, providerName, protocol, suffix)
-	if err := os.WriteFile(filepath.Join("tmp", "trace", fileName), payload, 0o644); err != nil {
+	f, err := os.Create(filepath.Join("tmp", "trace", fileName))
+	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "provider trace write failed provider=%s protocol=%s err=%v\n", providerName, protocol, err)
+		return nil
 	}
+	return &providerTraceWriter{file: f}
+}
+
+func (w *providerTraceWriter) Write(p []byte) (int, error) {
+	if w == nil || w.file == nil {
+		return len(p), nil
+	}
+	return w.file.Write(p)
+}
+
+func (w *providerTraceWriter) Close() error {
+	if w == nil || w.file == nil {
+		return nil
+	}
+	return w.file.Close()
 }
 
 func NewMock(name string) *MockProvider {
