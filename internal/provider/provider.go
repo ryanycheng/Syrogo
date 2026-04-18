@@ -168,6 +168,24 @@ func appendProviderTraceSnapshot(snapshot providerTraceSnapshot) {
 	}
 }
 
+func appendProviderTraceText(requestID, providerName, protocol, suffix string, payload []byte) {
+	if !traceModeEnabled() {
+		return
+	}
+	if err := os.MkdirAll(filepath.Join("tmp", "trace"), 0o755); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "provider trace write failed provider=%s protocol=%s err=%v\n", providerName, protocol, err)
+		return
+	}
+	base := requestID
+	if base == "" {
+		base = time.Now().Format("20060102-150405.000")
+	}
+	fileName := fmt.Sprintf("%s.outbound-%s-%s.%s.txt", base, providerName, protocol, suffix)
+	if err := os.WriteFile(filepath.Join("tmp", "trace", fileName), payload, 0o644); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "provider trace write failed provider=%s protocol=%s err=%v\n", providerName, protocol, err)
+	}
+}
+
 func NewMock(name string) *MockProvider {
 	return &MockProvider{providerName: name}
 }

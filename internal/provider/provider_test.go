@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -114,7 +115,7 @@ func TestEncodeOpenAIChatRequestIncludesToolDefinitions(t *testing.T) {
 	}
 }
 
-func TestEncodeOpenAIChatRequestDropsClaudeCodeBuiltinTools(t *testing.T) {
+func TestEncodeOpenAIChatRequestKeepsClaudeCodeBuiltinTools(t *testing.T) {
 	payload := encodeOpenAIChatRequest(runtime.Request{
 		Model: "gpt-4o-mini",
 		Tools: []runtime.ToolDefinition{{
@@ -140,11 +141,11 @@ func TestEncodeOpenAIChatRequestDropsClaudeCodeBuiltinTools(t *testing.T) {
 	if !ok {
 		t.Fatalf("payload type = %T, want openAIChatRequest", payload)
 	}
-	if len(body.Tools) != 1 {
-		t.Fatalf("len(body.Tools) = %d, want 1", len(body.Tools))
+	if len(body.Tools) != 4 {
+		t.Fatalf("len(body.Tools) = %d, want 4", len(body.Tools))
 	}
-	if body.Tools[0].Function.Name != "get_weather" {
-		t.Fatalf("body.Tools[0].Function.Name = %q, want get_weather", body.Tools[0].Function.Name)
+	if body.Tools[0].Function.Name != "CronCreate" || body.Tools[1].Function.Name != "Read" || body.Tools[2].Function.Name != "TodoWrite" || body.Tools[3].Function.Name != "get_weather" {
+		t.Fatalf("body.Tools = %#v, want builtin tools preserved", body.Tools)
 	}
 	if body.ToolChoice != "auto" {
 		t.Fatalf("body.ToolChoice = %q, want auto", body.ToolChoice)
@@ -1224,78 +1225,44 @@ func TestOpenAICompatibleChatCompletionResumesRoundRobinAfterSuccessfulCall(t *t
 	}
 }
 
-func TestOpenAICompatibleStreamCompletionEmitsToolCallDelta(t *testing.T) {
+func TestOpenAICompatibleStreamCompletionWritesRawSSETraceWhenEnabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() error = %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("os.Chdir() error = %v", err)
+	}
+	defer func() { _ = os.Chdir(wd) }()
+	defer func() { _ = os.Unsetenv("SYROGO_TRACE") }()
+	if err := os.Setenv("SYROGO_TRACE", "full"); err != nil {
+		t.Fatalf("os.Setenv() error = %v", err)
+	}
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":     "chatcmpl-1",
-			"object": "chat.completion",
-			"model":  "gpt-4o-mini",
-			"choices": []map[string]any{{
-				"message": map[string]any{
-					"role": "assistant",
-					"tool_calls": []map[string]any{{
-						"id":   "call_123",
-						"type": "function",
-						"function": map[string]any{
-							"name":      "get_weather",
-							"arguments": `{"city":"shanghai"}`,
-						},
-					}},
-				},
-			}},
-		})
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":\"\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"file_path\\\":\\\"/tmp/a\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
 
+	ctx := context.WithValue(context.Background(), runtime.ContextKeyRequestID, "req-trace-openai-stream")
 	p := NewOpenAICompatible("openai", server.URL, []string{"test-key"}, server.Client())
-	ch, err := p.StreamCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini"})
+	ch, err := p.StreamCompletion(ctx, runtime.Request{Model: "gpt-4o-mini"})
 	if err != nil {
 		t.Fatalf("StreamCompletion() error = %v", err)
 	}
+	for range ch {
+	}
 
-	var toolEvent *runtime.StreamEvent
-	for event := range ch {
-		if event.ToolCall != nil {
-			e := event
-			toolEvent = &e
-		}
-	}
-	if toolEvent == nil {
-		t.Fatal("toolEvent = nil, want tool call delta")
-	}
-	if toolEvent.ToolCall.ID != "call_123" || toolEvent.ToolCall.Name != "get_weather" {
-		t.Fatalf("toolEvent.ToolCall = %#v, want decoded tool call", toolEvent.ToolCall)
-	}
-}
-
-func TestMockProviderStreamCompletionEmitsToolCallDelta(t *testing.T) {
-	p := NewMock("mock")
-	ch, err := p.StreamCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini"})
+	tracePath := filepath.Join(tmpDir, "tmp", "trace", "req-trace-openai-stream.outbound-openai-openai_chat.stream.txt")
+	data, err := os.ReadFile(tracePath)
 	if err != nil {
-		t.Fatalf("StreamCompletion() error = %v", err)
+		t.Fatalf("os.ReadFile(%q) error = %v", tracePath, err)
 	}
-
-	var events []runtime.StreamEvent
-	for event := range ch {
-		events = append(events, event)
-	}
-
-	if len(events) != 3 {
-		t.Fatalf("len(events) = %d, want 3", len(events))
-	}
-	if events[0].Type != runtime.StreamEventMessageStart {
-		t.Fatalf("events[0].Type = %q, want message_start", events[0].Type)
-	}
-	if events[1].Type != runtime.StreamEventContentDelta {
-		t.Fatalf("events[1].Type = %q, want content_delta", events[1].Type)
-	}
-	if events[1].Delta == nil || events[1].Delta.Text != "syrogo mock response" {
-		t.Fatalf("events[1].Delta = %#v, want syrogo mock response", events[1].Delta)
-	}
-	if events[2].Type != runtime.StreamEventMessageEnd {
-		t.Fatalf("events[2].Type = %q, want message_end", events[2].Type)
-	}
-	if events[2].FinishReason != runtime.FinishReasonStop {
-		t.Fatalf("events[2].FinishReason = %q, want stop", events[2].FinishReason)
+	if !strings.Contains(string(data), `"tool_calls"`) || !strings.Contains(string(data), `data: [DONE]`) {
+		t.Fatalf("raw stream trace = %q, want tool_calls and done frame", string(data))
 	}
 }

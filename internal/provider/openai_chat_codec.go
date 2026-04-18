@@ -118,10 +118,6 @@ func encodeOpenAIChatRequest(req runtime.Request) any {
 }
 
 func shouldDropOpenAIChatTool(tool runtime.ToolDefinition) bool {
-	if _, ok := claudeCodeBuiltinToolNames[tool.Name]; ok {
-		return true
-	}
-
 	var schema map[string]any
 	if len(tool.InputSchema) > 0 && json.Unmarshal(tool.InputSchema, &schema) == nil {
 		if kind, _ := schema["type"].(string); kind != "" && kind != "object" {
