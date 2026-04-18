@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"syrogo/internal/config"
+	"syrogo/internal/eventstream"
 	"syrogo/internal/runtime"
 )
 
@@ -172,116 +173,147 @@ func writeAnthropicMessageResponse(w http.ResponseWriter, resp runtime.Response)
 }
 
 func anthropicStreamFrames(events []runtime.StreamEvent) []anthropicSSEFrame {
-	frames := make([]anthropicSSEFrame, 0, 8)
-	responseID := ""
-	model := ""
-	messageRole := runtime.MessageRoleAssistant
-	finishReason := runtime.FinishReasonStop
-	usage := &runtime.Usage{}
-	textBlockIndex := -1
-	nextBlockIndex := 0
-	hasToolUse := false
-
+	all := make([]eventstream.Event, 0, len(events))
 	for _, event := range events {
-		if event.ResponseID != "" {
-			responseID = event.ResponseID
-		}
-		if event.Model != "" {
-			model = event.Model
-		}
-		if event.MessageRole != "" {
-			messageRole = event.MessageRole
-		}
-		if event.Usage != nil {
-			usage = event.Usage
-		}
-		if event.Type == runtime.StreamEventMessageEnd && event.FinishReason != "" {
-			finishReason = event.FinishReason
-		}
-		if event.ToolCall != nil {
-			hasToolUse = true
-		}
+		converted := runtimeStreamEventToEventFrames(event)
+		all = append(all, converted...)
 	}
-	if hasToolUse && finishReason == runtime.FinishReasonStop {
-		finishReason = runtime.FinishReasonToolUse
+	frames := make([]anthropicSSEFrame, 0, len(all)+2)
+	for frame := range anthropicStreamFramesFromEventStream(sliceEventStream(all)) {
+		frames = append(frames, frame)
 	}
+	return frames
+}
 
-	frames = append(frames, anthropicSSEFrame{
-		event: "message_start",
-		payload: map[string]any{
-			"type": "message_start",
-			"message": map[string]any{
-				"id":            responseID,
-				"type":          "message",
-				"role":          string(messageRole),
-				"model":         model,
-				"content":       []any{},
-				"stop_reason":   nil,
-				"stop_sequence": nil,
-				"usage": map[string]any{
-					"input_tokens":  usage.InputTokens,
-					"output_tokens": 0,
+func runtimeStreamEventToEventFrames(event runtime.StreamEvent) []eventstream.Event {
+	ch := make(chan runtime.StreamEvent, 1)
+	ch <- event
+	close(ch)
+	frames := make([]eventstream.Event, 0, 4)
+	for converted := range eventstream.EventStreamFromRuntime(ch) {
+		frames = append(frames, converted)
+	}
+	return frames
+}
+
+func sliceEventStream(events []eventstream.Event) <-chan eventstream.Event {
+	ch := make(chan eventstream.Event, len(events))
+	for _, event := range events {
+		ch <- event
+	}
+	close(ch)
+	return ch
+}
+
+func anthropicStreamFramesFromEventStream(events <-chan eventstream.Event) <-chan anthropicSSEFrame {
+	frames := make(chan anthropicSSEFrame, 16)
+	go func() {
+		defer close(frames)
+		usage := &runtime.Usage{}
+		messageID := ""
+		model := ""
+		role := runtime.MessageRoleAssistant
+		finishReason := eventstream.StopReasonEndTurn
+		messageStarted := false
+		toolArgumentSnapshots := map[int]string{}
+		emitMessageStart := func() {
+			if messageStarted {
+				return
+			}
+			messageStarted = true
+			frames <- anthropicSSEFrame{event: "message_start", payload: map[string]any{
+				"type": "message_start",
+				"message": map[string]any{
+					"id":            messageID,
+					"type":          "message",
+					"role":          string(role),
+					"model":         model,
+					"content":       []any{},
+					"stop_reason":   nil,
+					"stop_sequence": nil,
+					"usage":         map[string]any{"input_tokens": usage.InputTokens, "output_tokens": 0},
 				},
-			},
-		},
-	})
-
-	for _, event := range events {
-		switch event.Type {
-		case runtime.StreamEventContentDelta:
-			if event.Delta != nil {
-				if textBlockIndex == -1 {
-					textBlockIndex = nextBlockIndex
-					nextBlockIndex++
-					frames = append(frames, anthropicSSEFrame{event: "content_block_start", payload: map[string]any{"type": "content_block_start", "index": textBlockIndex, "content_block": map[string]any{"type": "text", "text": ""}}})
-				}
-				frames = append(frames, anthropicSSEFrame{event: "content_block_delta", payload: map[string]any{"type": "content_block_delta", "index": textBlockIndex, "delta": map[string]any{"type": "text_delta", "text": event.Delta.Text}}})
+			}}
+		}
+		for event := range events {
+			if event.MessageID != "" {
+				messageID = event.MessageID
 			}
-			if event.ToolCall != nil {
-				var input any
-				if err := json.Unmarshal([]byte(event.ToolCall.Arguments), &input); err != nil {
-					input = map[string]any{}
-				}
-				toolIndex := nextBlockIndex
-				nextBlockIndex++
-				frames = append(frames,
-					anthropicSSEFrame{event: "content_block_start", payload: map[string]any{"type": "content_block_start", "index": toolIndex, "content_block": map[string]any{"type": "tool_use", "id": event.ToolCall.ID, "name": event.ToolCall.Name, "input": input}}},
-					anthropicSSEFrame{event: "content_block_stop", payload: map[string]any{"type": "content_block_stop", "index": toolIndex}},
-				)
+			if event.Model != "" {
+				model = event.Model
 			}
-		case runtime.StreamEventUsage:
+			if event.Role != "" {
+				role = event.Role
+			}
 			if event.Usage != nil {
 				usage = event.Usage
 			}
-		case runtime.StreamEventError:
-			message := "stream error"
-			if event.Err != nil {
-				message = event.Err.Error()
+			switch event.Type {
+			case eventstream.EventTypeMessageStart:
+				continue
+			case eventstream.EventTypeContentBlockStart:
+				emitMessageStart()
+				if event.Block == nil {
+					continue
+				}
+				contentBlock := map[string]any{"type": string(event.Block.Type)}
+				switch event.Block.Type {
+				case eventstream.BlockTypeText:
+					contentBlock["text"] = ""
+				case eventstream.BlockTypeToolUse:
+					contentBlock["input"] = map[string]any{}
+					toolArgumentSnapshots[event.BlockIndex] = ""
+					if event.Block.ToolCall != nil {
+						contentBlock["id"] = event.Block.ToolCall.ID
+						contentBlock["name"] = event.Block.ToolCall.Name
+					}
+				case eventstream.BlockTypeJSON:
+					contentBlock["text"] = string(event.Block.Data)
+				}
+				frames <- anthropicSSEFrame{event: "content_block_start", payload: map[string]any{"type": "content_block_start", "index": event.BlockIndex, "content_block": contentBlock}}
+			case eventstream.EventTypeContentBlockDelta:
+				emitMessageStart()
+				if event.Block != nil && event.Block.Type == eventstream.BlockTypeText {
+					frames <- anthropicSSEFrame{event: "content_block_delta", payload: map[string]any{"type": "content_block_delta", "index": event.BlockIndex, "delta": map[string]any{"type": "text_delta", "text": event.TextDelta}}}
+					continue
+				}
+				if event.Block != nil && event.Block.Type == eventstream.BlockTypeToolUse && event.ToolCall != nil && event.ToolCall.Arguments != "" {
+					previous := toolArgumentSnapshots[event.BlockIndex]
+					partial := event.ToolCall.Arguments
+					if strings.HasPrefix(partial, previous) {
+						partial = strings.TrimPrefix(partial, previous)
+					}
+					toolArgumentSnapshots[event.BlockIndex] = event.ToolCall.Arguments
+					if partial == "" {
+						continue
+					}
+					frames <- anthropicSSEFrame{event: "content_block_delta", payload: map[string]any{"type": "content_block_delta", "index": event.BlockIndex, "delta": map[string]any{"type": "input_json_delta", "partial_json": partial}}}
+				}
+			case eventstream.EventTypeContentBlockStop:
+				emitMessageStart()
+				delete(toolArgumentSnapshots, event.BlockIndex)
+				frames <- anthropicSSEFrame{event: "content_block_stop", payload: map[string]any{"type": "content_block_stop", "index": event.BlockIndex}}
+			case eventstream.EventTypeUsage:
+				emitMessageStart()
+			case eventstream.EventTypeMessageDelta:
+				emitMessageStart()
+				if event.FinishReason != "" {
+					finishReason = event.FinishReason
+				}
+				frames <- anthropicSSEFrame{event: "message_delta", payload: map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": anthropicStopReason(eventstream.StopReasonToRuntime(finishReason)), "stop_sequence": nil}, "usage": map[string]any{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens}}}
+			case eventstream.EventTypeMessageStop:
+				emitMessageStart()
+				frames <- anthropicSSEFrame{event: "message_stop", payload: map[string]any{"type": "message_stop"}}
+			case eventstream.EventTypeError:
+				emitMessageStart()
+				message := "stream error"
+				if event.Err != nil {
+					message = event.Err.Error()
+				}
+				frames <- anthropicSSEFrame{event: "error", payload: map[string]any{"type": "error", "error": map[string]any{"message": message}}}
 			}
-			return append(frames, anthropicSSEFrame{event: "error", payload: map[string]any{"type": "error", "error": map[string]any{"message": message}}})
 		}
-	}
-
-	if textBlockIndex != -1 {
-		frames = append(frames, anthropicSSEFrame{event: "content_block_stop", payload: map[string]any{"type": "content_block_stop", "index": textBlockIndex}})
-	}
-
-	messageDelta := map[string]any{
-		"type": "message_delta",
-		"delta": map[string]any{
-			"stop_reason":   anthropicStopReason(finishReason),
-			"stop_sequence": nil,
-		},
-		"usage": map[string]any{
-			"input_tokens":  usage.InputTokens,
-			"output_tokens": usage.OutputTokens,
-		},
-	}
-	frames = append(frames,
-		anthropicSSEFrame{event: "message_delta", payload: messageDelta},
-		anthropicSSEFrame{event: "message_stop", payload: map[string]any{"type": "message_stop"}},
-	)
-
+	}()
 	return frames
 }
 

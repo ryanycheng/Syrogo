@@ -1018,6 +1018,58 @@ func TestAnthropicMessagesStreamsToolUseAndSnakeCaseUsage(t *testing.T) {
 	}
 }
 
+func TestAnthropicMessagesStreamingUsesInputJSONDeltaForToolUse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-tool",
+			"object": "chat.completion",
+			"model":  "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"index": 0,
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{{
+						"id":   "call_123",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "get_weather",
+							"arguments": `{"city":"shanghai"}`,
+						},
+					}},
+				},
+				"finish_reason": "tool_calls",
+			}},
+			"usage": map[string]any{"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"openai": provider.NewOpenAICompatible("openai", upstream.URL, []string{"test-key"}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"openai-tag"}, Strategy: "failover"}}}, testDualProtocolInbounds(), []config.OutboundSpec{{Name: "openai", Protocol: "openai_chat", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "openai-tag"}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "claude-sonnet-4-5", "stream": true, "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `event: content_block_start
+`) || !strings.Contains(got, `"id":"call_123"`) || !strings.Contains(got, `"name":"get_weather"`) || !strings.Contains(got, `"input":{}`) {
+		t.Fatalf("body = %q, want empty tool_use input at content_block_start", got)
+	}
+	if !strings.Contains(got, `"type":"input_json_delta"`) || (!strings.Contains(got, `"partial_json":"{\"city\":\"shanghai\"}"`) && (!strings.Contains(got, `"partial_json":"{\"city\":\"sh"`) || !strings.Contains(got, `"partial_json":"anghai\"}"`))) {
+		t.Fatalf("body = %q, want input_json_delta partial_json tool stream", got)
+	}
+}
+
 func TestAnthropicMessagesStreamingAlwaysEmitsUsageShape(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -1103,6 +1155,90 @@ func TestChatCompletionsStreamsToolCallDelta(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "event: message_start") {
 		t.Fatalf("body = %q, should not include custom event names for OpenAI SSE", w.Body.String())
+	}
+}
+
+func TestAnthropicMessagesWritesStreamTrace(t *testing.T) {
+	tmpDir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() error = %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("os.Chdir() error = %v", err)
+	}
+	defer func() { _ = os.Chdir(wd) }()
+	defer func() { _ = os.Unsetenv("SYROGO_TRACE") }()
+	if err := os.Setenv("SYROGO_TRACE", "anthropic_stream"); err != nil {
+		t.Fatalf("os.Setenv() error = %v", err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-tool",
+			"object": "chat.completion",
+			"model":  "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"index": 0,
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{{
+						"id":   "call_123",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "get_weather",
+							"arguments": `{"city":"shanghai"}`,
+						},
+					}},
+				},
+				"finish_reason": "tool_calls",
+			}},
+			"usage": map[string]any{"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"openai": provider.NewOpenAICompatible("openai", upstream.URL, []string{"test-key"}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"openai-tag"}, Strategy: "failover"}}}, testDualProtocolInbounds(), []config.OutboundSpec{{Name: "openai", Protocol: "openai_chat", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "openai-tag"}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "claude-sonnet-4-5", "stream": true, "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+
+	matches, err := filepath.Glob(filepath.Join(tmpDir, "tmp", "trace", "*.gateway-anthropic.stream.txt"))
+	if err != nil {
+		t.Fatalf("filepath.Glob() error = %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("stream trace count = %d, want 1", len(matches))
+	}
+
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "event: message_start\n") {
+		t.Fatalf("trace = %q, want message_start", got)
+	}
+	if !strings.Contains(got, `"type":"input_json_delta"`) {
+		t.Fatalf("trace = %q, want input_json_delta", got)
+	}
+	if !strings.Contains(got, `"stop_reason":"tool_use"`) {
+		t.Fatalf("trace = %q, want tool_use stop reason", got)
+	}
+	if !strings.Contains(got, "event: done\n") {
+		t.Fatalf("trace = %q, want done event", got)
 	}
 }
 

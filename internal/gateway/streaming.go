@@ -1,10 +1,12 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 
+	"syrogo/internal/eventstream"
 	"syrogo/internal/runtime"
 )
 
@@ -95,7 +97,7 @@ func (h *Handler) handleAnthropicStreaming(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	events, err := h.dispatcher.DispatchStream(r.Context(), req, plan)
+	runtimeEvents, err := h.dispatcher.DispatchStream(r.Context(), req, plan)
 	if err != nil {
 		status, message := gatewayError(err)
 		logger.Error("stream dispatch failed",
@@ -107,22 +109,30 @@ func (h *Handler) handleAnthropicStreaming(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	allEvents := make([]runtime.StreamEvent, 0, 8)
-	for event := range events {
-		allEvents = append(allEvents, event)
-	}
-
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	for _, frame := range anthropicStreamFrames(allEvents) {
+	requestID, _ := r.Context().Value(runtime.ContextKeyRequestID).(string)
+	var traceBuf bytes.Buffer
+
+	for frame := range anthropicStreamFramesFromEventStream(eventstream.EventStreamFromRuntime(runtimeEvents)) {
+		if traceAnthropicStreamEnabled() {
+			appendAnthropicSSETrace(&traceBuf, frame.event, frame.payload)
+		}
 		if err := writeAnthropicSSE(w, frame.event, frame.payload); err != nil {
 			logger.Error("stream write failed", kvAny("error", err))
 			return
 		}
 		flusher.Flush()
+	}
+
+	if traceAnthropicStreamEnabled() {
+		traceBuf.WriteString("event: done\ndata: {}\n\n")
+		if err := writeAnthropicStreamTrace(requestID, traceBuf.Bytes()); err != nil {
+			logger.Error("anthropic stream trace write failed", kvAny("error", err))
+		}
 	}
 
 	_, _ = fmt.Fprint(w, "event: done\ndata: {}\n\n")
@@ -136,6 +146,15 @@ type loggerLike interface {
 func kvString(key, value string) any  { return fmt.Sprintf("%s=%s", key, value) }
 func kvInt(key string, value int) any { return fmt.Sprintf("%s=%d", key, value) }
 func kvAny(key string, value any) any { return fmt.Sprintf("%s=%v", key, value) }
+
+func appendAnthropicSSETrace(buf *bytes.Buffer, event string, payload any) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintf(buf, "event: %s\n", event)
+	_, _ = fmt.Fprintf(buf, "data: %s\n\n", data)
+}
 
 func writeAnthropicSSE(w http.ResponseWriter, event string, payload any) error {
 	data, err := json.Marshal(payload)

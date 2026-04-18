@@ -30,6 +30,11 @@ func traceInboundEnabled() bool {
 	return value == "1" || value == "full" || value == "inbound"
 }
 
+func traceAnthropicStreamEnabled() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("SYROGO_TRACE")))
+	return value == "1" || value == "full" || value == "anthropic_stream"
+}
+
 func writeInboundDebugSnapshot(snapshot inboundDebugSnapshot) error {
 	if !traceInboundEnabled() {
 		return nil
@@ -48,6 +53,21 @@ func writeInboundDebugSnapshot(snapshot inboundDebugSnapshot) error {
 		base = time.Now().Format("20060102-150405.000")
 	}
 	fileName := fmt.Sprintf("%s.inbound.json", base)
+	return os.WriteFile(filepath.Join("tmp", "trace", fileName), payload, 0o644)
+}
+
+func writeAnthropicStreamTrace(requestID string, payload []byte) error {
+	if !traceAnthropicStreamEnabled() {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Join("tmp", "trace"), 0o755); err != nil {
+		return err
+	}
+	base := requestID
+	if base == "" {
+		base = time.Now().Format("20060102-150405.000")
+	}
+	fileName := fmt.Sprintf("%s.gateway-anthropic.stream.txt", base)
 	return os.WriteFile(filepath.Join("tmp", "trace", fileName), payload, 0o644)
 }
 
