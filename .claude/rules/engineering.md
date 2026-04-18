@@ -19,7 +19,7 @@
 - 只有在出现第二个明确实现，或确有测试替身需求时，再考虑扩大接口。
 - 新抽象必须解决当前问题，而不是假设未来问题。
 - 不为未来可能出现的复杂场景提前搭通用框架。
-- 协议适配边界要明确：inbound transform 放 `gateway`，outbound/provider transform 放 `provider`，中立模型放 `runtime`。
+- 协议适配边界要明确：inbound transform 放 `gateway`，outbound/provider transform 放 `provider`，中立模型放 `runtime`，流事件整理放 `eventstream`。
 
 ## Testing requirements
 - 开发过程必须补充测试，不能只依赖手工运行。
@@ -42,17 +42,30 @@
   - 必要的回归测试
   - 必要的流程测试或集成测试
 - 如果某类测试暂时无法补齐，必须明确说明风险和缺口，不能默认忽略。
-- 修改 `POST /v1/messages`、`anthropic_messages`、tools、stream 相关逻辑时，至少补一类能覆盖真实协议往返的流程测试；本地可验证时，优先再做一次真实联调。
+- 修改 `POST /v1/messages`、tools、codec、stream、`anthropic_messages`、`openai_chat` 等关键协议链路时，至少补一类能覆盖真实协议往返的流程测试；本地可验证时，优先再做一次真实联调。
 
-## Claude Code / Messages bridge guardrails
-- 修改 `messages` 链路时，优先先看 inbound shape、runtime lowering、outbound encode，再看最终响应；不要只盯最终文本结果。
-- 改动时必须重点核对这些语义是否仍然成立：`system`、`tool_use`、`tool_result`、`tool_use_id` / `tool_call_id`、`stop_reason`、`usage`、SSE 事件顺序、`input_json_delta` 增量语义。
+## Messages / tools / stream guardrails
+- 修改主链路时，优先按这个顺序核对：inbound shape -> `runtime` lowering/raising -> outbound encode/decode -> 最终响应或 SSE 序列化。
+- 不要只看最终文本结果；要确认中间抽象是否仍然成立。
+- 改动时必须重点核对这些语义是否仍然成立：
+  - `system`
+  - `tool_use`
+  - `tool_result`
+  - `tool_use_id` / `tool_call_id` / 上游工具 ID 对齐
+  - `stop_reason` / finish reason
+  - `usage`
+  - SSE 事件顺序
+  - `input_json_delta` 增量语义
+  - mixed text/json 顺序
 - `gateway` 负责 inbound 协议解析与响应序列化，`provider` 负责 outbound 协议编码与解码；不要把 Anthropic / OpenAI 专属结构长期塞进 `runtime`。
 - 改 `tool_result` 时，不要只验证文本内容；要同时验证错误态、ID 关联、mixed text/json 顺序是否保留。
-- 改 streaming 时，不要只验证“有输出”；必须确认事件生命周期、delta 形状、finish/stop reason 是否仍符合目标协议。
-- 如果改动影响 `messages`、tool bridge 或 streaming 语义，必须同步更新 `README.md` 里的对应章节，避免文档与真实行为分叉。
+- 改 streaming 时，不要只验证“有输出”；必须确认 message 生命周期、delta 形状、finish reason、usage、事件顺序是否仍符合目标协议。
+- 如果某条流式实现内部采用“完整请求上游后再本地回放事件”，文档必须明确写出这个边界，不能让 README 或规则暗示为原生上游逐帧透传。
 
 ## Documentation updates
+- README 负责项目定位、原理、能力边界、快速体验与 roadmap，不承担细粒度排障手册职责。
+- `.claude/rules/architecture.md` 负责解释系统链路、分层职责与流事件抽象。
+- 本文件负责维护约束、验证门槛与关键 guardrails。
 - 新增配置项、接口路径、协议或运行方式时，同步更新 `README.md`、配置样例和必要规则文档。
-- README 默认是给人看的，而不是给熟悉代码的人看的；要写清楚项目是什么、怎么跑、配置怎么理解、当前支持什么、不支持什么。
+- 如果改动影响主链路抽象、协议语义或对外行为，README 与 rules 必须同步更新，避免产品文档与维护规则分叉。
 - 如果新增规则影响 AI 协作方式，更新 `.claude` 规则文件，不要把规则散落在临时说明里。

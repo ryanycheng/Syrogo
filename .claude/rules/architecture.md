@@ -45,14 +45,87 @@
   - 负责中立标准模型：请求、响应、流式事件、路由上下文、执行计划。
   - 尽量不承载 OpenAI / Anthropic 专属结构。
 
+- `internal/eventstream`
+  - 负责把 `runtime.Response` / `runtime.StreamEvent` 整理成中立事件序列与快照。
+  - 为 gateway 的协议响应序列化提供统一流事件中间层。
+  - 不直接承担具体 provider 的上游协议适配。
+
+## Unified request path
+系统内部统一请求链路应保持为：
+
+```text
+inbound protocol
+  -> gateway parse / validate
+  -> runtime.Request
+  -> router match rule by active tag
+  -> execution consume ExecutionPlan
+  -> provider encode outbound request
+  -> upstream model API
+```
+
+约束如下：
+- inbound 请求先在 `gateway` 中解析、校验、归一化。
+- 对外协议中的 message、system、tool、stream 等概念，先转换成中立 `runtime.Request`。
+- `router` 只负责基于 tag 的规则匹配与 plan 生成，不关心具体 HTTP 协议。
+- `execution` 只负责执行 outbound step、应用模型覆盖、处理 fallback，不做协议转换。
+- `provider` 负责把 `runtime.Request` 编码成真实上游协议，并把返回结果解码回中立模型。
+
+## Unified response path
+非流式与流式都应先回到中立模型，再从边界层输出：
+
+```text
+upstream response
+  -> provider decode
+  -> runtime.Response / runtime.StreamEvent
+  -> eventstream.Event sequence / snapshot
+  -> gateway serialize
+  -> protocol-specific response or SSE
+```
+
+约束如下：
+- 非流式统一落在 `runtime.Response`。
+- 流式统一落在 `runtime.StreamEvent`。
+- `internal/eventstream` 负责把 runtime 层结果整理为稳定事件序列。
+- gateway 再根据入口协议，把这些事件序列化为 Anthropic / OpenAI 等协议响应。
+- 协议专属帧格式只留在边界层，不应回灌进 `runtime`。
+
+## Runtime model expectations
+`internal/runtime` 是系统主干抽象，至少要稳定承接：
+- `Request`
+- `Message`
+- `ContentPart`
+- `Response`
+- `StreamEvent`
+- `RouteContext`
+- `ExecutionPlan`
+
+使用原则：
+- `runtime` 表达的是跨协议共享语义，而不是某一家上游的原始 schema。
+- 如果某个字段只在单一协议里成立，应优先留在 gateway/provider 边界，而不是放进 `runtime`。
+- `system`、tool calling、finish reason、usage 等共享语义可以进入 `runtime`，但协议专属命名与帧结构不应直接进入。
+
+## Stream event model
+流式链路必须优先围绕统一事件模型思考，而不是直接围绕某家 SSE 帧格式思考。
+
+推荐理解顺序：
+1. provider 产出 `runtime.StreamEvent`
+2. `internal/eventstream` 将其整理为中立 `Event`
+3. gateway 再把 `Event` 序列化为入口协议要求的 stream 帧
+
+这意味着：
+- 流式与非流式应尽量共享 message / tool / usage / finish reason 语义。
+- 文本 delta、tool call delta、usage、message 生命周期应先在中立事件层对齐。
+- “如何发帧”是最后一步，不应倒逼 router / execution / runtime 绑定某种协议结构。
+
 ## Dependency direction
 推荐依赖方向：
 - `cmd -> app`
 - `app -> config/server/gateway/router/provider/execution`
-- `gateway -> router/execution/runtime`
+- `gateway -> router/execution/runtime/eventstream`
 - `router -> provider/runtime`
 - `provider -> runtime`
 - `execution -> runtime`
+- `eventstream -> runtime`
 
 避免反向依赖和跨层泄漏。
 
@@ -62,6 +135,7 @@
 - 新增 provider / outbound protocol：改 `internal/provider` 与 `internal/app`
 - 调整 tag 路由规则：改 `internal/router`
 - 调整执行 / fallback 语义：改 `internal/execution`
+- 调整统一流事件模型：优先改 `internal/runtime` / `internal/eventstream`
 - 调整启动参数或生命周期：改 `cmd/syrogo` / `internal/server`
 
 ## Directory hygiene
@@ -80,3 +154,5 @@
 - 不让 `app` 演化为承载所有初始化细节的集中杂物堆。
 - 不为了“看起来标准”提前拆 `pkg`；只有明确要对外复用、并愿意维护稳定 API 时才考虑。
 - 如果公共请求/响应模型开始被多个层共享，应尽快迁移到更中性的归属位置，而不是长期挂在具体协议实现下。
+- 不把 Anthropic / OpenAI 专属字段长期塞进 `runtime`。
+- 不让 router / execution 承担 tool、usage、SSE 帧等协议映射职责。
