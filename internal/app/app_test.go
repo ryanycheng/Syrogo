@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -457,14 +458,120 @@ func TestNewBridgesAnthropicToolsToOpenAIChatOutbound(t *testing.T) {
 	if upstreamBody.ToolChoice != "auto" {
 		t.Fatalf("upstream tool_choice = %q, want auto", upstreamBody.ToolChoice)
 	}
-	if len(upstreamBody.Tools) != 1 {
-		t.Fatalf("len(upstream tools) = %d, want 1 after builtin-tool filtering", len(upstreamBody.Tools))
+	if len(upstreamBody.Tools) != 2 {
+		t.Fatalf("len(upstream tools) = %d, want 2 including one builtin tool", len(upstreamBody.Tools))
 	}
-	if upstreamBody.Tools[0].Type != "function" || upstreamBody.Tools[0].Function.Name != "get_weather" {
-		t.Fatalf("upstream tools[0] = %#v, want custom function tool", upstreamBody.Tools[0])
+	toolNames := []string{upstreamBody.Tools[0].Function.Name, upstreamBody.Tools[1].Function.Name}
+	hasBuiltin := toolNames[0] != "get_weather" || toolNames[1] != "get_weather"
+	hasCustom := toolNames[0] == "get_weather" || toolNames[1] == "get_weather"
+	if !hasBuiltin || !hasCustom {
+		t.Fatalf("upstream tool names = %#v, want get_weather plus one builtin tool", toolNames)
 	}
 	if !strings.Contains(w.Body.String(), `"type":"tool_use"`) || !strings.Contains(w.Body.String(), `"name":"get_weather"`) {
 		t.Fatalf("body = %q, want anthropic tool_use response", w.Body.String())
+	}
+}
+
+func TestNewStreamsAnthropicToolsFromOpenAIChatOutbound(t *testing.T) {
+	var upstreamBody struct {
+		Model    string `json:"model"`
+		Stream   bool   `json:"stream"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		if got := r.Header.Get("Accept"); got != "text/event-stream" {
+			t.Fatalf("Accept = %q, want text/event-stream", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, strings.Join([]string{
+			`data: {"id":"chatcmpl-stream-1","object":"chat.completion.chunk","model":"gpt-5.4","choices":[{"delta":{"role":"assistant"},"finish_reason":""}]}`,
+			`data: {"id":"chatcmpl-stream-1","object":"chat.completion.chunk","model":"gpt-5.4","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_123","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"sh"}}]},"finish_reason":""}]}`,
+			`data: {"id":"chatcmpl-stream-1","object":"chat.completion.chunk","model":"gpt-5.4","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"anghai\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}`,
+			`data: [DONE]`,
+		}, "\n\n"))
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds[1].Clients[0].Tag = "anthropic-to-chat"
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "anthropic-to-chat-route",
+		FromTags:    []string{"anthropic-to-chat"},
+		ToTags:      []string{"openai-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "cliproxy-chat",
+		Protocol:  "openai_chat",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "openai-primary",
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model":  "claude-sonnet-4-6",
+		"stream": true,
+		"tools": []map[string]any{{
+			"name":        "get_weather",
+			"description": "Get weather by city",
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"city": map[string]any{"type": "string"}},
+				"required":   []string{"city"},
+			},
+		}},
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "查询上海天气，必要时调用工具。",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("stream status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !upstreamBody.Stream {
+		t.Fatalf("upstream stream = %v, want true", upstreamBody.Stream)
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `event: content_block_start
+`) || !strings.Contains(got, `"type":"tool_use"`) {
+		t.Fatalf("body = %q, want anthropic tool_use streaming frame", got)
+	}
+	if !strings.Contains(got, `"name":"get_weather"`) || !strings.Contains(got, `"input":{}`) {
+		t.Fatalf("body = %q, want empty tool input at anthropic content_block_start", got)
+	}
+	if !strings.Contains(got, `"type":"input_json_delta"`) || (!strings.Contains(got, `"partial_json":"{\"city\":\"shanghai\"}"`) && (!strings.Contains(got, `"partial_json":"{\"city\":\"sh"`) || !strings.Contains(got, `"partial_json":"anghai\"}"`))) {
+		t.Fatalf("body = %q, want anthropic input_json_delta tool stream", got)
+	}
+	if !strings.Contains(got, `"stop_reason":"tool_use"`) {
+		t.Fatalf("body = %q, want tool_use stop_reason", got)
+	}
+	if !strings.Contains(got, `"input_tokens":11`) || !strings.Contains(got, `"output_tokens":7`) {
+		t.Fatalf("body = %q, want snake_case usage in stream", got)
 	}
 }
 
@@ -582,6 +689,187 @@ func TestNewBridgesAnthropicToolResultToOpenAIChatHistory(t *testing.T) {
 	}
 	if requests[0].Messages[1].Role != "tool" || requests[0].Messages[1].ToolCallID != "call_123" || requests[0].Messages[1].Content != "sunny" {
 		t.Fatalf("requests[0].Messages[1] = %#v, want tool result history", requests[0].Messages[1])
+	}
+}
+
+func TestNewCompletesAnthropicToolLoopThroughOpenAIChatOutbound(t *testing.T) {
+	requests := make([]struct {
+		Messages []struct {
+			Role      string `json:"role"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+			ToolCallID string `json:"tool_call_id"`
+		} `json:"messages"`
+	}, 0, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Role      string `json:"role"`
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+				ToolCallID string `json:"tool_call_id"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		requests = append(requests, body)
+		if len(requests) == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":     "chatcmpl-tools-1",
+				"object": "chat.completion",
+				"model":  "gpt-5.4",
+				"choices": []map[string]any{{
+					"index": 0,
+					"message": map[string]any{
+						"role": "assistant",
+						"tool_calls": []map[string]any{{
+							"id":   "call_123",
+							"type": "function",
+							"function": map[string]any{
+								"name":      "get_weather",
+								"arguments": `{"city":"shanghai"}`,
+							},
+						}},
+					},
+					"finish_reason": "tool_calls",
+				}},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-tools-2",
+			"object": "chat.completion",
+			"model":  "gpt-5.4",
+			"choices": []map[string]any{{
+				"index": 0,
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": "上海天气晴朗。",
+				},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds[1].Clients[0].Tag = "anthropic-to-chat"
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "anthropic-to-chat-route",
+		FromTags:    []string{"anthropic-to-chat"},
+		ToTags:      []string{"openai-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "cliproxy-chat",
+		Protocol:  "openai_chat",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "openai-primary",
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	listeners := app.Server.Listeners()
+
+	firstBody, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-6",
+		"tools": []map[string]any{{
+			"name":        "get_weather",
+			"description": "Get weather by city",
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"city": map[string]any{"type": "string"}},
+				"required":   []string{"city"},
+			},
+		}},
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "查询上海天气，必要时调用工具。",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	firstResp := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(firstResp, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", firstBody))
+	if firstResp.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200, body = %s", firstResp.Code, firstResp.Body.String())
+	}
+	if !strings.Contains(firstResp.Body.String(), `"type":"tool_use"`) || !strings.Contains(firstResp.Body.String(), `"id":"call_123"`) {
+		t.Fatalf("first body = %q, want anthropic tool_use response", firstResp.Body.String())
+	}
+
+	secondBody, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-6",
+		"messages": []map[string]any{{
+			"role": "assistant",
+			"content": []map[string]any{{
+				"type":  "tool_use",
+				"id":    "call_123",
+				"name":  "get_weather",
+				"input": map[string]any{"city": "shanghai"},
+			}},
+		}, {
+			"role": "tool",
+			"content": []map[string]any{{
+				"type":        "tool_result",
+				"tool_use_id": "call_123",
+				"content": []map[string]any{{
+					"type": "text",
+					"text": "上海天气晴朗。",
+				}},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	secondResp := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(secondResp, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", secondBody))
+	if secondResp.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want 200, body = %s", secondResp.Code, secondResp.Body.String())
+	}
+	if !strings.Contains(secondResp.Body.String(), `"type":"text"`) || !strings.Contains(secondResp.Body.String(), `"text":"上海天气晴朗。"`) {
+		t.Fatalf("second body = %q, want final anthropic assistant text", secondResp.Body.String())
+	}
+	if len(requests) != 2 {
+		t.Fatalf("len(requests) = %d, want 2 upstream calls", len(requests))
+	}
+	if len(requests[0].Messages) != 1 || requests[0].Messages[0].Role != "user" {
+		t.Fatalf("requests[0].Messages = %#v, want initial user-only turn", requests[0].Messages)
+	}
+	if len(requests[1].Messages) != 2 {
+		t.Fatalf("len(requests[1].Messages) = %d, want 2 for tool loop continuation", len(requests[1].Messages))
+	}
+	if len(requests[1].Messages[0].ToolCalls) != 1 || requests[1].Messages[0].ToolCalls[0].ID != "call_123" {
+		t.Fatalf("requests[1].Messages[0] = %#v, want assistant tool call history", requests[1].Messages[0])
+	}
+	if requests[1].Messages[1].Role != "tool" || requests[1].Messages[1].ToolCallID != "call_123" || requests[1].Messages[1].Content != "上海天气晴朗。" {
+		t.Fatalf("requests[1].Messages[1] = %#v, want bridged tool result history", requests[1].Messages[1])
 	}
 }
 
