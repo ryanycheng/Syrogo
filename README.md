@@ -414,6 +414,14 @@ outbounds:
 
 这适合用于核对客户端真实入参与 gateway / runtime 的转换结果。
 
+建议排查时优先按这个顺序看：
+- `raw_body`：确认客户端真实发来的 `system`、`messages`、`tools`、`stream` 形状
+- `parsed`：确认 gateway 是否按 Anthropic 入口正确解析
+- `runtime`：确认 `tool_use`、`tool_result`、`tool_use_id`、system 语义没有在中立层丢失
+- `planned_model` / `resolved_to`：确认最终走到的是预期 outbound，而不是 tag 或 rule 命中错误
+
+如果工具链路表现异常，这个快照通常比只看最终 HTTP 响应更有价值。
+
 ---
 
 ## 快速开始
@@ -618,6 +626,18 @@ ANTHROPIC_AUTH_TOKEN='your-anthropic-client-token' \
 claude -p "只回复 pong"
 ```
 
+做 `POST /v1/messages` 联调时，建议按这个顺序排查：
+- 先确认请求体最小形状正确：`model`、`messages`、`system`、`max_tokens`、`stream`
+- 再看 `tmp/anthropic-inbound-*.json` 里的 `parsed`、`runtime`、`planned_model`、`resolved_to`
+- 再看目标 outbound 协议是否符合预期：是 `openai_chat` 还是 `anthropic_messages`
+- 如果是工具链路，先看第一跳 assistant `tool_use`，再看第二跳 `tool_result`
+- 如果是流式问题，先看 SSE 事件帧和 `stop_reason`，不要只看最终文本
+
+这里最容易踩坑的是：
+- Anthropic `system` 是顶层字段，不是普通 `messages[]` 的一条 message
+- `tool_use` / `tool_result` 的回环依赖 ID 严格对齐，不能丢 `id` / `tool_use_id` / `tool_call_id`
+- `tool_use` 的结束态必须保持 `stop_reason=tool_use`，否则客户端不会继续工具回路
+
 ### Anthropic Tools Bridge
 
 当前第二阶段支持的是：
@@ -667,6 +687,12 @@ curl -s http://127.0.0.1:8080/v1/messages \
 
 如果你直接用 Claude Code 做端到端，请注意：Claude Code builtin tools（例如 `Read`、`Bash`、`Glob`）当前不会透传到 OpenAI Chat Completions 上游；这一桥接当前主要验证自定义 function tools 的往返行为。
 
+工具桥接还需要特别注意：
+- Anthropic tool result 对外协议形状是 `role=user + type=tool_result`，不是直接透传 runtime 的 `role=tool`
+- `tool_result` 里的 text / json 顺序与类型应尽量保留，不要直接无脑拍平成一个字符串
+- 流式工具参数要以 `input_json_delta.partial_json` 的增量形式输出，不能重复发送全量 arguments
+- 如果第一跳 `tool_use` 正常、第二跳却续不上，优先检查 `tool_use_id` 是否与上一跳 assistant tool call 的 `id` 完全一致
+
 ### Anthropic 流式
 
 ```bash
@@ -694,11 +720,13 @@ curl -N http://127.0.0.1:8080/v1/messages \
 - `mock` outbound 主要用于打通链路与测试
 - `anthropic_messages` 当前已支持作为 inbound 与 outbound protocol
 - Anthropic stream 当前是兼容型伪流式，会输出 Anthropic 风格事件序列，但不是上游原生 SSE 透传
+- `messages -> messages` 当前流式实现采用“先完整请求上游，再本地回放 Anthropic SSE”，因此对外兼容、但不等于原生 Anthropic SSE 直通
 - 调试 Anthropic 入口请求时，会在 `tmp/` 下写入 `anthropic-inbound-*.json` 快照
 - `openai_responses` 当前已支持作为 inbound 与 outbound protocol
 - 当前流式能力以最小 SSE 闭环为主，不追求完整上游事件透传
 - Responses stream 当前是兼容型伪流式，不是上游原生 SSE 透传
 - 当前还没有实现 `.env` 自动加载与 `${VAR}` 自动展开
+- Claude Code builtin tools 与自定义 function tools 当前是分边界处理：前者本地执行，后者才参与 outbound 协议桥接
 
 ---
 

@@ -42,6 +42,15 @@
   - 必要的回归测试
   - 必要的流程测试或集成测试
 - 如果某类测试暂时无法补齐，必须明确说明风险和缺口，不能默认忽略。
+- 修改 `POST /v1/messages`、`anthropic_messages`、tools、stream 相关逻辑时，至少补一类能覆盖真实协议往返的流程测试；本地可验证时，优先再做一次真实联调。
+
+## Claude Code / Messages bridge guardrails
+- 修改 `messages` 链路时，优先先看 inbound shape、runtime lowering、outbound encode，再看最终响应；不要只盯最终文本结果。
+- 改动时必须重点核对这些语义是否仍然成立：`system`、`tool_use`、`tool_result`、`tool_use_id` / `tool_call_id`、`stop_reason`、`usage`、SSE 事件顺序、`input_json_delta` 增量语义。
+- `gateway` 负责 inbound 协议解析与响应序列化，`provider` 负责 outbound 协议编码与解码；不要把 Anthropic / OpenAI 专属结构长期塞进 `runtime`。
+- 改 `tool_result` 时，不要只验证文本内容；要同时验证错误态、ID 关联、mixed text/json 顺序是否保留。
+- 改 streaming 时，不要只验证“有输出”；必须确认事件生命周期、delta 形状、finish/stop reason 是否仍符合目标协议。
+- 如果改动影响 `messages`、tool bridge 或 streaming 语义，必须同步更新 `README.md` 里的对应章节，避免文档与真实行为分叉。
 
 ## Documentation updates
 - 新增配置项、接口路径、协议或运行方式时，同步更新 `README.md`、配置样例和必要规则文档。
