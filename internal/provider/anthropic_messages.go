@@ -30,7 +30,9 @@ func (p *AnthropicMessagesProvider) ChatCompletion(ctx context.Context, req runt
 }
 
 func (p *AnthropicMessagesProvider) StreamCompletion(ctx context.Context, req runtime.Request) (<-chan runtime.StreamEvent, error) {
-	resp, err := p.ChatCompletion(ctx, req)
+	streamReq := req
+	streamReq.Stream = false
+	resp, err := p.ChatCompletion(ctx, streamReq)
 	if err != nil {
 		return nil, err
 	}

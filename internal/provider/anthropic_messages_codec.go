@@ -34,6 +34,7 @@ type anthropicContentBlock struct {
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
 	Content   any             `json:"content,omitempty"`
 }
 
@@ -69,6 +70,7 @@ func encodeAnthropicMessagesRequest(req runtime.Request) any {
 				Content: []anthropicContentBlock{{
 					Type:      "tool_result",
 					ToolUseID: msg.ToolCallID,
+					IsError:   msg.ToolResultIsError,
 					Content:   anthropicToolResultContent(msg),
 				}},
 			})

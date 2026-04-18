@@ -629,6 +629,33 @@ func TestEncodeAnthropicMessagesRequestPreservesJSONToolResultPayload(t *testing
 	}
 }
 
+func TestEncodeAnthropicMessagesRequestPreservesToolResultErrorFlag(t *testing.T) {
+	payload := encodeAnthropicMessagesRequest(runtime.Request{
+		Model: "claude-sonnet-4-5",
+		Messages: []runtime.Message{{
+			Role:              runtime.MessageRoleTool,
+			ToolCallID:        "tool_123",
+			ToolResultIsError: true,
+			Parts:             []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "lookup failed"}},
+		}},
+	})
+
+	body, ok := payload.(anthropicMessagesRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want anthropicMessagesRequest", payload)
+	}
+	if len(body.Messages) != 1 {
+		t.Fatalf("len(body.Messages) = %d, want 1", len(body.Messages))
+	}
+	got := body.Messages[0].Content[0]
+	if got.Type != "tool_result" || got.ToolUseID != "tool_123" {
+		t.Fatalf("body.Messages[0].Content[0] = %#v, want tool_result with tool use id", got)
+	}
+	if !got.IsError {
+		t.Fatalf("got.IsError = %v, want true", got.IsError)
+	}
+}
+
 func TestDecodeAnthropicMessagesResponseMapsToolUseStopReason(t *testing.T) {
 	resp, err := decodeAnthropicMessagesResponse(anthropicMessagesEnvelope{
 		ID:         "msg_123",
@@ -865,6 +892,40 @@ func TestAnthropicMessagesCompatibleChatCompletionQuotaExceeded(t *testing.T) {
 	}
 	if NormalizeError(err) != ErrorKindQuotaExceeded {
 		t.Fatalf("NormalizeError() = %q, want quota_exceeded", NormalizeError(err))
+	}
+}
+
+func TestAnthropicMessagesCompatibleStreamCompletionDoesNotSendStreamToUpstream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req anthropicMessagesRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		if req.Stream {
+			t.Fatalf("req.Stream = %v, want false for local replay streaming", req.Stream)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_123",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       req.Model,
+			"stop_reason": "tool_use",
+			"content": []map[string]any{{
+				"type":  "tool_use",
+				"id":    "tool_123",
+				"name":  "get_weather",
+				"input": map[string]any{"city": "shanghai"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewAnthropicMessagesCompatible("anthropic", server.URL, []string{"test-key"}, server.Client())
+	ch, err := p.StreamCompletion(context.Background(), runtime.Request{Model: "claude-sonnet-4-5", Stream: true})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	for range ch {
 	}
 }
 
