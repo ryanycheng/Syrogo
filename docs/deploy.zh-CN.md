@@ -56,19 +56,25 @@ Syrogo 提供了一个统一安装入口，面向 Linux + `systemd` 主机。
 
 ### 本地执行
 
-在仓库目录下可执行：
+在仓库目录下可执行以下任一方式：
 
 ```bash
-sudo bash ./scripts/install.sh --archive ./syrogo_v0.1.0_linux_amd64.tar.gz
+sudo bash ./scripts/install.sh
 ```
-
-或者：
 
 ```bash
 sudo bash ./scripts/install.sh --version v0.1.0
 ```
 
+```bash
+sudo bash ./scripts/install.sh --archive ./syrogo_v0.1.0_linux_amd64.tar.gz
+```
+
 ### 远程 `curl | bash`
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s --
+```
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0

@@ -56,19 +56,25 @@ Syrogo provides one installer entrypoint for Linux hosts with `systemd`.
 
 ### Local execution
 
-From a checked-out repository, run either:
+From a checked-out repository, run one of these:
 
 ```bash
-sudo bash ./scripts/install.sh --archive ./syrogo_v0.1.0_linux_amd64.tar.gz
+sudo bash ./scripts/install.sh
 ```
-
-or:
 
 ```bash
 sudo bash ./scripts/install.sh --version v0.1.0
 ```
 
+```bash
+sudo bash ./scripts/install.sh --archive ./syrogo_v0.1.0_linux_amd64.tar.gz
+```
+
 ### Remote `curl | bash`
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s --
+```
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0

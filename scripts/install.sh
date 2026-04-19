@@ -21,8 +21,10 @@ HEALTH_URL="http://127.0.0.1:23234/healthz"
 usage() {
   cat <<'EOF'
 Usage:
+  sudo bash ./scripts/install.sh
   sudo bash ./scripts/install.sh --archive <path>
   sudo bash ./scripts/install.sh --version <tag>
+  curl -fsSL <raw-install-url> | sudo bash -s --
   curl -fsSL <raw-install-url> | sudo bash -s -- --version <tag>
 
 Options:
@@ -38,9 +40,10 @@ Options:
 
 Notes:
   - Local and remote install use the same script entrypoint.
+  - Without --version or --archive, the installer uses the latest GitHub release.
   - On first install, if /etc/syrogo/config.yaml is missing, the installer downloads config.example.yaml there.
   - With --version, the example config is fetched from the matching release tag.
-  - With --archive, the example config is fetched from master.
+  - With --archive or latest release install, the example config is fetched from master.
   - The installer keeps an existing installed config by default.
   - Pass --force-config if you want to replace /opt/syrogo/config/config.yaml from --config.
 EOF
@@ -132,9 +135,18 @@ parse_args() {
   if [ -n "$ARCHIVE" ] && [ -n "$VERSION" ]; then
     fail "use either --archive or --version, not both"
   fi
-  if [ -z "$ARCHIVE" ] && [ -z "$VERSION" ]; then
-    fail "either --archive or --version is required"
-  fi
+}
+
+resolve_latest_version() {
+  local latest_url resolved tag
+  command -v curl >/dev/null 2>&1 || fail "curl is required to resolve the latest release"
+  latest_url="https://github.com/${REPO}/releases/latest"
+  resolved="$(curl -fsSL -o /dev/null -w '%{url_effective}' "$latest_url")"
+  tag="${resolved##*/}"
+  [ -n "$tag" ] || fail "failed to resolve latest release tag"
+  [ "$tag" != "latest" ] || fail "failed to resolve latest release tag"
+  VERSION="$tag"
+  log "resolved latest release: $VERSION"
 }
 
 config_init_url() {
@@ -278,6 +290,9 @@ main() {
   require_root
   require_linux_systemd
   parse_args "$@"
+  if [ -z "$ARCHIVE" ] && [ -z "$VERSION" ]; then
+    resolve_latest_version
+  fi
   validate_config_input
   if [ -n "$VERSION" ]; then
     download_archive

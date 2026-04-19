@@ -154,11 +154,13 @@ After downloading a release archive, extract it and run the `syrogo` binary dire
 Syrogo also ships with one installer entrypoint that works both locally and remotely:
 
 ```bash
+sudo bash ./scripts/install.sh
 sudo bash ./scripts/install.sh --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s --
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0
 ```
 
-The installer expects a local config file at `/etc/syrogo/config.yaml` by default, reuses the same command path for upgrades, and keeps the installed config unless you pass `--force-config`.
+Without `--version` or `--archive`, the installer resolves the latest GitHub release automatically. It expects a local config file at `/etc/syrogo/config.yaml` by default, reuses the same command path for upgrades, and keeps the installed config unless you pass `--force-config`.
 
 For complete deployment examples, see [`docs/deploy.md`](./docs/deploy.md).
 

@@ -154,11 +154,13 @@ cp configs/config.example.yaml configs/config.yaml
 Syrogo 现在提供统一安装入口，同时支持本地执行和远程安装：
 
 ```bash
+sudo bash ./scripts/install.sh
 sudo bash ./scripts/install.sh --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s --
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0
 ```
 
-安装器默认从 `/etc/syrogo/config.yaml` 读取目标机器上的本地配置，升级复用同一条命令路径，且默认保留已安装配置；只有显式传 `--force-config` 才会覆盖。
+如果不传 `--version` 或 `--archive`，安装器会自动解析 GitHub 上的 latest release。安装器默认从 `/etc/syrogo/config.yaml` 读取目标机器上的本地配置，升级复用同一条命令路径，且默认保留已安装配置；只有显式传 `--force-config` 才会覆盖。
 
 完整部署示例请见 [`docs/deploy.zh-CN.md`](./docs/deploy.zh-CN.md)。
 
