@@ -39,7 +39,11 @@ func runMain() int {
 		slog.Error("initialize logger failed", slog.Any("error", err))
 		return 1
 	}
-	defer closeLogger()
+	defer func() {
+		if err := closeLogger(); err != nil {
+			slog.Error("close logger failed", slog.Any("error", err))
+		}
+	}()
 	slog.SetDefault(logger)
 
 	if err := run(*configPath, *devLog); err != nil {
@@ -60,13 +64,15 @@ func run(configPath string, devLogEnabled bool) error {
 		return err
 	}
 
-	fmt.Fprintln(os.Stdout, buildStartupBanner(startupBannerData{
+	if _, err := fmt.Fprintln(os.Stdout, buildStartupBanner(startupBannerData{
 		Version:       version,
 		Tagline:       "AI Gateway / Semantic Router",
 		Listens:       cfg.ListenAddresses(),
 		DevLogEnabled: devLogEnabled,
 		TraceMode:     os.Getenv("SYROGO_TRACE"),
-	}))
+	})); err != nil {
+		return fmt.Errorf("write startup banner: %w", err)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

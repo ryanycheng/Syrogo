@@ -45,6 +45,11 @@ type AnthropicMessagesProvider struct {
 
 type openAIProtocolMode string
 
+const (
+	openAIProtocolModeChat      openAIProtocolMode = "chat"
+	openAIProtocolModeResponses openAIProtocolMode = "responses"
+)
+
 type openAIResponsesCompatibility struct {
 	DropMetadata           bool
 	DropContextManagement  bool
@@ -52,49 +57,6 @@ type openAIResponsesCompatibility struct {
 	DropToolErrorStatus    bool
 	RejectPreviousResponse bool
 	RejectBuiltinTools     bool
-}
-
-const (
-	openAIProtocolModeChat      openAIProtocolMode = "chat"
-	openAIProtocolModeResponses openAIProtocolMode = "responses"
-)
-
-var claudeCodeBuiltinToolNames = map[string]struct{}{
-	"Agent":                    {},
-	"AskUserQuestion":          {},
-	"Bash":                     {},
-	"CronCreate":               {},
-	"CronDelete":               {},
-	"CronList":                 {},
-	"EnterPlanMode":            {},
-	"EnterWorktree":            {},
-	"ExitPlanMode":             {},
-	"ExitWorktree":             {},
-	"Glob":                     {},
-	"Grep":                     {},
-	"LS":                       {},
-	"Read":                     {},
-	"Edit":                     {},
-	"Write":                    {},
-	"MultiEdit":                {},
-	"NotebookEdit":             {},
-	"WebFetch":                 {},
-	"WebSearch":                {},
-	"TaskCreate":               {},
-	"TaskGet":                  {},
-	"TaskList":                 {},
-	"TaskUpdate":               {},
-	"TaskOutput":               {},
-	"TaskStop":                 {},
-	"ScheduleWakeup":           {},
-	"Skill":                    {},
-	"TodoWrite":                {},
-	"BashOutput":               {},
-	"KillBash":                 {},
-	"View":                     {},
-	"mcp__ide__getDiagnostics": {},
-	"mcp__ide__executeCode":    {},
-	"mcp__ide__read_file":      {},
 }
 
 func traceModeEnabled() bool {
@@ -179,18 +141,6 @@ func appendProviderTraceSnapshot(snapshot providerTraceSnapshot) {
 	if err := writeProviderTraceSnapshot(snapshot); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "provider trace write failed provider=%s protocol=%s err=%v\n", snapshot.Provider, snapshot.Protocol, err)
 	}
-}
-
-func appendProviderTraceText(requestID, providerName, protocol, suffix string, payload []byte) {
-	if !traceModeEnabled() {
-		return
-	}
-	writer := newProviderTraceWriter(requestID, providerName, protocol, suffix)
-	if writer == nil {
-		return
-	}
-	_, _ = writer.Write(payload)
-	_ = writer.Close()
 }
 
 type providerTraceWriter struct {

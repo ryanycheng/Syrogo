@@ -154,7 +154,9 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, payload
 	}
 
 	if httpResp.StatusCode == http.StatusTooManyRequests {
-		defer httpResp.Body.Close()
+		defer func() {
+			_ = httpResp.Body.Close()
+		}()
 		responseBody, _ := io.ReadAll(httpResp.Body)
 		trace.Status = httpResp.StatusCode
 		trace.Response = append(json.RawMessage(nil), responseBody...)
@@ -162,7 +164,9 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, payload
 		return nil, NewQuotaExceededError(fmt.Errorf("upstream quota exceeded: %s", previewResponseBody(responseBody)))
 	}
 	if httpResp.StatusCode >= http.StatusBadRequest {
-		defer httpResp.Body.Close()
+		defer func() {
+			_ = httpResp.Body.Close()
+		}()
 		responseBody, _ := io.ReadAll(httpResp.Body)
 		trace.Status = httpResp.StatusCode
 		trace.Response = append(json.RawMessage(nil), responseBody...)
@@ -177,7 +181,9 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, payload
 	appendProviderTraceSnapshot(trace)
 	contentType := httpResp.Header.Get("Content-Type")
 	if !strings.Contains(contentType, "text/event-stream") {
-		defer httpResp.Body.Close()
+		defer func() {
+			_ = httpResp.Body.Close()
+		}()
 		responseBody, err := io.ReadAll(httpResp.Body)
 		if err != nil {
 			return nil, NewRetryableError(fmt.Errorf("read fallback response body: %w", err))

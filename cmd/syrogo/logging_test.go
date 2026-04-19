@@ -21,7 +21,11 @@ func TestNewLoggerWithDevLogWritesStdoutAndFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newLogger() error = %v", err)
 	}
-	defer closeFn()
+	defer func() {
+		if err := closeFn(); err != nil {
+			t.Fatalf("closeFn() error = %v", err)
+		}
+	}()
 
 	logger.Info("hello dev log", slog.String("component", "test"))
 
@@ -53,7 +57,11 @@ func TestNewLoggerWithoutDevLogDoesNotCreateFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newLogger() error = %v", err)
 	}
-	defer closeFn()
+	defer func() {
+		if err := closeFn(); err != nil {
+			t.Fatalf("closeFn() error = %v", err)
+		}
+	}()
 
 	logger.Info("stdout only")
 

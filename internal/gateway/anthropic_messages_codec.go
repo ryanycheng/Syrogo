@@ -172,39 +172,6 @@ func writeAnthropicMessageResponse(w http.ResponseWriter, resp runtime.Response)
 	writeJSON(w, http.StatusOK, body)
 }
 
-func anthropicStreamFrames(events []runtime.StreamEvent) []anthropicSSEFrame {
-	all := make([]eventstream.Event, 0, len(events))
-	for _, event := range events {
-		converted := runtimeStreamEventToEventFrames(event)
-		all = append(all, converted...)
-	}
-	frames := make([]anthropicSSEFrame, 0, len(all)+2)
-	for frame := range anthropicStreamFramesFromEventStream(sliceEventStream(all)) {
-		frames = append(frames, frame)
-	}
-	return frames
-}
-
-func runtimeStreamEventToEventFrames(event runtime.StreamEvent) []eventstream.Event {
-	ch := make(chan runtime.StreamEvent, 1)
-	ch <- event
-	close(ch)
-	frames := make([]eventstream.Event, 0, 4)
-	for converted := range eventstream.EventStreamFromRuntime(ch) {
-		frames = append(frames, converted)
-	}
-	return frames
-}
-
-func sliceEventStream(events []eventstream.Event) <-chan eventstream.Event {
-	ch := make(chan eventstream.Event, len(events))
-	for _, event := range events {
-		ch <- event
-	}
-	close(ch)
-	return ch
-}
-
 func anthropicStreamFramesFromEventStream(events <-chan eventstream.Event) <-chan anthropicSSEFrame {
 	frames := make(chan anthropicSSEFrame, 16)
 	go func() {
@@ -279,10 +246,7 @@ func anthropicStreamFramesFromEventStream(events <-chan eventstream.Event) <-cha
 				}
 				if event.Block != nil && event.Block.Type == eventstream.BlockTypeToolUse && event.ToolCall != nil && event.ToolCall.Arguments != "" {
 					previous := toolArgumentSnapshots[event.BlockIndex]
-					partial := event.ToolCall.Arguments
-					if strings.HasPrefix(partial, previous) {
-						partial = strings.TrimPrefix(partial, previous)
-					}
+					partial := strings.TrimPrefix(event.ToolCall.Arguments, previous)
 					toolArgumentSnapshots[event.BlockIndex] = event.ToolCall.Arguments
 					if partial == "" {
 						continue

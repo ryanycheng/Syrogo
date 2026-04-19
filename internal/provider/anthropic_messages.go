@@ -69,7 +69,9 @@ func (p *AnthropicMessagesProvider) completionWithAPIKey(ctx context.Context, pa
 		appendProviderTraceSnapshot(trace)
 		return runtime.Response{}, NewRetryableError(fmt.Errorf("send request: %w", err))
 	}
-	defer httpResp.Body.Close()
+	defer func() {
+		_ = httpResp.Body.Close()
+	}()
 
 	responseBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
