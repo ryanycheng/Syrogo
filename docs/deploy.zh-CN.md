@@ -5,7 +5,7 @@
 本文面向 Syrogo `v0.1.x` 基线版本，重点提供一条**最小可用**的安装与部署路径。
 
 覆盖内容包括：
-- 在目标机器上准备可运行配置
+- 在 `/opt/syrogo` 下准备和初始化配置
 - Linux 本地与远程一键安装
 - 使用 `systemd` 托管
 - 用同一入口完成升级
@@ -13,25 +13,24 @@
 
 ---
 
-## 1. 在目标机器上准备配置
+## 1. 默认配置路径
 
-安装器要求目标机器本地已经有配置文件。
-
-默认路径：
+安装器默认使用这个配置路径：
 
 ```text
-/etc/syrogo/config.yaml
+/opt/syrogo/config/config.yaml
 ```
 
 首次安装时，如果这个路径还不存在，安装器会自动拉取 `configs/config.example.yaml`：
 - 使用 `--version` 时，拉对应 release tag 下的样例
 - 使用 `--archive` 时，拉 `master` 上的样例
+- 不传 `--version` 和 `--archive` 时，解析 latest release 后仍从 `master` 拉样例
 
 如果你想手工提前准备，也可以这样做：
 
 ```bash
-sudo mkdir -p /etc/syrogo
-sudo cp configs/config.example.yaml /etc/syrogo/config.yaml
+sudo mkdir -p /opt/syrogo/config
+sudo cp configs/config.example.yaml /opt/syrogo/config/config.yaml
 ```
 
 然后把占位值替换成你环境中的真实值。
@@ -82,7 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 
 ### 覆盖默认配置路径
 
-如果你的配置文件不在默认位置，也可以显式指定：
+如果你想从其他本地路径复制配置到 `/opt/syrogo/config/config.yaml`，也可以显式指定：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0 --config /path/to/config.yaml
@@ -99,31 +98,30 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 - 仅支持 Linux
 - 依赖 `systemd`
 - 需要 root 权限
-- 不会替你自动生成完整配置
+- 不会替你自动生成可直接上线的生产配置
 - 不处理 TLS、nginx、Docker、Kubernetes
 
 ---
 
 ## 3. 配置覆盖行为
 
-默认情况下，安装器会保留已经安装好的配置：
+默认情况下，安装器会保留已安装配置：
 
 ```text
 /opt/syrogo/config/config.yaml
 ```
 
 这意味着：
-- 首次安装时，如果默认配置源路径不存在，安装器会先自动初始化 `/etc/syrogo/config.yaml`
+- 首次安装时，如果默认配置路径不存在，安装器会先自动初始化 `/opt/syrogo/config/config.yaml`
 - 使用 `--version` 时，初始化样例来自对应 release tag
-- 使用 `--archive` 时，初始化样例来自 `master`
-- 安装器会再把这个本地配置复制到 `/opt/syrogo/config/config.yaml`
+- 使用 `--archive` 或 latest-release 安装时，初始化样例来自 `master`
 - 后续升级默认复用已安装配置
 - 重复执行安装器时，不会覆盖已安装配置，除非你显式要求
 
-如果你确实要替换已安装配置，可传 `--force-config`：
+如果你确实要用其他本地路径覆盖已安装配置，可传 `--force-config`：
 
 ```bash
-sudo bash ./scripts/install.sh --version v0.1.1 --config /etc/syrogo/config.yaml --force-config
+sudo bash ./scripts/install.sh --version v0.1.1 --config /path/to/config.yaml --force-config
 ```
 
 ---
@@ -145,7 +143,7 @@ sudo bash ./scripts/install.sh --version v0.1.1
 ```
 
 一个最小升级流程如下：
-1. 只在需要时更新目标机器上的本地配置文件
+1. 只在需要时更新 `/opt/syrogo/config/config.yaml`
 2. 用新版本号重新执行安装器
 3. 验证 `/healthz` 和一条真实协议请求
 
@@ -206,17 +204,13 @@ sudo systemctl restart syrogo
 
 ## 8. 卸载
 
-如果只删除服务和 `/opt/syrogo` 下的安装内容，但保留配置：
+如果要删除服务以及 `/opt/syrogo` 下的全部安装内容：
 
 ```bash
 sudo bash ./scripts/install.sh --uninstall
 ```
 
-如果连默认配置文件一起删除：
-
-```bash
-sudo bash ./scripts/install.sh --uninstall --purge-config
-```
+`--purge-config` 目前仅为了兼容保留；由于默认配置本来就在 `/opt/syrogo` 下面，卸载时不会再有额外效果。
 
 ---
 
@@ -234,7 +228,7 @@ Syrogo 可以直接暴露，也可以放在反向代理后面。
 
 ---
 
-## 9. 常见排障
+## 10. 常见排障
 
 ### 安装脚本在启动前失败
 
@@ -242,7 +236,7 @@ Syrogo 可以直接暴露，也可以放在反向代理后面。
 - 当前主机是否是 Linux
 - 是否存在 `systemd`
 - 是否以 root 身份执行
-- 目标机器上的本地配置路径是否存在
+- `/opt/syrogo/config/config.yaml` 是否可创建或可写
 - release 压缩包路径或 tag 是否正确
 
 ### 服务能启动，但请求失败
@@ -272,7 +266,7 @@ Syrogo 可以直接暴露，也可以放在反向代理后面。
 
 ---
 
-## 10. 当前部署边界
+## 11. 当前部署边界
 
 `v0.1.x` 当前还不覆盖：
 - Windows 部署

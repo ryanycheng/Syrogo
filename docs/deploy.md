@@ -5,7 +5,7 @@
 This guide targets the `v0.1.x` baseline release of Syrogo and focuses on the smallest production-like deployment path.
 
 It covers:
-- preparing a runnable config on the target host
+- preparing and initializing config under `/opt/syrogo`
 - local and remote one-command installation on Linux
 - running Syrogo with `systemd`
 - upgrades with the same installer path
@@ -13,25 +13,24 @@ It covers:
 
 ---
 
-## 1. Prepare config on the target host
+## 1. Default config path
 
-The installer expects a local config file on the target machine.
-
-Default path:
+The installer uses this config path by default:
 
 ```text
-/etc/syrogo/config.yaml
+/opt/syrogo/config/config.yaml
 ```
 
 On first install, if that path does not exist yet, the installer downloads `configs/config.example.yaml` automatically:
 - with `--version`, from the matching release tag
 - with `--archive`, from `master`
+- without `--version` and `--archive`, it resolves the latest release and still fetches the example config from `master`
 
-A practical way to prepare it manually is:
+If you want to prepare it manually first, you can do this:
 
 ```bash
-sudo mkdir -p /etc/syrogo
-sudo cp configs/config.example.yaml /etc/syrogo/config.yaml
+sudo mkdir -p /opt/syrogo/config
+sudo cp configs/config.example.yaml /opt/syrogo/config/config.yaml
 ```
 
 Then replace placeholder values with real values for your environment.
@@ -80,9 +79,9 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0
 ```
 
-### Optional config override
+### Override the default config path
 
-If your config is stored somewhere else on the host, override the source path explicitly:
+If you want to copy a config from another local path into `/opt/syrogo/config/config.yaml`, pass it explicitly:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0 --config /path/to/config.yaml
@@ -99,7 +98,7 @@ Current boundary:
 - Linux only
 - `systemd` required
 - root privileges required
-- does not generate a full config for you
+- does not generate a full production-ready config for you
 - does not provision TLS, nginx, Docker, or Kubernetes
 
 ---
@@ -113,17 +112,16 @@ By default, the installer keeps the already installed config at:
 ```
 
 That means:
-- first install auto-initializes `/etc/syrogo/config.yaml` if the default source path is missing
+- on first install, if the default config path is missing, the installer initializes `/opt/syrogo/config/config.yaml`
 - with `--version`, the initialized example config comes from the matching release tag
-- with `--archive`, the initialized example config comes from `master`
-- the installer copies that local source into `/opt/syrogo/config/config.yaml`
+- with `--archive` or latest-release install, the initialized example config comes from `master`
 - upgrades reuse the installed config by default
 - rerunning the installer does not overwrite the installed config unless you ask it to
 
-If you really want to replace the installed config, pass `--force-config`:
+If you really want to replace the installed config from another local path, pass `--force-config`:
 
 ```bash
-sudo bash ./scripts/install.sh --version v0.1.1 --config /etc/syrogo/config.yaml --force-config
+sudo bash ./scripts/install.sh --version v0.1.1 --config /path/to/config.yaml --force-config
 ```
 
 ---
@@ -145,7 +143,7 @@ sudo bash ./scripts/install.sh --version v0.1.1
 ```
 
 A minimal upgrade flow is:
-1. update the local config file only if needed
+1. update `/opt/syrogo/config/config.yaml` only if needed
 2. rerun the installer with the new version
 3. verify `/healthz` and one real protocol request
 
@@ -206,17 +204,13 @@ sudo systemctl restart syrogo
 
 ## 8. Uninstall
 
-To remove the installed service and files under `/opt/syrogo` while keeping the config:
+To remove the service and all installed contents under `/opt/syrogo`:
 
 ```bash
 sudo bash ./scripts/install.sh --uninstall
 ```
 
-To remove both the service and the default config file:
-
-```bash
-sudo bash ./scripts/install.sh --uninstall --purge-config
-```
+`--purge-config` is currently kept only for compatibility. Since the default config already lives under `/opt/syrogo`, it has no extra effect during uninstall.
 
 ---
 
@@ -234,7 +228,7 @@ If you use a reverse proxy, make sure the target path and listening port match y
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 ### The installer fails before startup
 
@@ -242,7 +236,7 @@ Check:
 - you are on Linux
 - `systemd` is available
 - you ran the installer as root
-- the local config path exists on the target host
+- `/opt/syrogo/config/config.yaml` can be created or written
 - the release archive path or tag is correct
 
 ### The service starts but requests fail
@@ -272,7 +266,7 @@ Turn off extra debug output after troubleshooting.
 
 ---
 
-## 10. Current deployment boundary
+## 11. Current deployment boundary
 
 For `v0.1.x`, this guide does not yet cover:
 - Windows deployment

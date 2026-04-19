@@ -6,7 +6,7 @@ SERVICE_NAME="syrogo"
 INSTALL_ROOT="/opt/syrogo"
 BIN_PATH="$INSTALL_ROOT/bin/syrogo"
 CONFIG_PATH="$INSTALL_ROOT/config/config.yaml"
-DEFAULT_CONFIG_SOURCE="/etc/syrogo/config.yaml"
+DEFAULT_CONFIG_SOURCE="$INSTALL_ROOT/config/config.yaml"
 CONFIG_SOURCE="$DEFAULT_CONFIG_SOURCE"
 SYSTEMD_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 TMP_DIR=""
@@ -36,8 +36,8 @@ Options:
   --archive <path>       Local release archive (.tar.gz)
   --version <tag>        Release tag such as v0.1.0
   --uninstall            Remove installed service and files under /opt/syrogo
-  --purge-config         Remove /etc/syrogo/config.yaml together with --uninstall
-  --config <path>        Local config source path (default: /etc/syrogo/config.yaml)
+  --purge-config         Kept for compatibility; uninstall already removes the default /opt config
+  --config <path>        Local config source path (default: /opt/syrogo/config/config.yaml)
   --force-config         Overwrite /opt/syrogo/config/config.yaml from --config
   --user <name>          Service user (default: syrogo)
   --install-root <path>  Install root (default: /opt/syrogo)
@@ -48,12 +48,12 @@ Options:
 Notes:
   - Local and remote install use the same script entrypoint.
   - Without --version or --archive, the installer uses the latest GitHub release with a short timeout.
-  - On first install, if /etc/syrogo/config.yaml is missing, the installer downloads config.example.yaml there.
+  - On first install, if /opt/syrogo/config/config.yaml is missing, the installer downloads config.example.yaml there.
   - With --version, the example config is fetched from the matching release tag.
   - With --archive or latest release install, the example config is fetched from master.
   - The installer keeps an existing installed config by default.
   - Pass --force-config if you want to replace /opt/syrogo/config/config.yaml from --config.
-  - --uninstall keeps /etc/syrogo/config.yaml unless you also pass --purge-config.
+  - --uninstall removes the default config together with /opt/syrogo.
 EOF
 }
 
@@ -154,10 +154,6 @@ parse_args() {
 
   if [ "$PURGE_CONFIG" -eq 1 ] && [ "$UNINSTALL" -ne 1 ]; then
     fail "--purge-config requires --uninstall"
-  fi
-
-  if [ "$UNINSTALL" -eq 1 ]; then
-    return
   fi
 }
 
@@ -266,6 +262,12 @@ install_or_keep_config() {
     return
   fi
 
+  if [ "$CONFIG_SOURCE" = "$CONFIG_PATH" ]; then
+    CONFIG_UPDATED=1
+    log "using config in place: $CONFIG_PATH"
+    return
+  fi
+
   install -m 0644 "$CONFIG_SOURCE" "$CONFIG_PATH"
   CONFIG_UPDATED=1
   log "installed config from $CONFIG_SOURCE"
@@ -315,17 +317,7 @@ uninstall_service() {
   fi
 
   if [ "$PURGE_CONFIG" -eq 1 ]; then
-    if [ -f "$DEFAULT_CONFIG_SOURCE" ]; then
-      rm -f "$DEFAULT_CONFIG_SOURCE"
-      log "removed config: $DEFAULT_CONFIG_SOURCE"
-    else
-      log "config not found: $DEFAULT_CONFIG_SOURCE"
-    fi
-    if [ -d "$(dirname "$DEFAULT_CONFIG_SOURCE")" ]; then
-      rmdir --ignore-fail-on-non-empty "$(dirname "$DEFAULT_CONFIG_SOURCE")" >/dev/null 2>&1 || true
-    fi
-  else
-    log "kept config: $DEFAULT_CONFIG_SOURCE"
+    log "--purge-config has no extra effect because the default config lives under $INSTALL_ROOT"
   fi
 
   log "uninstalled Syrogo from $INSTALL_ROOT"

@@ -160,7 +160,7 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0
 ```
 
-如果不传 `--version` 或 `--archive`，安装器会自动解析 GitHub 上的 latest release。安装器默认从 `/etc/syrogo/config.yaml` 读取目标机器上的本地配置，升级复用同一条命令路径，且默认保留已安装配置；只有显式传 `--force-config` 才会覆盖。
+如果不传 `--version` 或 `--archive`，安装器会自动解析 GitHub 上的 latest release。安装器默认使用 `/opt/syrogo/config/config.yaml` 作为配置路径，升级复用同一条命令路径，且默认保留已安装配置；只有显式传 `--force-config` 才会覆盖。
 
 完整部署示例请见 [`docs/deploy.zh-CN.md`](./docs/deploy.zh-CN.md)。
 
