@@ -51,8 +51,14 @@ Syrogo 是一个多模型 AI Gateway / Semantic Router。
 - Provider / outbound protocol：`internal/provider/provider.go`
 - 中立标准模型：`internal/runtime/runtime.go`
 
+## Release workflow
+- 项目级版本发布 skill 位于 `.claude/skills/release/`。
+- 正式版本发布通过推送 `v*` tag 触发 `.github/workflows/release.yml`。
+- 发布前优先执行 `make test`、`make lint`、`make build`。
+
 ## Rules index
 - 产品范围与阶段边界：`.claude/rules/product.md`
 - 架构分层与依赖方向：`.claude/rules/architecture.md`
 - 工程实践与开发约束：`.claude/rules/engineering.md`
 - Git 协作与提交策略：`.claude/rules/git.md`
+- 发布流程约束：`.claude/rules/release.md`
