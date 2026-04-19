@@ -64,6 +64,29 @@
 - 改 streaming 时，不要只验证“有输出”；必须确认 message 生命周期、delta 形状、finish reason、usage、事件顺序是否仍符合目标协议。
 - 如果某条流式实现内部采用“完整请求上游后再本地回放事件”，文档必须明确写出这个边界，不能让 README 或规则暗示为原生上游逐帧透传。
 
+## Debugging and local trace
+- README 只保留“支持本地调试”的入口说明；具体调试开关和值放在规则或专门文档，不在 README 中展开。
+- `--dev-log` 用于把运行日志同时输出到 stdout 与 `tmp/dev.log`，适合本地开发观察服务行为。
+- `SYROGO_TRACE=1` 或 `SYROGO_TRACE=full` 时，应输出 inbound / outbound trace 到 `tmp/trace`，用于排查协议转换、provider 编解码与响应序列化问题。
+- `SYROGO_TRACE=inbound` 时，只记录入口请求调试快照。
+- `SYROGO_TRACE=anthropic_stream` 时，只记录 Anthropic stream 序列化调试输出。
+- 涉及 trace 的改动时，必须确认输出不泄露敏感凭据；认证头与 key 类字段应继续脱敏。
+
+## Responses compatibility guardrails
+- README 只说明“支持 Responses compatibility 声明”；具体 guard/reject/rewrite 行为留在规则和测试中维护。
+- 当上游 `openai_responses` 能力不完整时，应优先依据 `outbound.capabilities` 做显式行为控制，而不是默认假设官方完全兼容。
+- 兼容策略如果涉及 request 重写、能力拒绝或字段丢弃，必须补对应回归测试，并在必要时补一条真实 smoke test。
+
+## README writing guideline
+- README 应优先贴合业务与产品表达：先说明项目是什么、解决什么问题、适合什么场景，再说明当前已具备能力与如何上手。
+- README 中的 feature 描述优先使用用户能理解的能力语言，不优先暴露内部实现名词；除非该名词本身就是用户配置接口的一部分。
+- README 可以写协议入口、出站能力、路由能力、配置入口、快速开始、边界、roadmap，但不要承载细粒度实现机制。
+- 像 `runtime.Request`、`runtime.Response`、`runtime.StreamEvent`、`ExecutionPlan`、`active tag` 这类内部抽象，不应作为 README 主体叙述重点。
+- 像 fallback 错误分类、request rewrite、provider guard/reject 规则、trace 细粒度开关等维护者语义，应放在 rules 或专门文档，而不是 README。
+- README 应该承担总览与导航职责；当细节对维护者更重要时，优先链接到 `.claude/rules/architecture.md`、`.claude/rules/engineering.md` 或后续专门文档。
+- README 的快速开始应尽量短，优先给出最小可运行路径，而不是一次解释全部内部原理。
+- 当 README 与规则发生取舍冲突时：README 优先服务“用户理解产品和上手”，rules 优先服务“维护者理解实现与约束”。
+
 ## Documentation updates
 - README 负责项目定位、功能边界、配置用法、快速体验与 roadmap，不承担细粒度排障手册职责。
 - `.claude/rules/architecture.md` 负责解释系统链路、分层职责、capability 放置原则与流事件抽象。

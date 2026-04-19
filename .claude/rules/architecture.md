@@ -68,7 +68,9 @@ inbound protocol
 约束如下：
 - inbound 请求先在 `gateway` 中解析、校验、归一化。
 - 对外协议中的 message、system、tool、stream 等概念，先转换成中立 `runtime.Request`。
+- 入口鉴权不只是 access control；`clients[].token` 同时决定请求所属的 client/tag 语义，并以此进入路由匹配。
 - `router` 只负责基于 tag 的规则匹配与 plan 生成，不关心具体 HTTP 协议。
+- `routing.rules[].target_model` 的职责是声明路由命中后的目标模型；模型覆盖发生在 execution 消费 plan 时，而不是在 gateway 直接改写协议请求。
 - `execution` 只负责执行 outbound step、应用模型覆盖、处理 fallback，不做协议转换。
 - `provider` 负责把 `runtime.Request` 编码成真实上游协议，并把返回结果解码回中立模型。
 
