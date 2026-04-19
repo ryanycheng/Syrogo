@@ -151,6 +151,8 @@ cp configs/config.example.yaml configs/config.yaml
 
 下载后解压，直接运行其中的 `syrogo` 二进制即可。
 
+安装与部署示例请见 [`docs/deploy.zh-CN.md`](./docs/deploy.zh-CN.md)。
+
 ### 4. 启动服务
 
 优先使用：

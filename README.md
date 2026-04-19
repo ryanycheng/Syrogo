@@ -151,6 +151,8 @@ Current release artifacts are planned for:
 
 After downloading a release archive, extract it and run the `syrogo` binary directly.
 
+For installation and deployment examples, see [`docs/deploy.md`](./docs/deploy.md).
+
 ### 4. Start the service
 
 Prefer:
