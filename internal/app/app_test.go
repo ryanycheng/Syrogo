@@ -467,8 +467,8 @@ func TestNewBridgesAnthropicToolsToOpenAIChatOutbound(t *testing.T) {
 	if !hasBuiltin || !hasCustom {
 		t.Fatalf("upstream tool names = %#v, want get_weather plus one builtin tool", toolNames)
 	}
-	if !strings.Contains(w.Body.String(), `"text":"hello"`) {
-		t.Fatalf("body = %q, want anthropic text response", w.Body.String())
+	if !strings.Contains(w.Body.String(), `"type":"tool_use"`) || !strings.Contains(w.Body.String(), `"id":"call_123"`) || !strings.Contains(w.Body.String(), `"name":"get_weather"`) {
+		t.Fatalf("body = %q, want anthropic tool_use response", w.Body.String())
 	}
 }
 
