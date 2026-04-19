@@ -13,6 +13,7 @@
 - `internal/config`
   - 负责配置结构定义、加载和校验。
   - 新增配置项时应同步补充校验逻辑。
+  - provider-specific capability 开关属于配置层声明，不要散落在 handler 或 router 常量里。
   - 保持配置简单，避免过早引入复杂配置体系。
 
 - `internal/server`
@@ -38,7 +39,8 @@
 - `internal/provider`
   - 负责 provider 抽象与具体 provider 实现。
   - 负责 `runtime` -> 上游 outbound protocol 的转换。
-  - provider-specific request/response/stream transform 应显式放在这里，而不是散落到 gateway/router。
+  - provider-specific request/response/stream transform 与 capability guard 应显式放在这里，而不是散落到 gateway/router。
+  - 对部分兼容的上游，优先消费 `outbound.capabilities` 显式声明；host 兼容画像只能作为默认值。
   - 接口设计应围绕当前真实使用场景，避免过大接口面。
 
 - `internal/runtime`
@@ -132,6 +134,7 @@ upstream response
 ## Common change map
 - 新增 HTTP 入口协议：优先改 `internal/gateway`
 - 新增配置项：改 `internal/config` 和 `configs/*.yaml`
+- 新增或调整 provider capability：配置声明放 `internal/config` / `configs/*.yaml`，执行 guard 放 `internal/provider`
 - 新增 provider / outbound protocol：改 `internal/provider` 与 `internal/app`
 - 调整 tag 路由规则：改 `internal/router`
 - 调整执行 / fallback 语义：改 `internal/execution`

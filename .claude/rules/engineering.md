@@ -11,6 +11,7 @@
 - 使用 `gofmt` 和 `goimports` 保持格式统一。
 - 错误信息尽量带上下文，必要时使用错误包装。
 - 新配置项必须补充基础校验。
+- 新增 provider capability 配置时，必须同时更新配置样例与对应回归测试。
 - 避免引入全局状态。
 - 优先清晰可读，而不是过度技巧化写法。
 - 先在已有职责包内增量演进；除非边界已明显失真，否则不要新增目录。
@@ -43,6 +44,7 @@
   - 必要的流程测试或集成测试
 - 如果某类测试暂时无法补齐，必须明确说明风险和缺口，不能默认忽略。
 - 修改 `POST /v1/messages`、tools、codec、stream、`anthropic_messages`、`openai_chat` 等关键协议链路时，至少补一类能覆盖真实协议往返的流程测试；本地可验证时，优先再做一次真实联调。
+- 修改 `openai_responses` provider capability 或兼容策略时，至少覆盖：配置解析、provider 编码/guard、以及一条真实本地 smoke test。
 
 ## Messages / tools / stream guardrails
 - 修改主链路时，优先按这个顺序核对：inbound shape -> `runtime` lowering/raising -> outbound encode/decode -> 最终响应或 SSE 序列化。
@@ -63,8 +65,8 @@
 - 如果某条流式实现内部采用“完整请求上游后再本地回放事件”，文档必须明确写出这个边界，不能让 README 或规则暗示为原生上游逐帧透传。
 
 ## Documentation updates
-- README 负责项目定位、原理、能力边界、快速体验与 roadmap，不承担细粒度排障手册职责。
-- `.claude/rules/architecture.md` 负责解释系统链路、分层职责与流事件抽象。
+- README 负责项目定位、功能边界、配置用法、快速体验与 roadmap，不承担细粒度排障手册职责。
+- `.claude/rules/architecture.md` 负责解释系统链路、分层职责、capability 放置原则与流事件抽象。
 - 本文件负责维护约束、验证门槛与关键 guardrails。
 - 新增配置项、接口路径、协议或运行方式时，同步更新 `README.md`、配置样例和必要规则文档。
 - 如果改动影响主链路抽象、协议语义或对外行为，README 与 rules 必须同步更新，避免产品文档与维护规则分叉。
