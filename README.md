@@ -155,7 +155,7 @@ Syrogo also ships with one installer entrypoint that works both locally and remo
 
 ```bash
 sudo bash ./scripts/install.sh --version v0.1.0
-curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0
 ```
 
 The installer expects a local config file at `/etc/syrogo/config.yaml` by default, reuses the same command path for upgrades, and keeps the installed config unless you pass `--force-config`.

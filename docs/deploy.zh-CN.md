@@ -23,7 +23,11 @@
 /etc/syrogo/config.yaml
 ```
 
-一种实用准备方式是：
+首次安装时，如果这个路径还不存在，安装器会自动拉取 `configs/config.example.yaml`：
+- 使用 `--version` 时，拉对应 release tag 下的样例
+- 使用 `--archive` 时，拉 `master` 上的样例
+
+如果你想手工提前准备，也可以这样做：
 
 ```bash
 sudo mkdir -p /etc/syrogo
@@ -67,7 +71,7 @@ sudo bash ./scripts/install.sh --version v0.1.0
 ### 远程 `curl | bash`
 
 ```bash
-curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0
 ```
 
 ### 覆盖默认配置路径
@@ -75,7 +79,7 @@ curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.0
 如果你的配置文件不在默认位置，也可以显式指定：
 
 ```bash
-curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.0 --config /path/to/config.yaml
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0 --config /path/to/config.yaml
 ```
 
 安装器会自动：
@@ -103,7 +107,10 @@ curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.0 --config /path/t
 ```
 
 这意味着：
-- 首次安装时，需要目标机器上存在可读的本地配置文件
+- 首次安装时，如果默认配置源路径不存在，安装器会先自动初始化 `/etc/syrogo/config.yaml`
+- 使用 `--version` 时，初始化样例来自对应 release tag
+- 使用 `--archive` 时，初始化样例来自 `master`
+- 安装器会再把这个本地配置复制到 `/opt/syrogo/config/config.yaml`
 - 后续升级默认复用已安装配置
 - 重复执行安装器时，不会覆盖已安装配置，除非你显式要求
 
@@ -122,7 +129,7 @@ sudo bash ./scripts/install.sh --version v0.1.1 --config /etc/syrogo/config.yaml
 示例：
 
 ```bash
-curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.1
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.1
 ```
 
 或者：

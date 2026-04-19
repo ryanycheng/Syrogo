@@ -15,6 +15,7 @@ ARCHIVE=""
 SERVICE_USER="syrogo"
 SKIP_HEALTHCHECK=0
 FORCE_CONFIG=0
+CONFIG_INITIALIZED=0
 HEALTH_URL="http://127.0.0.1:23234/healthz"
 
 usage() {
@@ -37,8 +38,11 @@ Options:
 
 Notes:
   - Local and remote install use the same script entrypoint.
+  - On first install, if /etc/syrogo/config.yaml is missing, the installer downloads config.example.yaml there.
+  - With --version, the example config is fetched from the matching release tag.
+  - With --archive, the example config is fetched from master.
   - The installer keeps an existing installed config by default.
-  - If /opt/syrogo/config/config.yaml does not exist yet, --config must point to a local file.
+  - Pass --force-config if you want to replace /opt/syrogo/config/config.yaml from --config.
 EOF
 }
 
@@ -133,13 +137,42 @@ parse_args() {
   fi
 }
 
+config_init_url() {
+  if [ -n "$VERSION" ]; then
+    printf 'https://raw.githubusercontent.com/%s/refs/tags/%s/configs/config.example.yaml' "$REPO" "$VERSION"
+    return
+  fi
+
+  printf 'https://raw.githubusercontent.com/%s/refs/heads/master/configs/config.example.yaml' "$REPO"
+}
+
+download_default_config() {
+  local url
+  command -v curl >/dev/null 2>&1 || fail "curl is required to initialize the default config"
+  install -d -m 0755 "$(dirname "$DEFAULT_CONFIG_SOURCE")"
+  url="$(config_init_url)"
+  log "downloading example config to $DEFAULT_CONFIG_SOURCE"
+  log "config source url: $url"
+  curl -fsSL "$url" -o "$DEFAULT_CONFIG_SOURCE"
+  CONFIG_INITIALIZED=1
+}
+
 validate_config_input() {
   if [ -f "$CONFIG_PATH" ] && [ "$FORCE_CONFIG" -eq 0 ]; then
     log "keeping existing config: $CONFIG_PATH"
     return
   fi
 
-  [ -f "$CONFIG_SOURCE" ] || fail "config file not found: $CONFIG_SOURCE"
+  if [ -f "$CONFIG_SOURCE" ]; then
+    return
+  fi
+
+  if [ "$CONFIG_SOURCE" = "$DEFAULT_CONFIG_SOURCE" ]; then
+    download_default_config
+    return
+  fi
+
+  fail "config file not found: $CONFIG_SOURCE"
 }
 
 detect_arch() {
@@ -258,6 +291,10 @@ main() {
   healthcheck
   log "installed Syrogo to $INSTALL_ROOT"
   log "config path: $CONFIG_PATH"
+  if [ "$CONFIG_INITIALIZED" -eq 1 ]; then
+    log "example config initialized at $DEFAULT_CONFIG_SOURCE"
+    log "please edit the config and restart the service: systemctl restart $SERVICE_NAME"
+  fi
 }
 
 main "$@"

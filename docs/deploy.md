@@ -23,7 +23,11 @@ Default path:
 /etc/syrogo/config.yaml
 ```
 
-A practical way to prepare it is:
+On first install, if that path does not exist yet, the installer downloads `configs/config.example.yaml` automatically:
+- with `--version`, from the matching release tag
+- with `--archive`, from `master`
+
+A practical way to prepare it manually is:
 
 ```bash
 sudo mkdir -p /etc/syrogo
@@ -67,7 +71,7 @@ sudo bash ./scripts/install.sh --version v0.1.0
 ### Remote `curl | bash`
 
 ```bash
-curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0
 ```
 
 ### Optional config override
@@ -75,7 +79,7 @@ curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.0
 If your config is stored somewhere else on the host, override the source path explicitly:
 
 ```bash
-curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.0 --config /path/to/config.yaml
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0 --config /path/to/config.yaml
 ```
 
 The installer will:
@@ -103,7 +107,10 @@ By default, the installer keeps the already installed config at:
 ```
 
 That means:
-- first install needs a readable local config source
+- first install auto-initializes `/etc/syrogo/config.yaml` if the default source path is missing
+- with `--version`, the initialized example config comes from the matching release tag
+- with `--archive`, the initialized example config comes from `master`
+- the installer copies that local source into `/opt/syrogo/config/config.yaml`
 - upgrades reuse the installed config by default
 - rerunning the installer does not overwrite the installed config unless you ask it to
 
@@ -122,7 +129,7 @@ Upgrades use the same installer path as the first installation.
 Example:
 
 ```bash
-curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.1
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.1
 ```
 
 or:
