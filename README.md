@@ -201,6 +201,12 @@ For local development, you can use:
 - `--dev-log`: write logs to both stdout and `tmp/dev.log`
 - `SYROGO_TRACE=1` or `SYROGO_TRACE=full`: write trace files to `tmp/trace`
 
+To enable local commit checks in this repository:
+
+- run `git config core.hooksPath .githooks`
+- make sure `golangci-lint v2` is installed locally
+- the bundled `pre-commit` hook will run `go test ./...` and `golangci-lint run`
+
 For more detailed protocol semantics, debug switches, and maintenance constraints, see:
 - `.claude/rules/architecture.md`
 - `.claude/rules/engineering.md`

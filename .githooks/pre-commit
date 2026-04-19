@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "[pre-commit] go test ./..."
+go test ./...
+
+echo "[pre-commit] golangci-lint run"
+if ! command -v golangci-lint >/dev/null 2>&1; then
+  echo "golangci-lint not found. Install golangci-lint v2 before committing." >&2
+  exit 1
+fi
+
+golangci-lint run

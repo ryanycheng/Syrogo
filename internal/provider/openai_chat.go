@@ -217,7 +217,9 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, payload
 	out := make(chan runtime.StreamEvent)
 	go func() {
 		defer close(out)
-		defer httpResp.Body.Close()
+		defer func() {
+			_ = httpResp.Body.Close()
+		}()
 		defer func() {
 			if traceWriter != nil {
 				_ = traceWriter.Close()
@@ -262,7 +264,9 @@ func (p *OpenAICompatibleProvider) completionWithAPIKey(ctx context.Context, pay
 		appendProviderTraceSnapshot(trace)
 		return runtime.Response{}, NewRetryableError(fmt.Errorf("send request: %w", err))
 	}
-	defer httpResp.Body.Close()
+	defer func() {
+		_ = httpResp.Body.Close()
+	}()
 
 	responseBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
