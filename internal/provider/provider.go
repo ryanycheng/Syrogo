@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,12 +23,13 @@ type MockProvider struct {
 }
 
 type OpenAICompatibleProvider struct {
-	providerName string
-	baseURL      string
-	apiKeys      []string
-	httpClient   *http.Client
-	path         string
-	mode         openAIProtocolMode
+	providerName    string
+	baseURL         string
+	apiKeys         []string
+	httpClient      *http.Client
+	path            string
+	mode            openAIProtocolMode
+	responsesCompat openAIResponsesCompatibility
 
 	mu           sync.Mutex
 	nextAPIKeyIx int
@@ -41,6 +43,13 @@ type AnthropicMessagesProvider struct {
 }
 
 type openAIProtocolMode string
+
+type openAIResponsesCompatibility struct {
+	DropMetadata           bool
+	DropContextManagement  bool
+	RewriteAssistantToUser bool
+	DropToolErrorStatus    bool
+}
 
 const (
 	openAIProtocolModeChat      openAIProtocolMode = "chat"
@@ -237,12 +246,32 @@ func newOpenAIProvider(name, baseURL string, apiKeys []string, httpClient *http.
 		httpClient = http.DefaultClient
 	}
 	return &OpenAICompatibleProvider{
-		providerName: name,
-		baseURL:      strings.TrimRight(baseURL, "/"),
-		apiKeys:      append([]string(nil), apiKeys...),
-		httpClient:   httpClient,
-		path:         path,
-		mode:         mode,
+		providerName:    name,
+		baseURL:         strings.TrimRight(baseURL, "/"),
+		apiKeys:         append([]string(nil), apiKeys...),
+		httpClient:      httpClient,
+		path:            path,
+		mode:            mode,
+		responsesCompat: detectOpenAIResponsesCompatibility(baseURL),
+	}
+}
+
+func detectOpenAIResponsesCompatibility(baseURL string) openAIResponsesCompatibility {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return openAIResponsesCompatibility{}
+	}
+
+	switch strings.ToLower(parsed.Hostname()) {
+	case "api.paypal-ai.com":
+		return openAIResponsesCompatibility{
+			DropMetadata:           true,
+			DropContextManagement:  true,
+			RewriteAssistantToUser: true,
+			DropToolErrorStatus:    true,
+		}
+	default:
+		return openAIResponsesCompatibility{}
 	}
 }
 

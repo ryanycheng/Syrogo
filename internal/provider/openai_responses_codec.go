@@ -20,6 +20,7 @@ type openAIResponsesInputItem struct {
 	Name      string                    `json:"name,omitempty"`
 	Arguments string                    `json:"arguments,omitempty"`
 	Output    string                    `json:"output,omitempty"`
+	Status    string                    `json:"status,omitempty"`
 }
 
 type openAIResponsesTool struct {
@@ -30,12 +31,20 @@ type openAIResponsesTool struct {
 }
 
 type openAIResponsesRequest struct {
-	Model           string                     `json:"model"`
-	Instructions    string                     `json:"instructions,omitempty"`
-	MaxOutputTokens int                        `json:"max_output_tokens,omitempty"`
-	Input           []openAIResponsesInputItem `json:"input,omitempty"`
-	Tools           []openAIResponsesTool      `json:"tools,omitempty"`
-	ToolChoice      string                     `json:"tool_choice,omitempty"`
+	Model              string                     `json:"model"`
+	Instructions       string                     `json:"instructions,omitempty"`
+	MaxOutputTokens    int                        `json:"max_output_tokens,omitempty"`
+	Input              []openAIResponsesInputItem `json:"input,omitempty"`
+	Tools              []openAIResponsesTool      `json:"tools,omitempty"`
+	ToolChoice         string                     `json:"tool_choice,omitempty"`
+	PreviousResponseID string                     `json:"previous_response_id,omitempty"`
+	Metadata           json.RawMessage            `json:"metadata,omitempty"`
+	Reasoning          *openAIResponsesReasoning  `json:"reasoning,omitempty"`
+	ContextManagement  json.RawMessage            `json:"context_management,omitempty"`
+}
+
+type openAIResponsesReasoning struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type openAIResponsesOutputItem struct {
@@ -51,6 +60,7 @@ type openAIResponsesEnvelope struct {
 	ID     string                      `json:"id"`
 	Object string                      `json:"object"`
 	Model  string                      `json:"model"`
+	Status string                      `json:"status,omitempty"`
 	Output []openAIResponsesOutputItem `json:"output"`
 	Usage  *struct {
 		InputTokens  int `json:"input_tokens"`
@@ -59,16 +69,20 @@ type openAIResponsesEnvelope struct {
 	} `json:"usage,omitempty"`
 }
 
-func encodeOpenAIResponsesRequest(req runtime.Request) any {
+func encodeOpenAIResponsesRequest(req runtime.Request, compat openAIResponsesCompatibility) any {
 	input := make([]openAIResponsesInputItem, 0, len(req.Messages))
 	for _, msg := range req.Messages {
 		switch {
 		case msg.Role == runtime.MessageRoleTool:
-			input = append(input, openAIResponsesInputItem{
+			encoded := openAIResponsesInputItem{
 				Type:   "function_call_output",
 				CallID: msg.ToolCallID,
-				Output: firstTextPart(msg),
-			})
+				Output: joinedToolResultParts(msg),
+			}
+			if msg.ToolResultIsError && !compat.DropToolErrorStatus {
+				encoded.Status = "error"
+			}
+			input = append(input, encoded)
 		case len(msg.ToolCalls) > 0:
 			for _, call := range msg.ToolCalls {
 				input = append(input, openAIResponsesInputItem{
@@ -79,12 +93,18 @@ func encodeOpenAIResponsesRequest(req runtime.Request) any {
 				})
 			}
 		default:
+			role := string(msg.Role)
+			text := joinedTextParts(msg)
+			if compat.RewriteAssistantToUser && msg.Role == runtime.MessageRoleAssistant {
+				role = string(runtime.MessageRoleUser)
+				text = "Previous assistant message:\n" + text
+			}
 			input = append(input, openAIResponsesInputItem{
 				Type: "message",
-				Role: string(msg.Role),
+				Role: role,
 				Content: []openAIResponsesTextPart{{
 					Type: "input_text",
-					Text: firstTextPart(msg),
+					Text: text,
 				}},
 			})
 		}
@@ -93,6 +113,18 @@ func encodeOpenAIResponsesRequest(req runtime.Request) any {
 	payload := openAIResponsesRequest{
 		Model: req.Model,
 		Input: input,
+	}
+	if req.PreviousResponseID != "" {
+		payload.PreviousResponseID = req.PreviousResponseID
+	}
+	if len(req.Metadata) > 0 && !compat.DropMetadata {
+		payload.Metadata = append(json.RawMessage(nil), req.Metadata...)
+	}
+	if req.OutputEffort != "" {
+		payload.Reasoning = &openAIResponsesReasoning{Effort: req.OutputEffort}
+	}
+	if len(req.ContextManagement) > 0 && !compat.DropContextManagement {
+		payload.ContextManagement = append(json.RawMessage(nil), req.ContextManagement...)
 	}
 	if req.System != "" {
 		payload.Instructions = req.System
@@ -156,11 +188,26 @@ func decodeOpenAIResponsesResponse(resp openAIResponsesEnvelope) (runtime.Respon
 		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream returned no content and no tool calls"))
 	}
 
+	finishReason := runtime.FinishReasonStop
+	if len(message.ToolCalls) > 0 {
+		finishReason = runtime.FinishReasonToolUse
+	}
+	switch resp.Status {
+	case "incomplete":
+		if len(message.ToolCalls) == 0 {
+			finishReason = runtime.FinishReasonLength
+		}
+	case "completed", "", "in_progress":
+		if len(message.ToolCalls) == 0 {
+			finishReason = runtime.FinishReasonStop
+		}
+	}
+
 	response := runtime.Response{
 		ID:           resp.ID,
 		Object:       resp.Object,
 		Model:        resp.Model,
-		FinishReason: runtime.FinishReasonStop,
+		FinishReason: finishReason,
 		Message:      message,
 	}
 	if resp.Usage != nil {

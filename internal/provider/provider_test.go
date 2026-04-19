@@ -303,7 +303,7 @@ func TestEncodeOpenAIChatRequestPreservesJSONToolResultPayload(t *testing.T) {
 	}
 }
 
-func TestEncodeOpenAIResponsesRequestKeepsOnlyFirstToolOutputTextPart(t *testing.T) {
+func TestEncodeOpenAIResponsesRequestPreservesMixedToolResultParts(t *testing.T) {
 	payload := encodeOpenAIResponsesRequest(runtime.Request{
 		Model: "gpt-4o-mini",
 		Messages: []runtime.Message{{
@@ -320,7 +320,7 @@ func TestEncodeOpenAIResponsesRequestKeepsOnlyFirstToolOutputTextPart(t *testing
 				Text: "second text",
 			}},
 		}},
-	})
+	}, openAIResponsesCompatibility{})
 
 	body := payload.(openAIResponsesRequest)
 	input := body.Input
@@ -330,8 +330,9 @@ func TestEncodeOpenAIResponsesRequestKeepsOnlyFirstToolOutputTextPart(t *testing
 	if input[0].Type != "function_call_output" || input[0].CallID != "call_123" {
 		t.Fatalf("input[0] = %#v, want function_call_output", input[0])
 	}
-	if input[0].Output != "first text" {
-		t.Fatalf("input[0].Output = %q, want first text", input[0].Output)
+	want := "first text\n{\"city\":\"shanghai\"}\nsecond text"
+	if input[0].Output != want {
+		t.Fatalf("input[0].Output = %q, want %q", input[0].Output, want)
 	}
 }
 
@@ -442,9 +443,14 @@ func TestDecodeOpenAIResponsesResponseDropsEmptyTextParts(t *testing.T) {
 
 func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 	payload := encodeOpenAIResponsesRequest(runtime.Request{
-		Model:     "gpt-4o-mini",
-		System:    "be concise",
-		MaxTokens: 256,
+		Model:              "gpt-4o-mini",
+		System:             "be concise",
+		MaxTokens:          256,
+		PreviousResponseID: "resp_prev_123",
+		Metadata:           json.RawMessage(`{"user_id":"u_123"}`),
+		ThinkingType:       "adaptive",
+		ContextManagement:  json.RawMessage(`{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`),
+		OutputEffort:       "high",
 		Tools: []runtime.ToolDefinition{{
 			Name:        "Read",
 			Description: "Read file contents",
@@ -455,8 +461,11 @@ func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
 		}},
 		Messages: []runtime.Message{{
-			Role:  runtime.MessageRoleUser,
-			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+			Role: runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "system reminder"}, {
+				Type: runtime.ContentPartTypeText,
+				Text: "hello",
+			}},
 		}, {
 			Role: runtime.MessageRoleAssistant,
 			ToolCalls: []runtime.ToolCall{{
@@ -469,7 +478,7 @@ func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 			ToolCallID: "call_123",
 			Parts:      []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "sunny"}},
 		}},
-	})
+	}, openAIResponsesCompatibility{})
 
 	body := payload.(openAIResponsesRequest)
 	if body.Model != "gpt-4o-mini" {
@@ -480,6 +489,27 @@ func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 	}
 	if body.MaxOutputTokens != 256 {
 		t.Fatalf("body.MaxOutputTokens = %d, want 256", body.MaxOutputTokens)
+	}
+	if body.PreviousResponseID != "resp_prev_123" {
+		t.Fatalf("body.PreviousResponseID = %q, want resp_prev_123", body.PreviousResponseID)
+	}
+	if string(body.Metadata) != `{"user_id":"u_123"}` {
+		t.Fatalf("body.Metadata = %s, want preserved metadata", string(body.Metadata))
+	}
+	if body.Reasoning == nil || body.Reasoning.Effort != "high" {
+		t.Fatalf("body.Reasoning = %#v, want effort high", body.Reasoning)
+	}
+	var contextManagement map[string]any
+	if err := json.Unmarshal(body.ContextManagement, &contextManagement); err != nil {
+		t.Fatalf("json.Unmarshal(body.ContextManagement) error = %v", err)
+	}
+	edits, ok := contextManagement["edits"].([]any)
+	if !ok || len(edits) != 1 {
+		t.Fatalf("contextManagement[edits] = %#v, want one edit", contextManagement["edits"])
+	}
+	edit, ok := edits[0].(map[string]any)
+	if !ok || edit["type"] != "clear_thinking_20251015" || edit["keep"] != "all" {
+		t.Fatalf("edit = %#v, want preserved context_management edit", edits[0])
 	}
 	if body.ToolChoice != "auto" {
 		t.Fatalf("body.ToolChoice = %#v, want auto", body.ToolChoice)
@@ -497,8 +527,8 @@ func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 	if input[0].Type != "message" || input[0].Role != "user" {
 		t.Fatalf("input[0] = %#v, want user message", input[0])
 	}
-	if len(input[0].Content) != 1 || input[0].Content[0].Type != "input_text" || input[0].Content[0].Text != "hello" {
-		t.Fatalf("input[0].Content = %#v, want input_text hello", input[0].Content)
+	if len(input[0].Content) != 1 || input[0].Content[0].Type != "input_text" || input[0].Content[0].Text != "system reminder\nhello" {
+		t.Fatalf("input[0].Content = %#v, want joined input_text", input[0].Content)
 	}
 	if input[1].Type != "function_call" || input[1].CallID != "call_123" || input[1].Name != "get_weather" {
 		t.Fatalf("input[1] = %#v, want function_call", input[1])
@@ -508,6 +538,133 @@ func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 	}
 	if input[2].Type != "function_call_output" || input[2].CallID != "call_123" || input[2].Output != "sunny" {
 		t.Fatalf("input[2] = %#v, want function_call_output", input[2])
+	}
+}
+
+func TestEncodeOpenAIResponsesRequestDropsIncompatibleFieldsForPaypalAI(t *testing.T) {
+	payload := encodeOpenAIResponsesRequest(runtime.Request{
+		Model:             "gpt-4o-mini",
+		Metadata:          json.RawMessage(`{"user_id":"u_123"}`),
+		ContextManagement: json.RawMessage(`{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`),
+		OutputEffort:      "high",
+		Messages: []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}, {
+			Role:  runtime.MessageRoleAssistant,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "assistant reply"}},
+		}},
+	}, openAIResponsesCompatibility{
+		DropMetadata:           true,
+		DropContextManagement:  true,
+		RewriteAssistantToUser: true,
+	})
+
+	body := payload.(openAIResponsesRequest)
+	if len(body.Metadata) != 0 {
+		t.Fatalf("body.Metadata = %s, want omitted", string(body.Metadata))
+	}
+	if len(body.ContextManagement) != 0 {
+		t.Fatalf("body.ContextManagement = %s, want omitted", string(body.ContextManagement))
+	}
+	if body.Reasoning == nil || body.Reasoning.Effort != "high" {
+		t.Fatalf("body.Reasoning = %#v, want preserved reasoning", body.Reasoning)
+	}
+	if len(body.Input) != 2 {
+		t.Fatalf("len(body.Input) = %d, want 2", len(body.Input))
+	}
+	if body.Input[1].Role != "user" {
+		t.Fatalf("body.Input[1].Role = %q, want user", body.Input[1].Role)
+	}
+	if body.Input[1].Content[0].Text != "Previous assistant message:\nassistant reply" {
+		t.Fatalf("body.Input[1].Content[0].Text = %q, want rewritten assistant history", body.Input[1].Content[0].Text)
+	}
+}
+
+func TestDetectOpenAIResponsesCompatibilityPaypalAI(t *testing.T) {
+	compat := detectOpenAIResponsesCompatibility("https://api.paypal-ai.com/v1")
+	if !compat.DropMetadata || !compat.DropContextManagement || !compat.RewriteAssistantToUser || !compat.DropToolErrorStatus {
+		t.Fatalf("compat = %#v, want metadata/context_management dropped, assistant rewritten, and tool error status omitted", compat)
+	}
+}
+
+func TestDetectOpenAIResponsesCompatibilityOfficialOpenAI(t *testing.T) {
+	compat := detectOpenAIResponsesCompatibility("https://api.openai.com/v1")
+	if compat.DropMetadata || compat.DropContextManagement || compat.RewriteAssistantToUser || compat.DropToolErrorStatus {
+		t.Fatalf("compat = %#v, want full responses support", compat)
+	}
+}
+
+func TestEncodeOpenAIResponsesRequestPreservesClaudeCodePromptAfterReminder(t *testing.T) {
+	payload := encodeOpenAIResponsesRequest(runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role: runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{
+				Type: runtime.ContentPartTypeText,
+				Text: "<system-reminder>today is 2026/04/18</system-reminder>",
+			}, {
+				Type: runtime.ContentPartTypeText,
+				Text: "hi",
+			}},
+		}},
+	}, openAIResponsesCompatibility{})
+
+	body := payload.(openAIResponsesRequest)
+	if len(body.Input) != 1 {
+		t.Fatalf("len(body.Input) = %d, want 1", len(body.Input))
+	}
+	if len(body.Input[0].Content) != 1 {
+		t.Fatalf("len(body.Input[0].Content) = %d, want 1", len(body.Input[0].Content))
+	}
+	want := "<system-reminder>today is 2026/04/18</system-reminder>\nhi"
+	if got := body.Input[0].Content[0].Text; got != want {
+		t.Fatalf("body.Input[0].Content[0].Text = %q, want %q", got, want)
+	}
+}
+
+func TestEncodeOpenAIResponsesRequestPreservesToolResultErrorStatus(t *testing.T) {
+	payload := encodeOpenAIResponsesRequest(runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role:              runtime.MessageRoleTool,
+			ToolCallID:        "call_123",
+			ToolResultIsError: true,
+			Parts:             []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "lookup failed"}},
+		}},
+	}, openAIResponsesCompatibility{})
+
+	body := payload.(openAIResponsesRequest)
+	if len(body.Input) != 1 {
+		t.Fatalf("len(body.Input) = %d, want 1", len(body.Input))
+	}
+	if got := body.Input[0].Status; got != "error" {
+		t.Fatalf("body.Input[0].Status = %q, want error", got)
+	}
+}
+
+func TestEncodeOpenAIResponsesRequestDropsToolResultErrorStatusForPaypalAI(t *testing.T) {
+	payload := encodeOpenAIResponsesRequest(runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role:              runtime.MessageRoleTool,
+			ToolCallID:        "call_123",
+			ToolResultIsError: true,
+			Parts:             []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "lookup failed"}},
+		}},
+	}, openAIResponsesCompatibility{
+		DropToolErrorStatus: true,
+	})
+
+	body := payload.(openAIResponsesRequest)
+	if len(body.Input) != 1 {
+		t.Fatalf("len(body.Input) = %d, want 1", len(body.Input))
+	}
+	if got := body.Input[0].Status; got != "" {
+		t.Fatalf("body.Input[0].Status = %q, want omitted", got)
+	}
+	if got := body.Input[0].Output; got != "lookup failed" {
+		t.Fatalf("body.Input[0].Output = %q, want lookup failed", got)
 	}
 }
 
@@ -717,6 +874,32 @@ func TestDecodeOpenAIResponsesResponseMapsTextAndToolCalls(t *testing.T) {
 	if resp.Usage == nil || resp.Usage.TotalTokens != 15 {
 		t.Fatalf("resp.Usage = %#v, want total tokens", resp.Usage)
 	}
+	if resp.FinishReason != runtime.FinishReasonToolUse {
+		t.Fatalf("resp.FinishReason = %q, want tool_use", resp.FinishReason)
+	}
+}
+
+func TestDecodeOpenAIResponsesResponseDefaultsToStopWithoutToolCalls(t *testing.T) {
+	resp, err := decodeOpenAIResponsesResponse(openAIResponsesEnvelope{
+		ID:     "resp_456",
+		Object: "response",
+		Model:  "gpt-4o-mini",
+		Status: "completed",
+		Output: []openAIResponsesOutputItem{{
+			Type: "message",
+			Role: "assistant",
+			Content: []openAIResponsesTextPart{{
+				Type: "output_text",
+				Text: "final answer",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("decodeOpenAIResponsesResponse() error = %v", err)
+	}
+	if resp.FinishReason != runtime.FinishReasonStop {
+		t.Fatalf("resp.FinishReason = %q, want stop", resp.FinishReason)
+	}
 }
 
 func TestDecodeOpenAIResponsesResponseRejectsEmptyOutput(t *testing.T) {
@@ -806,10 +989,15 @@ func TestOpenAIResponsesCompatibleStreamCompletionEmitsToolCallDelta(t *testing.
 	}
 
 	var toolEvent *runtime.StreamEvent
+	var endEvent *runtime.StreamEvent
 	for event := range ch {
 		if event.ToolCall != nil {
 			e := event
 			toolEvent = &e
+		}
+		if event.Type == runtime.StreamEventMessageEnd {
+			e := event
+			endEvent = &e
 		}
 	}
 	if toolEvent == nil {
@@ -817,6 +1005,12 @@ func TestOpenAIResponsesCompatibleStreamCompletionEmitsToolCallDelta(t *testing.
 	}
 	if toolEvent.ToolCall.ID != "call_123" || toolEvent.ToolCall.Name != "get_weather" {
 		t.Fatalf("toolEvent.ToolCall = %#v, want decoded tool call", toolEvent.ToolCall)
+	}
+	if endEvent == nil {
+		t.Fatal("endEvent = nil, want message end")
+	}
+	if endEvent.FinishReason != runtime.FinishReasonToolUse {
+		t.Fatalf("endEvent.FinishReason = %q, want tool_use", endEvent.FinishReason)
 	}
 }
 
