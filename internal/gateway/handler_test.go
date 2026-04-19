@@ -679,6 +679,96 @@ func TestBuildRuntimeRequestFromResponsesSupportsStringInput(t *testing.T) {
 	}
 }
 
+func TestBuildRuntimeRequestFromResponsesAllowsBuiltinResponsesToolsWithoutName(t *testing.T) {
+	req := openAIResponsesRequest{
+		Model: "gpt-4o-mini",
+		Input: json.RawMessage(`"hello"`),
+		Tools: []openAIResponsesTool{{
+			Type: "web_search",
+			Raw:  json.RawMessage(`{"type":"web_search","user_location":{"type":"approximate","country":"US"}}`),
+		}},
+	}
+
+	got, err := buildRuntimeRequestFromResponses(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequestFromResponses() error = %v", err)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("len(got.Tools) = %d, want 1", len(got.Tools))
+	}
+	if got.Tools[0].Name != "web_search" {
+		t.Fatalf("got.Tools[0].Name = %q, want web_search", got.Tools[0].Name)
+	}
+}
+
+func TestBuildRuntimeRequestFromResponsesPreservesBuiltinResponsesTools(t *testing.T) {
+	req := openAIResponsesRequest{
+		Model: "gpt-4o-mini",
+		Input: json.RawMessage(`"hello"`),
+		Tools: []openAIResponsesTool{{
+			Type:        "web_search",
+			Name:        "web_search",
+			Description: "Search the web",
+			Raw:         json.RawMessage(`{"type":"web_search","name":"web_search","description":"Search the web","user_location":{"type":"approximate","country":"US"}}`),
+		}},
+	}
+
+	got, err := buildRuntimeRequestFromResponses(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequestFromResponses() error = %v", err)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("len(got.Tools) = %d, want 1", len(got.Tools))
+	}
+	if got.Tools[0].Type != "web_search" {
+		t.Fatalf("got.Tools[0].Type = %q, want web_search", got.Tools[0].Type)
+	}
+	if len(got.Tools[0].Raw) == 0 {
+		t.Fatal("got.Tools[0].Raw = empty, want preserved raw tool spec")
+	}
+	var rawTool map[string]any
+	if err := json.Unmarshal(got.Tools[0].Raw, &rawTool); err != nil {
+		t.Fatalf("json.Unmarshal(got.Tools[0].Raw) error = %v", err)
+	}
+	userLocation, ok := rawTool["user_location"].(map[string]any)
+	if !ok || userLocation["type"] != "approximate" || userLocation["country"] != "US" {
+		t.Fatalf("rawTool[user_location] = %#v, want approximate/US", rawTool["user_location"])
+	}
+}
+
+func TestBuildRuntimeRequestFromResponsesPreservesTools(t *testing.T) {
+	req := openAIResponsesRequest{
+		Model: "gpt-4o-mini",
+		Input: json.RawMessage(`"hello"`),
+		Tools: []openAIResponsesTool{
+			{
+				Type:        "function",
+				Name:        "get_weather",
+				Description: "Query weather by city",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
+			},
+		},
+	}
+
+	got, err := buildRuntimeRequestFromResponses(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequestFromResponses() error = %v", err)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("len(got.Tools) = %d, want 1", len(got.Tools))
+	}
+	if got.Tools[0].Name != "get_weather" || got.Tools[0].Description != "Query weather by city" {
+		t.Fatalf("got.Tools[0] = %#v, want preserved tool metadata", got.Tools[0])
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(got.Tools[0].InputSchema, &schema); err != nil {
+		t.Fatalf("json.Unmarshal(got.Tools[0].InputSchema) error = %v", err)
+	}
+	if schema["type"] != "object" {
+		t.Fatalf("schema[type] = %#v, want object", schema["type"])
+	}
+}
+
 func TestBuildRuntimeRequestFromResponsesFunctionOutputDropsNonTextParts(t *testing.T) {
 	req := openAIResponsesRequest{
 		Model: "gpt-4o-mini",
@@ -969,6 +1059,30 @@ func TestResponsesUsesOpenAIResponsesProvider(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Fatalf("Authorization = %q, want Bearer test-key", got)
 		}
+		var upstreamBody struct {
+			Tools []struct {
+				Type        string          `json:"type"`
+				Name        string          `json:"name"`
+				Description string          `json:"description"`
+				Parameters  json.RawMessage `json:"parameters"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatalf("json.NewDecoder() error = %v", err)
+		}
+		if len(upstreamBody.Tools) != 1 {
+			t.Fatalf("len(upstreamBody.Tools) = %d, want 1", len(upstreamBody.Tools))
+		}
+		if upstreamBody.Tools[0].Name != "get_weather" || upstreamBody.Tools[0].Description != "Query weather by city" {
+			t.Fatalf("upstreamBody.Tools[0] = %#v, want forwarded tool metadata", upstreamBody.Tools[0])
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(upstreamBody.Tools[0].Parameters, &schema); err != nil {
+			t.Fatalf("json.Unmarshal(upstreamBody.Tools[0].Parameters) error = %v", err)
+		}
+		if schema["type"] != "object" {
+			t.Fatalf("schema[type] = %#v, want object", schema["type"])
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id":     "resp_123",
 			"object": "response",
@@ -986,12 +1100,12 @@ func TestResponsesUsesOpenAIResponsesProvider(t *testing.T) {
 	defer upstream.Close()
 
 	h := newTestHandler(t, map[string]provider.Provider{
-		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, upstream.Client()),
+		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, config.OutboundCapabilities{}, upstream.Client()),
 	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"responses-tag"}, Strategy: "failover"}}}, testDualProtocolInbounds(), []config.OutboundSpec{{Name: "responses", Protocol: "openai_responses", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "responses-tag"}})
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	body, err := json.Marshal(map[string]any{"model": "gpt-4o-mini", "input": "hello"})
+	body, err := json.Marshal(map[string]any{"model": "gpt-4o-mini", "input": "hello", "tools": []map[string]any{{"type": "function", "name": "get_weather", "description": "Query weather by city", "parameters": map[string]any{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}, "required": []string{"city"}}}}})
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
@@ -1104,7 +1218,7 @@ func TestAnthropicMessagesUsesOpenAIResponsesProvider(t *testing.T) {
 	defer upstream.Close()
 
 	h := newTestHandler(t, map[string]provider.Provider{
-		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, upstream.Client()),
+		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, config.OutboundCapabilities{}, upstream.Client()),
 	}, config.RoutingConfig{Rules: []config.RoutingRule{{
 		Name:        "anthropic-to-responses",
 		FromTags:    []string{"office"},
@@ -1235,7 +1349,7 @@ func TestAnthropicMessagesToolLoopUsesOpenAIResponsesProvider(t *testing.T) {
 	defer upstream.Close()
 
 	h := newTestHandler(t, map[string]provider.Provider{
-		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, upstream.Client()),
+		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, config.OutboundCapabilities{}, upstream.Client()),
 	}, config.RoutingConfig{Rules: []config.RoutingRule{{
 		Name:        "anthropic-to-responses",
 		FromTags:    []string{"office"},

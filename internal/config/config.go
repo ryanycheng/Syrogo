@@ -52,11 +52,19 @@ type RoutingConfig struct {
 }
 
 type OutboundSpec struct {
-	Name      string `yaml:"name"`
-	Protocol  string `yaml:"protocol"`
-	Endpoint  string `yaml:"endpoint"`
-	AuthToken string `yaml:"auth_token"`
-	Tag       string `yaml:"tag"`
+	Name         string               `yaml:"name"`
+	Protocol     string               `yaml:"protocol"`
+	Endpoint     string               `yaml:"endpoint"`
+	AuthToken    string               `yaml:"auth_token"`
+	Tag          string               `yaml:"tag"`
+	Capabilities OutboundCapabilities `yaml:"capabilities"`
+}
+
+type OutboundCapabilities struct {
+	ResponsesPreviousResponseID     *bool `yaml:"responses_previous_response_id"`
+	ResponsesBuiltinTools           *bool `yaml:"responses_builtin_tools"`
+	ResponsesToolResultStatusError  *bool `yaml:"responses_tool_result_status_error"`
+	ResponsesAssistantHistoryNative *bool `yaml:"responses_assistant_history_native"`
 }
 
 func Load(path string) (Config, error) {

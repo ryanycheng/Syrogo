@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"syrogo/internal/config"
 	"syrogo/internal/runtime"
 )
 
@@ -49,6 +50,8 @@ type openAIResponsesCompatibility struct {
 	DropContextManagement  bool
 	RewriteAssistantToUser bool
 	DropToolErrorStatus    bool
+	RejectPreviousResponse bool
+	RejectBuiltinTools     bool
 }
 
 const (
@@ -234,14 +237,14 @@ func NewMock(name string) *MockProvider {
 }
 
 func NewOpenAICompatible(name, baseURL string, apiKeys []string, httpClient *http.Client) *OpenAICompatibleProvider {
-	return newOpenAIProvider(name, baseURL, apiKeys, httpClient, "/chat/completions", openAIProtocolModeChat)
+	return newOpenAIProvider(name, baseURL, apiKeys, config.OutboundCapabilities{}, httpClient, "/chat/completions", openAIProtocolModeChat)
 }
 
-func NewOpenAIResponsesCompatible(name, baseURL string, apiKeys []string, httpClient *http.Client) *OpenAICompatibleProvider {
-	return newOpenAIProvider(name, baseURL, apiKeys, httpClient, "/responses", openAIProtocolModeResponses)
+func NewOpenAIResponsesCompatible(name, baseURL string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) *OpenAICompatibleProvider {
+	return newOpenAIProvider(name, baseURL, apiKeys, capabilities, httpClient, "/responses", openAIProtocolModeResponses)
 }
 
-func newOpenAIProvider(name, baseURL string, apiKeys []string, httpClient *http.Client, path string, mode openAIProtocolMode) *OpenAICompatibleProvider {
+func newOpenAIProvider(name, baseURL string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client, path string, mode openAIProtocolMode) *OpenAICompatibleProvider {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
@@ -252,7 +255,7 @@ func newOpenAIProvider(name, baseURL string, apiKeys []string, httpClient *http.
 		httpClient:      httpClient,
 		path:            path,
 		mode:            mode,
-		responsesCompat: detectOpenAIResponsesCompatibility(baseURL),
+		responsesCompat: mergeOpenAIResponsesCompatibility(detectOpenAIResponsesCompatibility(baseURL), capabilities),
 	}
 }
 
@@ -269,10 +272,49 @@ func detectOpenAIResponsesCompatibility(baseURL string) openAIResponsesCompatibi
 			DropContextManagement:  true,
 			RewriteAssistantToUser: true,
 			DropToolErrorStatus:    true,
+			RejectPreviousResponse: true,
+			RejectBuiltinTools:     true,
 		}
 	default:
 		return openAIResponsesCompatibility{}
 	}
+}
+
+func mergeOpenAIResponsesCompatibility(base openAIResponsesCompatibility, capabilities config.OutboundCapabilities) openAIResponsesCompatibility {
+	if capabilities.ResponsesPreviousResponseID != nil {
+		base.RejectPreviousResponse = !*capabilities.ResponsesPreviousResponseID
+	}
+	if capabilities.ResponsesBuiltinTools != nil {
+		base.RejectBuiltinTools = !*capabilities.ResponsesBuiltinTools
+	}
+	if capabilities.ResponsesToolResultStatusError != nil {
+		base.DropToolErrorStatus = !*capabilities.ResponsesToolResultStatusError
+	}
+	if capabilities.ResponsesAssistantHistoryNative != nil {
+		base.RewriteAssistantToUser = !*capabilities.ResponsesAssistantHistoryNative
+	}
+	return base
+}
+
+func hasBuiltinResponsesTools(tools []runtime.ToolDefinition) bool {
+	for _, tool := range tools {
+		toolType := strings.TrimSpace(tool.Type)
+		if toolType == "" || toolType == "function" || toolType == "custom" {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func validateOpenAIResponsesRequest(req runtime.Request, compat openAIResponsesCompatibility) error {
+	if compat.RejectPreviousResponse && req.PreviousResponseID != "" {
+		return NewFatalError(fmt.Errorf("outbound does not support responses previous_response_id continuation"))
+	}
+	if compat.RejectBuiltinTools && hasBuiltinResponsesTools(req.Tools) {
+		return NewFatalError(fmt.Errorf("outbound does not support responses builtin tools"))
+	}
+	return nil
 }
 
 func NewAnthropicMessagesCompatible(name, baseURL string, apiKeys []string, httpClient *http.Client) *AnthropicMessagesProvider {

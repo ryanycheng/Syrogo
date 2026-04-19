@@ -20,7 +20,7 @@ func New(cfg config.Config) (*App, error) {
 	providers := make(map[string]provider.Provider, len(cfg.Outbounds))
 	registry := provider.DefaultFactoryRegistry()
 	for _, spec := range cfg.Outbounds {
-		instance, err := registry.New(spec.Protocol, spec.Name, spec.Endpoint, spec.AuthToken)
+		instance, err := registry.New(spec.Protocol, spec.Name, spec.Endpoint, spec.AuthToken, spec.Capabilities)
 		if err != nil {
 			return nil, err
 		}

@@ -16,10 +16,12 @@ import (
 type openAIResponsesCodec struct{}
 
 type openAIResponsesRequest struct {
-	Model              string          `json:"model"`
-	Input              json.RawMessage `json:"input"`
-	Stream             bool            `json:"stream"`
-	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	Model              string                `json:"model"`
+	Input              json.RawMessage       `json:"input"`
+	Instructions       string                `json:"instructions,omitempty"`
+	Stream             bool                  `json:"stream"`
+	PreviousResponseID string                `json:"previous_response_id,omitempty"`
+	Tools              []openAIResponsesTool `json:"tools,omitempty"`
 }
 
 type openAIResponsesInputItem struct {
@@ -36,6 +38,30 @@ type openAIResponsesInputItem struct {
 type openAIResponsesContentPart struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
+}
+
+type openAIResponsesTool struct {
+	Type        string          `json:"type,omitempty"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Format      json.RawMessage `json:"format,omitempty"`
+	Raw         json.RawMessage `json:"-"`
+}
+
+func (t *openAIResponsesTool) UnmarshalJSON(data []byte) error {
+	t.Raw = append(t.Raw[:0], data...)
+	type alias openAIResponsesTool
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	t.Type = decoded.Type
+	t.Name = decoded.Name
+	t.Description = decoded.Description
+	t.Parameters = append(t.Parameters[:0], decoded.Parameters...)
+	t.Format = append(t.Format[:0], decoded.Format...)
+	return nil
 }
 
 type openAIResponsesSSEFrame struct {
@@ -133,14 +159,66 @@ func buildSemanticRequestFromResponses(req openAIResponsesRequest) (semantic.Req
 	if err != nil {
 		return semantic.Request{}, err
 	}
-	return semantic.Request{
+	tools, err := parseOpenAIResponsesTools(req.Tools)
+	if err != nil {
+		return semantic.Request{}, err
+	}
+	semanticReq := semantic.Request{
 		Model: req.Model,
 		Turns: turns,
+		Tools: tools,
 		Options: semantic.GenerateOptions{
 			Stream:             req.Stream,
 			PreviousResponseID: req.PreviousResponseID,
 		},
-	}, nil
+	}
+	if req.Instructions != "" {
+		semanticReq.Instructions = []semantic.Segment{{Kind: semantic.SegmentText, Text: req.Instructions}}
+	}
+	return semanticReq, nil
+}
+
+func parseOpenAIResponsesTools(raw []openAIResponsesTool) ([]semantic.ToolDefinition, error) {
+	tools := make([]semantic.ToolDefinition, 0, len(raw))
+	for _, tool := range raw {
+		if tool.Type == "" {
+			tool.Type = "function"
+		}
+		if tool.Name == "" {
+			if tool.Type == "function" || tool.Type == "custom" {
+				return nil, fmt.Errorf("tool name is required")
+			}
+			tool.Name = tool.Type
+		}
+		inputSchema := json.RawMessage(`{}`)
+		if len(tool.Parameters) > 0 {
+			var schema any
+			if err := json.Unmarshal(tool.Parameters, &schema); err != nil {
+				return nil, fmt.Errorf("invalid tool parameters for %q: %w", tool.Name, err)
+			}
+			encoded, err := json.Marshal(schema)
+			if err != nil {
+				return nil, fmt.Errorf("marshal tool parameters for %q: %w", tool.Name, err)
+			}
+			inputSchema = encoded
+		}
+		toolDef := semantic.ToolDefinition{
+			Type:        tool.Type,
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: inputSchema,
+		}
+		if len(tool.Raw) > 0 {
+			toolDef.Raw = append(json.RawMessage(nil), tool.Raw...)
+		} else if encoded, err := json.Marshal(tool); err == nil {
+			toolDef.Raw = encoded
+		}
+		if tool.Type == "custom" {
+			toolDef.Format = append(json.RawMessage(nil), tool.Format...)
+		}
+		tools = append(tools, toolDef)
+	}
+	return tools, nil
 }
 
 func parseOpenAIResponsesInput(raw json.RawMessage) ([]semantic.Turn, error) {
@@ -171,8 +249,14 @@ func parseOpenAIResponsesInput(raw json.RawMessage) ([]semantic.Turn, error) {
 			}
 			turns = append(turns, semantic.Turn{Role: role, Segments: segments})
 		case "function_call":
-			turns = append(turns, semantic.Turn{Role: semantic.RoleAssistant, Segments: []semantic.Segment{{Kind: semantic.SegmentToolCall, ToolCall: &semantic.ToolCall{ID: item.CallID, Name: item.Name, Arguments: normalizedJSONOrRaw(item.Input)}}}})
-		case "function_call_output":
+			turns = append(turns, semantic.Turn{Role: semantic.RoleAssistant, Segments: []semantic.Segment{{Kind: semantic.SegmentToolCall, ToolCall: &semantic.ToolCall{ID: item.CallID, Type: "function", Name: item.Name, Arguments: normalizedJSONOrRaw(item.Input)}}}})
+		case "custom_tool_call":
+			var input string
+			if err := json.Unmarshal(item.Input, &input); err != nil {
+				return nil, fmt.Errorf("custom_tool_call.input must be string")
+			}
+			turns = append(turns, semantic.Turn{Role: semantic.RoleAssistant, Segments: []semantic.Segment{{Kind: semantic.SegmentToolCall, ToolCall: &semantic.ToolCall{ID: item.CallID, Type: "custom", Name: item.Name, Input: input}}}})
+		case "function_call_output", "custom_tool_call_output":
 			content, err := parseOpenAIResponsesFunctionOutput(item.Output)
 			if err != nil {
 				return nil, err
@@ -180,10 +264,15 @@ func parseOpenAIResponsesInput(raw json.RawMessage) ([]semantic.Turn, error) {
 			if item.CallID == "" {
 				return nil, fmt.Errorf("function_call_output.call_id is required")
 			}
+			toolCallType := "function"
+			if item.Type == "custom_tool_call_output" {
+				toolCallType = "custom"
+			}
 			turns = append(turns, semantic.Turn{Role: semantic.RoleTool, Segments: []semantic.Segment{{Kind: semantic.SegmentToolResult, ToolResult: &semantic.ToolResult{
-				ToolCallID: item.CallID,
-				Content:    content,
-				IsError:    item.Status == "error",
+				ToolCallID:   item.CallID,
+				ToolCallType: toolCallType,
+				Content:      content,
+				IsError:      item.Status == "error",
 			}}}})
 		default:
 			return nil, fmt.Errorf("unsupported responses input item type %q", item.Type)
@@ -278,6 +367,15 @@ func buildOpenAIResponsesOutput(resp runtime.Response) []map[string]any {
 		})
 	}
 	for _, call := range resp.Message.ToolCalls {
+		if call.Type == "custom" {
+			output = append(output, map[string]any{
+				"type":    "custom_tool_call",
+				"call_id": call.ID,
+				"name":    call.Name,
+				"input":   call.Input,
+			})
+			continue
+		}
 		var input any
 		if err := json.Unmarshal([]byte(call.Arguments), &input); err != nil {
 			input = map[string]any{}
@@ -367,14 +465,21 @@ func openAIResponsesStreamFrames(plan runtime.ExecutionPlan, events <-chan runti
 	}
 
 	functionCallItem := func(call runtime.ToolCall, status string) map[string]any {
-		return map[string]any{
-			"id":        nonEmpty(call.ID, fmt.Sprintf("call_%d", len(toolCalls))),
-			"status":    status,
-			"type":      "function_call",
-			"call_id":   call.ID,
-			"name":      call.Name,
-			"arguments": call.Arguments,
+		itemType := "function_call"
+		item := map[string]any{
+			"id":      nonEmpty(call.ID, fmt.Sprintf("call_%d", len(toolCalls))),
+			"status":  status,
+			"type":    itemType,
+			"call_id": call.ID,
+			"name":    call.Name,
 		}
+		if call.Type == "custom" {
+			item["type"] = "custom_tool_call"
+			item["input"] = call.Input
+			return item
+		}
+		item["arguments"] = call.Arguments
+		return item
 	}
 
 	appendFrame("response.created", map[string]any{

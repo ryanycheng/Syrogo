@@ -1,16 +1,20 @@
 package provider
 
-import "testing"
+import (
+	"testing"
+
+	"syrogo/internal/config"
+)
 
 func TestFactoryRegistryNewBuildsRegisteredProvider(t *testing.T) {
 	registry := NewFactoryRegistry()
-	if err := registry.Register("mock", func(name, endpoint string, apiKeys []string) (Provider, error) {
+	if err := registry.Register("mock", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error) {
 		return NewMock(name), nil
 	}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	got, err := registry.New("mock", "demo", "", "")
+	got, err := registry.New("mock", "demo", "", "", config.OutboundCapabilities{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -21,7 +25,7 @@ func TestFactoryRegistryNewBuildsRegisteredProvider(t *testing.T) {
 
 func TestFactoryRegistryRejectsDuplicateRegister(t *testing.T) {
 	registry := NewFactoryRegistry()
-	factory := func(name, endpoint string, apiKeys []string) (Provider, error) {
+	factory := func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error) {
 		return NewMock(name), nil
 	}
 	if err := registry.Register("mock", factory); err != nil {
@@ -37,7 +41,7 @@ func TestFactoryRegistryRejectsDuplicateRegister(t *testing.T) {
 func TestFactoryRegistryRejectsUnknownProtocol(t *testing.T) {
 	registry := NewFactoryRegistry()
 
-	_, err := registry.New("missing", "demo", "", "")
+	_, err := registry.New("missing", "demo", "", "", config.OutboundCapabilities{})
 	if err == nil || err.Error() != "unsupported provider protocol \"missing\"" {
 		t.Fatalf("New() error = %v, want unsupported provider protocol error", err)
 	}

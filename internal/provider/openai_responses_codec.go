@@ -19,6 +19,7 @@ type openAIResponsesInputItem struct {
 	CallID    string                    `json:"call_id,omitempty"`
 	Name      string                    `json:"name,omitempty"`
 	Arguments string                    `json:"arguments,omitempty"`
+	Input     any                       `json:"input,omitempty"`
 	Output    string                    `json:"output,omitempty"`
 	Status    string                    `json:"status,omitempty"`
 }
@@ -28,6 +29,7 @@ type openAIResponsesTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Format      json.RawMessage `json:"format,omitempty"`
 }
 
 type openAIResponsesRequest struct {
@@ -35,7 +37,7 @@ type openAIResponsesRequest struct {
 	Instructions       string                     `json:"instructions,omitempty"`
 	MaxOutputTokens    int                        `json:"max_output_tokens,omitempty"`
 	Input              []openAIResponsesInputItem `json:"input,omitempty"`
-	Tools              []openAIResponsesTool      `json:"tools,omitempty"`
+	Tools              []any                      `json:"tools,omitempty"`
 	ToolChoice         string                     `json:"tool_choice,omitempty"`
 	PreviousResponseID string                     `json:"previous_response_id,omitempty"`
 	Metadata           json.RawMessage            `json:"metadata,omitempty"`
@@ -54,6 +56,7 @@ type openAIResponsesOutputItem struct {
 	CallID    string                    `json:"call_id,omitempty"`
 	Name      string                    `json:"name,omitempty"`
 	Arguments string                    `json:"arguments,omitempty"`
+	Input     json.RawMessage           `json:"input,omitempty"`
 }
 
 type openAIResponsesEnvelope struct {
@@ -74,8 +77,12 @@ func encodeOpenAIResponsesRequest(req runtime.Request, compat openAIResponsesCom
 	for _, msg := range req.Messages {
 		switch {
 		case msg.Role == runtime.MessageRoleTool:
+			itemType := "function_call_output"
+			if msg.ToolCallType == "custom" {
+				itemType = "custom_tool_call_output"
+			}
 			encoded := openAIResponsesInputItem{
-				Type:   "function_call_output",
+				Type:   itemType,
 				CallID: msg.ToolCallID,
 				Output: joinedToolResultParts(msg),
 			}
@@ -85,12 +92,18 @@ func encodeOpenAIResponsesRequest(req runtime.Request, compat openAIResponsesCom
 			input = append(input, encoded)
 		case len(msg.ToolCalls) > 0:
 			for _, call := range msg.ToolCalls {
-				input = append(input, openAIResponsesInputItem{
-					Type:      "function_call",
-					CallID:    call.ID,
-					Name:      call.Name,
-					Arguments: compactJSONOrEmpty(json.RawMessage(call.Arguments)),
-				})
+				encoded := openAIResponsesInputItem{
+					Type:   "function_call",
+					CallID: call.ID,
+					Name:   call.Name,
+				}
+				if call.Type == "custom" {
+					encoded.Type = "custom_tool_call"
+					encoded.Input = call.Input
+				} else {
+					encoded.Arguments = compactJSONOrEmpty(json.RawMessage(call.Arguments))
+				}
+				input = append(input, encoded)
 			}
 		default:
 			role := string(msg.Role)
@@ -133,17 +146,40 @@ func encodeOpenAIResponsesRequest(req runtime.Request, compat openAIResponsesCom
 		payload.MaxOutputTokens = req.MaxTokens
 	}
 	if len(req.Tools) > 0 {
-		payload.Tools = make([]openAIResponsesTool, 0, len(req.Tools))
+		payload.Tools = make([]any, 0, len(req.Tools))
 		for _, tool := range req.Tools {
 			if shouldDropOpenAIResponsesTool(tool) {
 				continue
 			}
-			payload.Tools = append(payload.Tools, openAIResponsesTool{
-				Type:        "function",
-				Name:        tool.Name,
-				Description: tool.Description,
-				Parameters:  normalizedToolSchema(tool.InputSchema),
-			})
+			toolType := tool.Type
+			if toolType == "" {
+				toolType = "function"
+			}
+			switch toolType {
+			case "function":
+				payload.Tools = append(payload.Tools, openAIResponsesTool{
+					Type:        "function",
+					Name:        tool.Name,
+					Description: tool.Description,
+					Parameters:  normalizedToolSchema(tool.InputSchema),
+				})
+			case "custom":
+				payload.Tools = append(payload.Tools, openAIResponsesTool{
+					Type:        "custom",
+					Name:        tool.Name,
+					Description: tool.Description,
+					Format:      append(json.RawMessage(nil), tool.Format...),
+				})
+			default:
+				if len(tool.Raw) > 0 {
+					var raw any
+					if err := json.Unmarshal(tool.Raw, &raw); err == nil {
+						payload.Tools = append(payload.Tools, raw)
+						continue
+					}
+				}
+				payload.Tools = append(payload.Tools, map[string]any{"type": toolType})
+			}
 		}
 		if len(payload.Tools) > 0 {
 			payload.ToolChoice = "auto"
@@ -153,6 +189,9 @@ func encodeOpenAIResponsesRequest(req runtime.Request, compat openAIResponsesCom
 }
 
 func shouldDropOpenAIResponsesTool(tool runtime.ToolDefinition) bool {
+	if tool.Type == "custom" {
+		return false
+	}
 	var schema map[string]any
 	if len(tool.InputSchema) > 0 && json.Unmarshal(tool.InputSchema, &schema) == nil {
 		if kind, _ := schema["type"].(string); kind != "" && kind != "object" {
@@ -181,7 +220,19 @@ func decodeOpenAIResponsesResponse(resp openAIResponsesEnvelope) (runtime.Respon
 				}
 			}
 		case "function_call":
-			message.ToolCalls = append(message.ToolCalls, runtime.ToolCall{ID: item.CallID, Name: item.Name, Arguments: item.Arguments})
+			arguments := item.Arguments
+			if arguments == "" && len(item.Input) > 0 {
+				arguments = compactJSONOrEmpty(item.Input)
+			}
+			message.ToolCalls = append(message.ToolCalls, runtime.ToolCall{ID: item.CallID, Type: "function", Name: item.Name, Arguments: arguments})
+		case "custom_tool_call":
+			var input string
+			if len(item.Input) > 0 {
+				if err := json.Unmarshal(item.Input, &input); err != nil {
+					input = string(item.Input)
+				}
+			}
+			message.ToolCalls = append(message.ToolCalls, runtime.ToolCall{ID: item.CallID, Type: "custom", Name: item.Name, Input: input})
 		}
 	}
 	if len(message.Parts) == 0 && len(message.ToolCalls) == 0 {

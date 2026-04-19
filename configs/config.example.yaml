@@ -86,6 +86,13 @@ outbounds:
     endpoint: "https://api.openai.com/v1"
     auth_token: "${OPENAI_RESPONSES_API_KEY_PRIMARY}"
     tag: "responses-primary"
+    # Optional provider-specific Responses compatibility overrides.
+    # Example for a partially compatible upstream:
+    # capabilities:
+    #   responses_previous_response_id: false
+    #   responses_builtin_tools: false
+    #   responses_tool_result_status_error: false
+    #   responses_assistant_history_native: false
 
   - name: "anthropic-primary"
     protocol: "anthropic_messages"

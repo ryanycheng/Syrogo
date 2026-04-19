@@ -62,14 +62,19 @@ type ContentPart struct {
 
 type ToolCall struct {
 	ID        string
+	Type      string
 	Name      string
 	Arguments string
+	Input     string
 }
 
 type ToolDefinition struct {
+	Type        string
 	Name        string
 	Description string
 	InputSchema json.RawMessage
+	Format      json.RawMessage
+	Raw         json.RawMessage
 }
 
 type Message struct {
@@ -77,6 +82,7 @@ type Message struct {
 	Parts             []ContentPart
 	ToolCalls         []ToolCall
 	ToolCallID        string
+	ToolCallType      string
 	ToolResultIsError bool
 }
 

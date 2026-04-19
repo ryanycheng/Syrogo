@@ -211,6 +211,64 @@ func TestConfigValidateSupportsOpenAIResponsesOutbound(t *testing.T) {
 	}
 }
 
+func TestConfigLoadParsesOutboundCapabilities(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte(`listeners:
+  - name: "public"
+    listen: ":8080"
+    inbounds:
+      - "openai-entry"
+inbounds:
+  - name: "openai-entry"
+    protocol: "openai_chat"
+    path: "/v1/chat/completions"
+    clients:
+      - token: "client-token"
+        tag: "office"
+routing:
+  rules:
+    - name: "office-route"
+      from_tags:
+        - "office"
+      to_tags:
+        - "responses-tag"
+      strategy: "failover"
+outbounds:
+  - name: "responses"
+    protocol: "openai_responses"
+    endpoint: "https://example.com/v1"
+    auth_token: "key-1"
+    tag: "responses-tag"
+    capabilities:
+      responses_previous_response_id: false
+      responses_builtin_tools: true
+      responses_tool_result_status_error: false
+      responses_assistant_history_native: true
+`)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	caps := cfg.Outbounds[0].Capabilities
+	if caps.ResponsesPreviousResponseID == nil || *caps.ResponsesPreviousResponseID {
+		t.Fatalf("ResponsesPreviousResponseID = %#v, want false", caps.ResponsesPreviousResponseID)
+	}
+	if caps.ResponsesBuiltinTools == nil || !*caps.ResponsesBuiltinTools {
+		t.Fatalf("ResponsesBuiltinTools = %#v, want true", caps.ResponsesBuiltinTools)
+	}
+	if caps.ResponsesToolResultStatusError == nil || *caps.ResponsesToolResultStatusError {
+		t.Fatalf("ResponsesToolResultStatusError = %#v, want false", caps.ResponsesToolResultStatusError)
+	}
+	if caps.ResponsesAssistantHistoryNative == nil || !*caps.ResponsesAssistantHistoryNative {
+		t.Fatalf("ResponsesAssistantHistoryNative = %#v, want true", caps.ResponsesAssistantHistoryNative)
+	}
+}
+
 func TestConfigValidateSupportsAnthropicMessagesOutbound(t *testing.T) {
 	cfg := validConfig()
 	cfg.Outbounds[0] = OutboundSpec{Name: "anthropic", Protocol: "anthropic_messages", Tag: "anthropic-tag", Endpoint: "https://example.com/v1", AuthToken: "key-1"}

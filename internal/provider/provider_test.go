@@ -11,8 +11,13 @@ import (
 	"strings"
 	"testing"
 
+	"syrogo/internal/config"
 	"syrogo/internal/runtime"
 )
+
+func boolPtr(v bool) *bool {
+	return &v
+}
 
 func TestEncodeOpenAIChatRequestUsesJoinedTextParts(t *testing.T) {
 	payload := encodeOpenAIChatRequest(runtime.Request{
@@ -517,7 +522,15 @@ func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 	if len(body.Tools) != 2 {
 		t.Fatalf("len(body.Tools) = %d, want 2", len(body.Tools))
 	}
-	if body.Tools[0].Name != "Read" || body.Tools[1].Name != "get_weather" {
+	tool0, ok := body.Tools[0].(openAIResponsesTool)
+	if !ok {
+		t.Fatalf("body.Tools[0] type = %T, want openAIResponsesTool", body.Tools[0])
+	}
+	tool1, ok := body.Tools[1].(openAIResponsesTool)
+	if !ok {
+		t.Fatalf("body.Tools[1] type = %T, want openAIResponsesTool", body.Tools[1])
+	}
+	if tool0.Name != "Read" || tool1.Name != "get_weather" {
 		t.Fatalf("body.Tools = %#v, want builtin Read and custom get_weather", body.Tools)
 	}
 	input := body.Input
@@ -538,6 +551,36 @@ func TestEncodeOpenAIResponsesRequestMapsMessagesAndToolCalls(t *testing.T) {
 	}
 	if input[2].Type != "function_call_output" || input[2].CallID != "call_123" || input[2].Output != "sunny" {
 		t.Fatalf("input[2] = %#v, want function_call_output", input[2])
+	}
+}
+
+func TestEncodeOpenAIResponsesRequestPreservesBuiltinResponsesTools(t *testing.T) {
+	payload := encodeOpenAIResponsesRequest(runtime.Request{
+		Model: "gpt-4o-mini",
+		Tools: []runtime.ToolDefinition{{
+			Type: "web_search",
+			Raw:  json.RawMessage(`{"type":"web_search","user_location":{"type":"approximate","country":"US"}}`),
+		}},
+	}, openAIResponsesCompatibility{})
+
+	body := payload.(openAIResponsesRequest)
+	if len(body.Tools) != 1 {
+		t.Fatalf("len(body.Tools) = %d, want 1", len(body.Tools))
+	}
+	raw, err := json.Marshal(body.Tools[0])
+	if err != nil {
+		t.Fatalf("json.Marshal(body.Tools[0]) error = %v", err)
+	}
+	var tool map[string]any
+	if err := json.Unmarshal(raw, &tool); err != nil {
+		t.Fatalf("json.Unmarshal(raw) error = %v", err)
+	}
+	if tool["type"] != "web_search" {
+		t.Fatalf("tool[type] = %#v, want web_search", tool["type"])
+	}
+	userLocation, ok := tool["user_location"].(map[string]any)
+	if !ok || userLocation["type"] != "approximate" || userLocation["country"] != "US" {
+		t.Fatalf("tool[user_location] = %#v, want approximate/US", tool["user_location"])
 	}
 }
 
@@ -592,6 +635,55 @@ func TestDetectOpenAIResponsesCompatibilityOfficialOpenAI(t *testing.T) {
 	compat := detectOpenAIResponsesCompatibility("https://api.openai.com/v1")
 	if compat.DropMetadata || compat.DropContextManagement || compat.RewriteAssistantToUser || compat.DropToolErrorStatus {
 		t.Fatalf("compat = %#v, want full responses support", compat)
+	}
+}
+
+func TestMergeOpenAIResponsesCompatibilityUsesConfigOverrides(t *testing.T) {
+	falseValue := false
+	trueValue := true
+	compat := mergeOpenAIResponsesCompatibility(detectOpenAIResponsesCompatibility("https://api.paypal-ai.com/v1"), config.OutboundCapabilities{
+		ResponsesPreviousResponseID:     &trueValue,
+		ResponsesBuiltinTools:           &trueValue,
+		ResponsesToolResultStatusError:  &trueValue,
+		ResponsesAssistantHistoryNative: &trueValue,
+	})
+	if compat.RejectPreviousResponse || compat.RejectBuiltinTools || compat.DropToolErrorStatus || compat.RewriteAssistantToUser {
+		t.Fatalf("compat = %#v, want config overrides to disable paypal defaults", compat)
+	}
+	compat = mergeOpenAIResponsesCompatibility(openAIResponsesCompatibility{}, config.OutboundCapabilities{
+		ResponsesPreviousResponseID:     &falseValue,
+		ResponsesBuiltinTools:           &falseValue,
+		ResponsesToolResultStatusError:  &falseValue,
+		ResponsesAssistantHistoryNative: &falseValue,
+	})
+	if !compat.RejectPreviousResponse || !compat.RejectBuiltinTools || !compat.DropToolErrorStatus || !compat.RewriteAssistantToUser {
+		t.Fatalf("compat = %#v, want false capabilities to enforce guards/rewrites", compat)
+	}
+}
+
+func TestOpenAIResponsesRejectsPreviousResponseWhenCapabilityDisabled(t *testing.T) {
+	p := NewOpenAIResponsesCompatible("responses", "https://example.com/v1", []string{"test-key"}, config.OutboundCapabilities{
+		ResponsesPreviousResponseID: boolPtr(false),
+	}, nil)
+	_, err := p.ChatCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini", PreviousResponseID: "resp_123"})
+	if err == nil || NormalizeError(err) != ErrorKindFatal {
+		t.Fatalf("err = %v, want fatal unsupported previous_response_id", err)
+	}
+	if got := err.Error(); got != "outbound does not support responses previous_response_id continuation" {
+		t.Fatalf("err.Error() = %q, want previous_response_id capability error", got)
+	}
+}
+
+func TestOpenAIResponsesRejectsBuiltinToolsWhenCapabilityDisabled(t *testing.T) {
+	p := NewOpenAIResponsesCompatible("responses", "https://example.com/v1", []string{"test-key"}, config.OutboundCapabilities{
+		ResponsesBuiltinTools: boolPtr(false),
+	}, nil)
+	_, err := p.ChatCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini", Tools: []runtime.ToolDefinition{{Type: "web_search"}}})
+	if err == nil || NormalizeError(err) != ErrorKindFatal {
+		t.Fatalf("err = %v, want fatal unsupported builtin tool error", err)
+	}
+	if got := err.Error(); got != "outbound does not support responses builtin tools" {
+		t.Fatalf("err.Error() = %q, want builtin tools capability error", got)
 	}
 }
 
@@ -948,7 +1040,7 @@ func TestOpenAIResponsesCompatibleChatCompletionSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	p := NewOpenAIResponsesCompatible("responses", server.URL, []string{"test-key"}, server.Client())
+	p := NewOpenAIResponsesCompatible("responses", server.URL, []string{"test-key"}, config.OutboundCapabilities{}, server.Client())
 	resp, err := p.ChatCompletion(context.Background(), runtime.Request{
 		Model: "gpt-4o-mini",
 		Messages: []runtime.Message{{
@@ -982,7 +1074,7 @@ func TestOpenAIResponsesCompatibleStreamCompletionEmitsToolCallDelta(t *testing.
 	}))
 	defer server.Close()
 
-	p := NewOpenAIResponsesCompatible("responses", server.URL, []string{"test-key"}, server.Client())
+	p := NewOpenAIResponsesCompatible("responses", server.URL, []string{"test-key"}, config.OutboundCapabilities{}, server.Client())
 	ch, err := p.StreamCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini"})
 	if err != nil {
 		t.Fatalf("StreamCompletion() error = %v", err)

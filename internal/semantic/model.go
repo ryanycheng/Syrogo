@@ -30,14 +30,17 @@ type Segment struct {
 
 type ToolCall struct {
 	ID        string
+	Type      string
 	Name      string
 	Arguments json.RawMessage
+	Input     string
 }
 
 type ToolResult struct {
-	ToolCallID string
-	Content    []Segment
-	IsError    bool
+	ToolCallID   string
+	ToolCallType string
+	Content      []Segment
+	IsError      bool
 }
 
 type DataPart struct {
@@ -50,9 +53,12 @@ type SegmentMeta struct {
 }
 
 type ToolDefinition struct {
+	Type        string
 	Name        string
 	Description string
 	InputSchema json.RawMessage
+	Format      json.RawMessage
+	Raw         json.RawMessage
 }
 
 type GenerateOptions struct {

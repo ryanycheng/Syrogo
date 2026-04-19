@@ -146,6 +146,7 @@ func parseInboundTools(raw []inboundToolDefinition) ([]semantic.ToolDefinition, 
 			inputSchema = encoded
 		}
 		tools = append(tools, semantic.ToolDefinition{
+			Type:        "function",
 			Name:        tool.Name,
 			Description: tool.Description,
 			InputSchema: inputSchema,
@@ -251,6 +252,7 @@ func parseInboundContent(role string, raw json.RawMessage) ([]semantic.Segment, 
 			case "tool_use":
 				segments = append(segments, semantic.Segment{Kind: semantic.SegmentToolCall, ToolCall: &semantic.ToolCall{
 					ID:        block.ID,
+					Type:      "function",
 					Name:      block.Name,
 					Arguments: normalizedJSONOrRaw(block.Input),
 				}})
@@ -261,9 +263,10 @@ func parseInboundContent(role string, raw json.RawMessage) ([]semantic.Segment, 
 					return nil, "", err
 				}
 				segments = append(segments, semantic.Segment{Kind: semantic.SegmentToolResult, ToolResult: &semantic.ToolResult{
-					ToolCallID: block.ToolUseID,
-					Content:    content,
-					IsError:    block.IsError,
+					ToolCallID:   block.ToolUseID,
+					ToolCallType: "function",
+					Content:      content,
+					IsError:      block.IsError,
 				}})
 			}
 		}
@@ -380,7 +383,7 @@ func lowerSemanticRequest(req semantic.Request) runtime.Request {
 		Tools:              make([]runtime.ToolDefinition, 0, len(req.Tools)),
 	}
 	for _, tool := range req.Tools {
-		result.Tools = append(result.Tools, runtime.ToolDefinition{Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema})
+		result.Tools = append(result.Tools, runtime.ToolDefinition{Type: tool.Type, Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema, Format: append(json.RawMessage(nil), tool.Format...), Raw: append(json.RawMessage(nil), tool.Raw...)})
 	}
 	for _, turn := range req.Turns {
 		result.Messages = append(result.Messages, lowerSemanticTurn(turn))
@@ -396,11 +399,12 @@ func lowerSemanticTurn(turn semantic.Turn) runtime.Message {
 			message.Parts = append(message.Parts, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: segment.Text})
 		case semantic.SegmentToolCall:
 			if segment.ToolCall != nil {
-				message.ToolCalls = append(message.ToolCalls, runtime.ToolCall{ID: segment.ToolCall.ID, Name: segment.ToolCall.Name, Arguments: marshalCompactJSONOrEmpty(segment.ToolCall.Arguments)})
+				message.ToolCalls = append(message.ToolCalls, runtime.ToolCall{ID: segment.ToolCall.ID, Type: segment.ToolCall.Type, Name: segment.ToolCall.Name, Arguments: marshalCompactJSONOrEmpty(segment.ToolCall.Arguments), Input: segment.ToolCall.Input})
 			}
 		case semantic.SegmentToolResult:
 			if segment.ToolResult != nil {
 				message.ToolCallID = segment.ToolResult.ToolCallID
+				message.ToolCallType = segment.ToolResult.ToolCallType
 				message.ToolResultIsError = segment.ToolResult.IsError
 				message.Parts = append(message.Parts, lowerToolResultContent(segment.ToolResult.Content)...)
 			}
@@ -439,10 +443,10 @@ func cloneSegmentsAsToolResultContent(segments []semantic.Segment) []semantic.Se
 	for _, segment := range segments {
 		copySegment := segment
 		if segment.ToolCall != nil {
-			copySegment.ToolCall = &semantic.ToolCall{ID: segment.ToolCall.ID, Name: segment.ToolCall.Name, Arguments: append(json.RawMessage(nil), segment.ToolCall.Arguments...)}
+			copySegment.ToolCall = &semantic.ToolCall{ID: segment.ToolCall.ID, Type: segment.ToolCall.Type, Name: segment.ToolCall.Name, Arguments: append(json.RawMessage(nil), segment.ToolCall.Arguments...), Input: segment.ToolCall.Input}
 		}
 		if segment.ToolResult != nil {
-			copySegment.ToolResult = &semantic.ToolResult{ToolCallID: segment.ToolResult.ToolCallID, Content: cloneSegmentsAsToolResultContent(segment.ToolResult.Content), IsError: segment.ToolResult.IsError}
+			copySegment.ToolResult = &semantic.ToolResult{ToolCallID: segment.ToolResult.ToolCallID, ToolCallType: segment.ToolResult.ToolCallType, Content: cloneSegmentsAsToolResultContent(segment.ToolResult.Content), IsError: segment.ToolResult.IsError}
 		}
 		if segment.Data != nil {
 			copySegment.Data = &semantic.DataPart{Format: segment.Data.Format, Value: append(json.RawMessage(nil), segment.Data.Value...)}
