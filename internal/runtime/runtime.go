@@ -81,12 +81,17 @@ type Message struct {
 }
 
 type Request struct {
-	Model     string
-	System    string
-	MaxTokens int
-	Messages  []Message
-	Tools     []ToolDefinition
-	Stream    bool
+	Model              string
+	System             string
+	MaxTokens          int
+	Messages           []Message
+	Tools              []ToolDefinition
+	Stream             bool
+	PreviousResponseID string
+	Metadata           json.RawMessage
+	ThinkingType       string
+	ContextManagement  json.RawMessage
+	OutputEffort       string
 }
 
 type Usage struct {

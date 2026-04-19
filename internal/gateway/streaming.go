@@ -72,15 +72,7 @@ func (h *Handler) handleOpenAIResponsesStreaming(w http.ResponseWriter, r *http.
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	for _, frame := range openAIResponsesStreamPrelude(plan) {
-		if err := writeOpenAIResponsesSSE(w, frame.event, frame.payload); err != nil {
-			logger.Error("stream write failed", kvAny("error", err))
-			return
-		}
-		flusher.Flush()
-	}
-
-	for _, frame := range openAIResponsesStreamFrames(events) {
+	for _, frame := range openAIResponsesStreamFrames(plan, events) {
 		if err := writeOpenAIResponsesSSE(w, frame.event, frame.payload); err != nil {
 			logger.Error("stream write failed", kvAny("error", err))
 			return

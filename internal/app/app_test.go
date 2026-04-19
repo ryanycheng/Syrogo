@@ -467,8 +467,8 @@ func TestNewBridgesAnthropicToolsToOpenAIChatOutbound(t *testing.T) {
 	if !hasBuiltin || !hasCustom {
 		t.Fatalf("upstream tool names = %#v, want get_weather plus one builtin tool", toolNames)
 	}
-	if !strings.Contains(w.Body.String(), `"type":"tool_use"`) || !strings.Contains(w.Body.String(), `"name":"get_weather"`) {
-		t.Fatalf("body = %q, want anthropic tool_use response", w.Body.String())
+	if !strings.Contains(w.Body.String(), `"text":"hello"`) {
+		t.Fatalf("body = %q, want anthropic text response", w.Body.String())
 	}
 }
 
@@ -1092,7 +1092,7 @@ func TestNewCompletesAnthropicToolLoopThroughAnthropicMessagesOutbound(t *testin
 					"type": "text",
 					"text": "lookup failed once",
 				}, {
-					"type": "json",
+					"type":  "json",
 					"value": map[string]any{"city": "shanghai", "retryable": true},
 				}},
 			}},
@@ -1135,12 +1135,12 @@ func TestNewCompletesAnthropicToolLoopThroughAnthropicMessagesOutbound(t *testin
 }
 
 type anthropicMessagesUpstreamRequest struct {
-	Model     string                    `json:"model"`
-	System    string                    `json:"system"`
-	MaxTokens int                       `json:"max_tokens"`
+	Model     string                     `json:"model"`
+	System    string                     `json:"system"`
+	MaxTokens int                        `json:"max_tokens"`
 	Messages  []anthropicUpstreamMessage `json:"messages"`
 	Tools     []anthropicUpstreamTool    `json:"tools"`
-	Stream    bool                      `json:"stream"`
+	Stream    bool                       `json:"stream"`
 }
 
 type anthropicUpstreamTool struct {
@@ -1195,12 +1195,226 @@ func TestNewStreamsAnthropicSSEFromListener(t *testing.T) {
 	}
 }
 
+func TestNewBridgesAnthropicToolLoopToOpenAIResponsesOutbound(t *testing.T) {
+	requests := make([]struct {
+		Model           string          `json:"model"`
+		Instructions    string          `json:"instructions"`
+		MaxOutputTokens int             `json:"max_output_tokens"`
+		Metadata        json.RawMessage `json:"metadata"`
+		Reasoning       *struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+		ContextManagement json.RawMessage `json:"context_management"`
+		Input             []struct {
+			Type      string `json:"type"`
+			Role      string `json:"role"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+			Output    string `json:"output"`
+			Status    string `json:"status"`
+			Content   []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"input"`
+	}, 0, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q, want /v1/responses", r.URL.Path)
+		}
+		var body struct {
+			Model           string          `json:"model"`
+			Instructions    string          `json:"instructions"`
+			MaxOutputTokens int             `json:"max_output_tokens"`
+			Metadata        json.RawMessage `json:"metadata"`
+			Reasoning       *struct {
+				Effort string `json:"effort"`
+			} `json:"reasoning"`
+			ContextManagement json.RawMessage `json:"context_management"`
+			Input             []struct {
+				Type      string `json:"type"`
+				Role      string `json:"role"`
+				CallID    string `json:"call_id"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+				Output    string `json:"output"`
+				Status    string `json:"status"`
+				Content   []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		requests = append(requests, body)
+		if len(requests) == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":     "resp_tools_1",
+				"object": "response",
+				"model":  body.Model,
+				"output": []map[string]any{{
+					"type":      "function_call",
+					"call_id":   "call_123",
+					"name":      "get_weather",
+					"arguments": `{"city":"shanghai"}`,
+				}},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_tools_2",
+			"object": "response",
+			"model":  body.Model,
+			"status": "completed",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "上海天气晴朗。",
+				}},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds[1].Clients[0].Tag = "anthropic-to-responses"
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "anthropic-to-responses-route",
+		FromTags:    []string{"anthropic-to-responses"},
+		ToTags:      []string{"responses-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "cliproxy-responses",
+		Protocol:  "openai_responses",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "responses-primary",
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	listeners := app.Server.Listeners()
+
+	firstBody, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-6",
+		"tools": []map[string]any{{
+			"name":        "get_weather",
+			"description": "Get weather by city",
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"city": map[string]any{"type": "string"}},
+				"required":   []string{"city"},
+			},
+		}},
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "查询上海天气，必要时调用工具。",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	firstResp := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(firstResp, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", firstBody))
+	if firstResp.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200, body = %s", firstResp.Code, firstResp.Body.String())
+	}
+	if !strings.Contains(firstResp.Body.String(), `"type":"tool_use"`) || !strings.Contains(firstResp.Body.String(), `"id":"call_123"`) {
+		t.Fatalf("first body = %q, want anthropic tool_use response", firstResp.Body.String())
+	}
+
+	secondBody, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-6",
+		"messages": []map[string]any{{
+			"role": "assistant",
+			"content": []map[string]any{{
+				"type":  "tool_use",
+				"id":    "call_123",
+				"name":  "get_weather",
+				"input": map[string]any{"city": "shanghai"},
+			}},
+		}, {
+			"role": "tool",
+			"content": []map[string]any{{
+				"type":        "tool_result",
+				"tool_use_id": "call_123",
+				"is_error":    true,
+				"content": []map[string]any{{
+					"type": "text",
+					"text": "lookup failed once",
+				}, {
+					"type":  "json",
+					"value": map[string]any{"city": "shanghai", "retryable": true},
+				}, {
+					"type": "text",
+					"text": "retry suggested",
+				}},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	secondResp := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(secondResp, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", secondBody))
+	if secondResp.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want 200, body = %s", secondResp.Code, secondResp.Body.String())
+	}
+	if !strings.Contains(secondResp.Body.String(), `"type":"text"`) || !strings.Contains(secondResp.Body.String(), `"text":"上海天气晴朗。"`) {
+		t.Fatalf("second body = %q, want final anthropic assistant text", secondResp.Body.String())
+	}
+
+	if len(requests) != 2 {
+		t.Fatalf("len(requests) = %d, want 2 upstream calls", len(requests))
+	}
+	if len(requests[0].Input) != 1 || requests[0].Input[0].Type != "message" || requests[0].Input[0].Role != "user" {
+		t.Fatalf("requests[0].Input = %#v, want initial user-only turn", requests[0].Input)
+	}
+	if len(requests[1].Input) != 2 {
+		t.Fatalf("len(requests[1].Input) = %d, want 2 for tool loop continuation", len(requests[1].Input))
+	}
+	if requests[1].Input[0].Type != "function_call" || requests[1].Input[0].CallID != "call_123" {
+		t.Fatalf("requests[1].Input[0] = %#v, want function_call history", requests[1].Input[0])
+	}
+	if requests[1].Input[1].Type != "function_call_output" || requests[1].Input[1].CallID != "call_123" {
+		t.Fatalf("requests[1].Input[1] = %#v, want function_call_output history", requests[1].Input[1])
+	}
+	wantOutput := "lookup failed once\n{\"city\":\"shanghai\",\"retryable\":true}\nretry suggested"
+	if requests[1].Input[1].Output != wantOutput {
+		t.Fatalf("requests[1].Input[1].Output = %q, want %q", requests[1].Input[1].Output, wantOutput)
+	}
+	if requests[1].Input[1].Status != "error" {
+		t.Fatalf("requests[1].Input[1].Status = %q, want error", requests[1].Input[1].Status)
+	}
+}
+
 func TestNewBridgesAnthropicToolsToOpenAIResponsesOutbound(t *testing.T) {
+
 	var upstreamBody struct {
-		Model           string `json:"model"`
-		Instructions    string `json:"instructions"`
-		MaxOutputTokens int    `json:"max_output_tokens"`
-		Input           []struct {
+		Model              string          `json:"model"`
+		Instructions       string          `json:"instructions"`
+		MaxOutputTokens    int             `json:"max_output_tokens"`
+		PreviousResponseID string          `json:"previous_response_id"`
+		Metadata           json.RawMessage `json:"metadata"`
+		Reasoning          *struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+		ContextManagement json.RawMessage `json:"context_management"`
+		Input             []struct {
 			Type      string `json:"type"`
 			Role      string `json:"role"`
 			CallID    string `json:"call_id"`
@@ -1264,8 +1478,15 @@ func TestNewBridgesAnthropicToolsToOpenAIResponsesOutbound(t *testing.T) {
 	}
 
 	body, err := json.Marshal(map[string]any{
-		"model":      "claude-sonnet-4-6",
-		"max_tokens": 256,
+		"model":                "claude-sonnet-4-6",
+		"max_tokens":           256,
+		"previous_response_id": "resp_prev_123",
+		"metadata":             map[string]any{"user_id": "u_123"},
+		"thinking":             map[string]any{"type": "adaptive"},
+		"context_management": map[string]any{
+			"edits": []map[string]any{{"type": "clear_thinking_20251015", "keep": "all"}},
+		},
+		"output_config": map[string]any{"effort": "high"},
 		"system": []map[string]any{{
 			"type": "text",
 			"text": "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -1313,6 +1534,27 @@ func TestNewBridgesAnthropicToolsToOpenAIResponsesOutbound(t *testing.T) {
 	if upstreamBody.MaxOutputTokens != 256 {
 		t.Fatalf("upstream max_output_tokens = %d, want 256", upstreamBody.MaxOutputTokens)
 	}
+	if upstreamBody.PreviousResponseID != "resp_prev_123" {
+		t.Fatalf("upstream previous_response_id = %q, want resp_prev_123", upstreamBody.PreviousResponseID)
+	}
+	if string(upstreamBody.Metadata) != `{"user_id":"u_123"}` {
+		t.Fatalf("upstream metadata = %s, want preserved metadata", string(upstreamBody.Metadata))
+	}
+	if upstreamBody.Reasoning == nil || upstreamBody.Reasoning.Effort != "high" {
+		t.Fatalf("upstream reasoning = %#v, want effort high", upstreamBody.Reasoning)
+	}
+	var upstreamContextManagement map[string]any
+	if err := json.Unmarshal(upstreamBody.ContextManagement, &upstreamContextManagement); err != nil {
+		t.Fatalf("json.Unmarshal(upstreamBody.ContextManagement) error = %v", err)
+	}
+	edits, ok := upstreamContextManagement["edits"].([]any)
+	if !ok || len(edits) != 1 {
+		t.Fatalf("upstream context_management edits = %#v, want one edit", upstreamContextManagement["edits"])
+	}
+	edit, ok := edits[0].(map[string]any)
+	if !ok || edit["type"] != "clear_thinking_20251015" || edit["keep"] != "all" {
+		t.Fatalf("upstream context_management edit = %#v, want preserved edit", edits[0])
+	}
 	if upstreamBody.ToolChoice != "auto" {
 		t.Fatalf("upstream tool_choice = %#v, want auto", upstreamBody.ToolChoice)
 	}
@@ -1322,11 +1564,110 @@ func TestNewBridgesAnthropicToolsToOpenAIResponsesOutbound(t *testing.T) {
 	if upstreamBody.Tools[0].Name != "Read" || upstreamBody.Tools[1].Name != "get_weather" {
 		t.Fatalf("upstream tools = %#v, want Read and get_weather", upstreamBody.Tools)
 	}
+	if upstreamBody.Instructions != "You are Claude Code, Anthropic's official CLI for Claude." {
+		t.Fatalf("upstream instructions = %q, want bridged system", upstreamBody.Instructions)
+	}
 	if len(upstreamBody.Input) != 1 || upstreamBody.Input[0].Type != "message" || upstreamBody.Input[0].Role != "user" || upstreamBody.Input[0].Content[0].Text != "查询上海天气，必要时调用工具。" {
 		t.Fatalf("upstream input = %#v, want bridged user message", upstreamBody.Input)
 	}
 	if !strings.Contains(w.Body.String(), `"type":"tool_use"`) || !strings.Contains(w.Body.String(), `"name":"get_weather"`) {
 		t.Fatalf("body = %q, want anthropic tool_use response", w.Body.String())
+	}
+}
+
+func TestNewBridgesAnthropicLeadingSystemReminderToOpenAIResponsesWithoutInstructionsLeak(t *testing.T) {
+	var upstreamBody struct {
+		Instructions string `json:"instructions"`
+		Input        []struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"input"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q, want /v1/responses", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_1",
+			"object": "response",
+			"model":  "gpt-5.4",
+			"status": "completed",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "hello",
+				}},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds[1].Clients[0].Tag = "anthropic-to-responses"
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "anthropic-to-responses-route",
+		FromTags:    []string{"anthropic-to-responses"},
+		ToTags:      []string{"responses-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "cliproxy-responses",
+		Protocol:  "openai_responses",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "responses-primary",
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-6",
+		"system": []map[string]any{{
+			"type": "text",
+			"text": "You are Claude Code, Anthropic's official CLI for Claude.",
+		}},
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "<system-reminder>\nremember repo rules\n</system-reminder>\n",
+			}, {
+				"type": "text",
+				"text": "hi",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("route status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(upstreamBody.Instructions, "You are Claude Code, Anthropic's official CLI for Claude.") || strings.Contains(upstreamBody.Instructions, "remember repo rules") {
+		t.Fatalf("upstream instructions = %q, want system without stripped reminder", upstreamBody.Instructions)
+	}
+	if len(upstreamBody.Input) != 1 || upstreamBody.Input[0].Type != "message" || upstreamBody.Input[0].Role != "user" || upstreamBody.Input[0].Content[0].Text != "hi" {
+		t.Fatalf("upstream input = %#v, want only remaining user hi", upstreamBody.Input)
+	}
+	if !strings.Contains(w.Body.String(), `"text":"hello"`) {
+		t.Fatalf("body = %q, want anthropic text response", w.Body.String())
 	}
 }
 

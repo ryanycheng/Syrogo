@@ -56,8 +56,13 @@ type ToolDefinition struct {
 }
 
 type GenerateOptions struct {
-	MaxTokens int
-	Stream    bool
+	MaxTokens          int
+	Stream             bool
+	PreviousResponseID string
+	Metadata           json.RawMessage
+	ThinkingType       string
+	ContextManagement  json.RawMessage
+	OutputEffort       string
 }
 
 const (

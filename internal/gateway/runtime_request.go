@@ -32,12 +32,17 @@ type inboundToolDefinition struct {
 }
 
 type inboundRequest struct {
-	Model     string                  `json:"model"`
-	System    json.RawMessage         `json:"system"`
-	MaxTokens int                     `json:"max_tokens"`
-	Messages  []inboundMessage        `json:"messages"`
-	Tools     []inboundToolDefinition `json:"tools"`
-	Stream    bool                    `json:"stream"`
+	Model              string                  `json:"model"`
+	System             json.RawMessage         `json:"system"`
+	MaxTokens          int                     `json:"max_tokens"`
+	Messages           []inboundMessage        `json:"messages"`
+	Tools              []inboundToolDefinition `json:"tools"`
+	Stream             bool                    `json:"stream"`
+	PreviousResponseID string                  `json:"previous_response_id"`
+	Metadata           json.RawMessage         `json:"metadata"`
+	Thinking           json.RawMessage         `json:"thinking"`
+	ContextManagement  json.RawMessage         `json:"context_management"`
+	OutputConfig       json.RawMessage         `json:"output_config"`
 }
 
 func buildRuntimeRequest(req inboundRequest) (runtime.Request, error) {
@@ -63,8 +68,13 @@ func buildSemanticRequest(req inboundRequest) (semantic.Request, error) {
 		Instructions: instructions,
 		Tools:        tools,
 		Options: semantic.GenerateOptions{
-			MaxTokens: req.MaxTokens,
-			Stream:    req.Stream,
+			MaxTokens:          req.MaxTokens,
+			Stream:             req.Stream,
+			PreviousResponseID: req.PreviousResponseID,
+			Metadata:           normalizedOptionalJSONObject(req.Metadata),
+			ThinkingType:       parseThinkingType(req.Thinking),
+			ContextManagement:  normalizedOptionalJSONObject(req.ContextManagement),
+			OutputEffort:       parseOutputEffort(req.OutputConfig),
 		},
 	}
 	if systemText != "" && len(result.Instructions) == 0 {
@@ -72,6 +82,10 @@ func buildSemanticRequest(req inboundRequest) (semantic.Request, error) {
 	}
 
 	for _, msg := range req.Messages {
+		msg = stripLeadingSystemReminderText(msg)
+		if shouldSkipInboundMessage(msg) {
+			continue
+		}
 		turns, err := parseInboundMessages(msg)
 		if err != nil {
 			return semantic.Request{}, err
@@ -265,6 +279,54 @@ func parseInboundContent(role string, raw json.RawMessage) ([]semantic.Segment, 
 	return nil, "", fmt.Errorf("unsupported message content")
 }
 
+func shouldSkipInboundMessage(msg inboundMessage) bool {
+	if len(msg.ToolCalls) > 0 || msg.ToolCallID != "" {
+		return false
+	}
+	if len(msg.Content) == 0 {
+		return true
+	}
+	var blocks []json.RawMessage
+	if err := json.Unmarshal(msg.Content, &blocks); err == nil {
+		return len(blocks) == 0
+	}
+	return false
+}
+
+func stripLeadingSystemReminderText(msg inboundMessage) inboundMessage {
+	if msg.Role != string(semantic.RoleUser) || len(msg.Content) == 0 {
+		return msg
+	}
+
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+		return msg
+	}
+
+	idx := 0
+	for idx < len(blocks) && blocks[idx].Type == "text" && isSystemReminderText(blocks[idx].Text) {
+		idx++
+	}
+	if idx == 0 {
+		return msg
+	}
+
+	remaining, err := json.Marshal(blocks[idx:])
+	if err != nil {
+		return msg
+	}
+	msg.Content = remaining
+	return msg
+}
+
+func isSystemReminderText(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	return strings.HasPrefix(trimmed, "<system-reminder>") && strings.Contains(trimmed, "</system-reminder>")
+}
+
 func parseToolResultContent(raw json.RawMessage) ([]semantic.Segment, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -305,12 +367,17 @@ func parseToolResultContent(raw json.RawMessage) ([]semantic.Segment, error) {
 
 func lowerSemanticRequest(req semantic.Request) runtime.Request {
 	result := runtime.Request{
-		Model:     req.Model,
-		System:    joinSegmentTexts(req.Instructions),
-		MaxTokens: req.Options.MaxTokens,
-		Stream:    req.Options.Stream,
-		Messages:  make([]runtime.Message, 0, len(req.Turns)),
-		Tools:     make([]runtime.ToolDefinition, 0, len(req.Tools)),
+		Model:              req.Model,
+		System:             joinSegmentTexts(req.Instructions),
+		MaxTokens:          req.Options.MaxTokens,
+		Stream:             req.Options.Stream,
+		PreviousResponseID: req.Options.PreviousResponseID,
+		Metadata:           append(json.RawMessage(nil), req.Options.Metadata...),
+		ThinkingType:       req.Options.ThinkingType,
+		ContextManagement:  append(json.RawMessage(nil), req.Options.ContextManagement...),
+		OutputEffort:       req.Options.OutputEffort,
+		Messages:           make([]runtime.Message, 0, len(req.Turns)),
+		Tools:              make([]runtime.ToolDefinition, 0, len(req.Tools)),
 	}
 	for _, tool := range req.Tools {
 		result.Tools = append(result.Tools, runtime.ToolDefinition{Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema})
@@ -408,6 +475,47 @@ func normalizedJSONOrRaw(raw json.RawMessage) json.RawMessage {
 		return append(json.RawMessage(nil), raw...)
 	}
 	return encoded
+}
+
+func normalizedOptionalJSONObject(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+func parseThinkingType(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var value struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value.Type
+}
+
+func parseOutputEffort(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var value struct {
+		Effort string `json:"effort"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value.Effort
 }
 
 func marshalCompactJSON(raw json.RawMessage) (string, error) {

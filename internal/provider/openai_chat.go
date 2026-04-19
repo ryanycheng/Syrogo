@@ -24,7 +24,7 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req runti
 	var payload any
 	switch p.mode {
 	case openAIProtocolModeResponses:
-		payload = encodeOpenAIResponsesRequest(req)
+		payload = encodeOpenAIResponsesRequest(req, p.responsesCompat)
 	default:
 		payload = encodeOpenAIChatRequest(req)
 	}

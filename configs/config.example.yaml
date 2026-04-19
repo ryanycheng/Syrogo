@@ -28,7 +28,7 @@ inbounds:
     path: "/v1/messages"
     clients:
       - token: "${SYROGO_ANTHROPIC_CLIENT_TOKEN}"
-        tag: "anthropic-to-chat"
+        tag: "anthropic-to-responses"
 
 routing:
   rules:
@@ -56,12 +56,11 @@ routing:
         - "responses-primary"
       strategy: "failover"
 
-    - name: "anthropic-to-chat-route"
+    - name: "anthropic-to-responses-route"
       from_tags:
-        - "anthropic-to-chat"
+        - "anthropic-to-responses"
       to_tags:
-        - "openai-primary"
-        - "openai-backup"
+        - "responses-primary"
       strategy: "failover"
       target_model: "gpt-5.4"
 

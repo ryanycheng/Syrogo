@@ -16,9 +16,10 @@ import (
 type openAIResponsesCodec struct{}
 
 type openAIResponsesRequest struct {
-	Model  string          `json:"model"`
-	Input  json.RawMessage `json:"input"`
-	Stream bool            `json:"stream"`
+	Model              string          `json:"model"`
+	Input              json.RawMessage `json:"input"`
+	Stream             bool            `json:"stream"`
+	PreviousResponseID string          `json:"previous_response_id,omitempty"`
 }
 
 type openAIResponsesInputItem struct {
@@ -29,6 +30,7 @@ type openAIResponsesInputItem struct {
 	Name    string          `json:"name,omitempty"`
 	Input   json.RawMessage `json:"input,omitempty"`
 	Output  json.RawMessage `json:"output,omitempty"`
+	Status  string          `json:"status,omitempty"`
 }
 
 type openAIResponsesContentPart struct {
@@ -135,7 +137,8 @@ func buildSemanticRequestFromResponses(req openAIResponsesRequest) (semantic.Req
 		Model: req.Model,
 		Turns: turns,
 		Options: semantic.GenerateOptions{
-			Stream: req.Stream,
+			Stream:             req.Stream,
+			PreviousResponseID: req.PreviousResponseID,
 		},
 	}, nil
 }
@@ -177,7 +180,11 @@ func parseOpenAIResponsesInput(raw json.RawMessage) ([]semantic.Turn, error) {
 			if item.CallID == "" {
 				return nil, fmt.Errorf("function_call_output.call_id is required")
 			}
-			turns = append(turns, semantic.Turn{Role: semantic.RoleTool, Segments: []semantic.Segment{{Kind: semantic.SegmentToolResult, ToolResult: &semantic.ToolResult{ToolCallID: item.CallID, Content: content}}}})
+			turns = append(turns, semantic.Turn{Role: semantic.RoleTool, Segments: []semantic.Segment{{Kind: semantic.SegmentToolResult, ToolResult: &semantic.ToolResult{
+				ToolCallID: item.CallID,
+				Content:    content,
+				IsError:    item.Status == "error",
+			}}}})
 		default:
 			return nil, fmt.Errorf("unsupported responses input item type %q", item.Type)
 		}
@@ -295,23 +302,87 @@ func buildOpenAIResponsesOutput(resp runtime.Response) []map[string]any {
 	return output
 }
 
-func openAIResponsesStreamPrelude(plan runtime.ExecutionPlan) []openAIResponsesSSEFrame {
-	model := plannedModel(plan)
-	return []openAIResponsesSSEFrame{
-		{event: "response.created", payload: map[string]any{"type": "response", "response": map[string]any{"model": model, "status": "created"}}},
-		{event: "response.in_progress", payload: map[string]any{"type": "response", "response": map[string]any{"model": model, "status": "in_progress"}}},
-	}
-}
-
-func openAIResponsesStreamFrames(events <-chan runtime.StreamEvent) []openAIResponsesSSEFrame {
+func openAIResponsesStreamFrames(plan runtime.ExecutionPlan, events <-chan runtime.StreamEvent) []openAIResponsesSSEFrame {
 	frames := make([]openAIResponsesSSEFrame, 0, 8)
 	textItemStarted := false
-	toolItemsDone := make(map[string]bool)
 	messageItemID := "msg_0"
 	messageOutputIndex := 0
 	toolOutputIndex := 1
 	responseID := ""
-	model := ""
+	model := plannedModel(plan)
+	role := string(runtime.MessageRoleAssistant)
+	text := ""
+	toolCalls := make([]runtime.ToolCall, 0)
+	var usage *runtime.Usage
+	sequence := 1
+
+	appendFrame := func(event string, payload map[string]any) {
+		payload["type"] = event
+		payload["sequence_number"] = sequence
+		sequence++
+		frames = append(frames, openAIResponsesSSEFrame{event: event, payload: payload})
+	}
+
+	responseObject := func(status string, output []map[string]any, completed bool) map[string]any {
+		body := map[string]any{
+			"id":                   responseID,
+			"object":               "response",
+			"status":               status,
+			"model":                model,
+			"output":               output,
+			"parallel_tool_calls":  true,
+			"previous_response_id": nil,
+			"tools":                []any{},
+			"metadata":             map[string]any{},
+		}
+		if usage != nil {
+			body["usage"] = map[string]any{
+				"input_tokens":  usage.InputTokens,
+				"output_tokens": usage.OutputTokens,
+				"total_tokens":  usage.TotalTokens,
+			}
+		} else {
+			body["usage"] = nil
+		}
+		if completed {
+			body["completed_at"] = 0
+		} else {
+			body["completed_at"] = nil
+		}
+		return body
+	}
+
+	messageItem := func(status string) map[string]any {
+		return map[string]any{
+			"id":     messageItemID,
+			"status": status,
+			"type":   "message",
+			"role":   role,
+			"content": []map[string]any{{
+				"type":        "output_text",
+				"text":        text,
+				"annotations": []any{},
+			}},
+		}
+	}
+
+	functionCallItem := func(call runtime.ToolCall, status string) map[string]any {
+		return map[string]any{
+			"id":        nonEmpty(call.ID, fmt.Sprintf("call_%d", len(toolCalls))),
+			"status":    status,
+			"type":      "function_call",
+			"call_id":   call.ID,
+			"name":      call.Name,
+			"arguments": call.Arguments,
+		}
+	}
+
+	appendFrame("response.created", map[string]any{
+		"response": responseObject("in_progress", []map[string]any{}, false),
+	})
+	appendFrame("response.in_progress", map[string]any{
+		"response": responseObject("in_progress", []map[string]any{}, false),
+	})
 
 	for event := range events {
 		if event.ResponseID != "" {
@@ -320,104 +391,120 @@ func openAIResponsesStreamFrames(events <-chan runtime.StreamEvent) []openAIResp
 		if event.Model != "" {
 			model = event.Model
 		}
+		if event.MessageRole != "" {
+			role = string(event.MessageRole)
+		}
 		switch event.Type {
 		case runtime.StreamEventMessageStart:
-			frames = append(frames, openAIResponsesSSEFrame{
-				event: "response.output_item.added",
-				payload: map[string]any{
-					"output_index": messageOutputIndex,
-					"item": map[string]any{
-						"id":      messageItemID,
-						"type":    "message",
-						"role":    string(event.MessageRole),
-						"content": []map[string]any{},
-					},
+			appendFrame("response.output_item.added", map[string]any{
+				"output_index": messageOutputIndex,
+				"item": map[string]any{
+					"id":      messageItemID,
+					"status":  "in_progress",
+					"type":    "message",
+					"role":    role,
+					"content": []map[string]any{},
 				},
 			})
 		case runtime.StreamEventContentDelta:
 			if event.Delta != nil {
 				if !textItemStarted {
-					frames = append(frames, openAIResponsesSSEFrame{
-						event: "response.content_part.added",
-						payload: map[string]any{
-							"output_index":  messageOutputIndex,
-							"item_id":       messageItemID,
-							"content_index": 0,
-							"part":          map[string]any{"type": "output_text", "text": ""},
+					appendFrame("response.content_part.added", map[string]any{
+						"output_index":  messageOutputIndex,
+						"item_id":       messageItemID,
+						"content_index": 0,
+						"part": map[string]any{
+							"type":        "output_text",
+							"text":        "",
+							"annotations": []any{},
 						},
 					})
 					textItemStarted = true
 				}
-				frames = append(frames, openAIResponsesSSEFrame{
-					event: "response.output_text.delta",
-					payload: map[string]any{
-						"output_index":  messageOutputIndex,
-						"item_id":       messageItemID,
-						"content_index": 0,
-						"delta":         event.Delta.Text,
-					},
+				text += event.Delta.Text
+				appendFrame("response.output_text.delta", map[string]any{
+					"output_index":  messageOutputIndex,
+					"item_id":       messageItemID,
+					"content_index": 0,
+					"delta":         event.Delta.Text,
 				})
 			}
 			if event.ToolCall != nil {
-				var input any
-				if err := json.Unmarshal([]byte(event.ToolCall.Arguments), &input); err != nil {
-					input = map[string]any{}
-				}
-				frames = append(frames, openAIResponsesSSEFrame{
-					event: "response.output_item.added",
-					payload: map[string]any{
-						"output_index": toolOutputIndex + event.ToolCallIndex,
-						"item": map[string]any{
-							"id":      nonEmpty(event.ToolCall.ID, fmt.Sprintf("call_%d", event.ToolCallIndex)),
-							"type":    "function_call",
-							"call_id": event.ToolCall.ID,
-							"name":    event.ToolCall.Name,
-							"input":   input,
-						},
+				call := *event.ToolCall
+				toolCalls = append(toolCalls, call)
+				itemID := nonEmpty(call.ID, fmt.Sprintf("call_%d", event.ToolCallIndex))
+				appendFrame("response.output_item.added", map[string]any{
+					"output_index": toolOutputIndex + event.ToolCallIndex,
+					"item": map[string]any{
+						"id":        itemID,
+						"status":    "in_progress",
+						"type":      "function_call",
+						"call_id":   call.ID,
+						"name":      call.Name,
+						"arguments": "",
 					},
 				})
-				toolItemsDone[event.ToolCall.ID] = false
+				appendFrame("response.function_call_arguments.done", map[string]any{
+					"output_index": toolOutputIndex + event.ToolCallIndex,
+					"item_id":      itemID,
+					"name":         call.Name,
+					"arguments":    call.Arguments,
+				})
+				appendFrame("response.output_item.done", map[string]any{
+					"output_index": toolOutputIndex + event.ToolCallIndex,
+					"item":         functionCallItem(call, "completed"),
+				})
 			}
 		case runtime.StreamEventUsage:
 			if event.Usage != nil {
-				frames = append(frames, openAIResponsesSSEFrame{event: "response.usage", payload: map[string]any{"usage": map[string]any{"input_tokens": event.Usage.InputTokens, "output_tokens": event.Usage.OutputTokens, "total_tokens": event.Usage.TotalTokens}}})
-			}
-		case runtime.StreamEventMessageEnd:
-			if textItemStarted {
-				frames = append(frames, openAIResponsesSSEFrame{
-					event: "response.content_part.done",
-					payload: map[string]any{
-						"output_index":  messageOutputIndex,
-						"item_id":       messageItemID,
-						"content_index": 0,
+				usage = event.Usage
+				appendFrame("response.usage", map[string]any{
+					"usage": map[string]any{
+						"input_tokens":  event.Usage.InputTokens,
+						"output_tokens": event.Usage.OutputTokens,
+						"total_tokens":  event.Usage.TotalTokens,
 					},
 				})
 			}
-			frames = append(frames, openAIResponsesSSEFrame{event: "response.output_item.done", payload: map[string]any{"output_index": messageOutputIndex, "item_id": messageItemID}})
-			for toolCallID, done := range toolItemsDone {
-				if done {
-					continue
-				}
-				frames = append(frames, openAIResponsesSSEFrame{event: "response.output_item.done", payload: map[string]any{"item_id": toolCallID}})
-				toolItemsDone[toolCallID] = true
-			}
-			frames = append(frames, openAIResponsesSSEFrame{
-				event: "response.completed",
-				payload: map[string]any{
-					"type": "response",
-					"response": map[string]any{
-						"id":     responseID,
-						"model":  model,
-						"status": "completed",
+		case runtime.StreamEventMessageEnd:
+			if textItemStarted {
+				appendFrame("response.output_text.done", map[string]any{
+					"output_index":  messageOutputIndex,
+					"item_id":       messageItemID,
+					"content_index": 0,
+					"text":          text,
+				})
+				appendFrame("response.content_part.done", map[string]any{
+					"output_index":  messageOutputIndex,
+					"item_id":       messageItemID,
+					"content_index": 0,
+					"part": map[string]any{
+						"type":        "output_text",
+						"text":        text,
+						"annotations": []any{},
 					},
-				},
+				})
+			}
+			output := make([]map[string]any, 0, 1+len(toolCalls))
+			if textItemStarted || len(toolCalls) == 0 {
+				output = append(output, messageItem("completed"))
+			}
+			for _, call := range toolCalls {
+				output = append(output, functionCallItem(call, "completed"))
+			}
+			appendFrame("response.output_item.done", map[string]any{
+				"output_index": messageOutputIndex,
+				"item":         messageItem("completed"),
+			})
+			appendFrame("response.completed", map[string]any{
+				"response": responseObject("completed", output, true),
 			})
 		case runtime.StreamEventError:
 			message := "stream error"
 			if event.Err != nil {
 				message = event.Err.Error()
 			}
-			frames = append(frames, openAIResponsesSSEFrame{event: "error", payload: map[string]any{"message": message}})
+			appendFrame("error", map[string]any{"message": message})
 		}
 	}
 

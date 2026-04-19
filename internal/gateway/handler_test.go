@@ -567,11 +567,46 @@ func TestBuildRuntimeRequestPreservesAnthropicTools(t *testing.T) {
 	}
 }
 
+func TestBuildRuntimeRequestStripsLeadingSystemReminderText(t *testing.T) {
+	req := inboundRequest{
+		Model:  "claude-sonnet-4-5",
+		System: json.RawMessage(`"base system"`),
+		Messages: []inboundMessage{{
+			Role: "user",
+			Content: json.RawMessage(`[
+				{"type":"text","text":"<system-reminder>\nremember repo rules\n</system-reminder>\n"},
+				{"type":"text","text":"hi"}
+			]`),
+		}},
+	}
+
+	got, err := buildRuntimeRequest(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequest() error = %v", err)
+	}
+	if got.System != "base system" {
+		t.Fatalf("got.System = %q, want original system only", got.System)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("len(got.Messages) = %d, want 1", len(got.Messages))
+	}
+	if got.Messages[0].Role != runtime.MessageRoleUser {
+		t.Fatalf("got.Messages[0].Role = %q, want user", got.Messages[0].Role)
+	}
+	if len(got.Messages[0].Parts) != 1 || got.Messages[0].Parts[0].Text != "hi" {
+		t.Fatalf("got.Messages[0].Parts = %#v, want remaining user hi", got.Messages[0].Parts)
+	}
+}
+
 func TestBuildRuntimeRequestPreservesAnthropicSystemAndMaxTokens(t *testing.T) {
 	req := inboundRequest{
-		Model:     "claude-sonnet-4-5",
-		System:    json.RawMessage(`"You are a careful assistant."`),
-		MaxTokens: 256,
+		Model:             "claude-sonnet-4-5",
+		System:            json.RawMessage(`"You are a careful assistant."`),
+		MaxTokens:         256,
+		Metadata:          json.RawMessage(`{"user_id":"u_123"}`),
+		Thinking:          json.RawMessage(`{"type":"adaptive"}`),
+		ContextManagement: json.RawMessage(`{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`),
+		OutputConfig:      json.RawMessage(`{"effort":"high"}`),
 		Messages: []inboundMessage{{
 			Role:    "user",
 			Content: json.RawMessage(`"hello"`),
@@ -587,6 +622,18 @@ func TestBuildRuntimeRequestPreservesAnthropicSystemAndMaxTokens(t *testing.T) {
 	}
 	if got.MaxTokens != 256 {
 		t.Fatalf("got.MaxTokens = %d, want 256", got.MaxTokens)
+	}
+	if got.ThinkingType != "adaptive" {
+		t.Fatalf("got.ThinkingType = %q, want adaptive", got.ThinkingType)
+	}
+	if got.OutputEffort != "high" {
+		t.Fatalf("got.OutputEffort = %q, want high", got.OutputEffort)
+	}
+	if string(got.Metadata) != `{"user_id":"u_123"}` {
+		t.Fatalf("got.Metadata = %s, want preserved metadata", string(got.Metadata))
+	}
+	if string(got.ContextManagement) != `{"edits":[{"keep":"all","type":"clear_thinking_20251015"}]}` {
+		t.Fatalf("got.ContextManagement = %s, want preserved context_management", string(got.ContextManagement))
 	}
 }
 
@@ -614,17 +661,18 @@ func TestBuildRuntimeRequestSupportsAnthropicSystemTextBlocks(t *testing.T) {
 
 func TestBuildRuntimeRequestFromResponsesSupportsStringInput(t *testing.T) {
 	req := openAIResponsesRequest{
-		Model:  "gpt-4o-mini",
-		Input:  json.RawMessage(`"hello"`),
-		Stream: true,
+		Model:              "gpt-4o-mini",
+		Input:              json.RawMessage(`"hello"`),
+		Stream:             true,
+		PreviousResponseID: "resp_prev_123",
 	}
 
 	got, err := buildRuntimeRequestFromResponses(req)
 	if err != nil {
 		t.Fatalf("buildRuntimeRequestFromResponses() error = %v", err)
 	}
-	if got.Model != "gpt-4o-mini" || !got.Stream {
-		t.Fatalf("got = %#v, want model and stream preserved", got)
+	if got.Model != "gpt-4o-mini" || !got.Stream || got.PreviousResponseID != "resp_prev_123" {
+		t.Fatalf("got = %#v, want model, stream, and previous_response_id preserved", got)
 	}
 	if len(got.Messages) != 1 || got.Messages[0].Role != runtime.MessageRoleUser || got.Messages[0].Parts[0].Text != "hello" {
 		t.Fatalf("Messages = %#v, want single user hello message", got.Messages)
@@ -660,6 +708,35 @@ func TestBuildRuntimeRequestFromResponsesFunctionOutputDropsNonTextParts(t *test
 	}
 	if got.Messages[0].Parts[0].Type != runtime.ContentPartTypeText || got.Messages[0].Parts[0].Text != "partial text" {
 		t.Fatalf("got.Messages[0].Parts = %#v, want only text part preserved", got.Messages[0].Parts)
+	}
+}
+
+func TestBuildRuntimeRequestFromResponsesFunctionOutputPreservesErrorStatus(t *testing.T) {
+	req := openAIResponsesRequest{
+		Model: "gpt-4o-mini",
+		Input: json.RawMessage(`[
+			{"type":"function_call_output","call_id":"call_123","status":"error","output":[{"type":"output_text","text":"lookup failed"}]}
+		]`),
+	}
+
+	got, err := buildRuntimeRequestFromResponses(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequestFromResponses() error = %v", err)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("len(got.Messages) = %d, want 1", len(got.Messages))
+	}
+	if got.Messages[0].Role != runtime.MessageRoleTool {
+		t.Fatalf("got.Messages[0].Role = %q, want tool", got.Messages[0].Role)
+	}
+	if got.Messages[0].ToolCallID != "call_123" {
+		t.Fatalf("got.Messages[0].ToolCallID = %q, want call_123", got.Messages[0].ToolCallID)
+	}
+	if !got.Messages[0].ToolResultIsError {
+		t.Fatalf("got.Messages[0].ToolResultIsError = %v, want true", got.Messages[0].ToolResultIsError)
+	}
+	if len(got.Messages[0].Parts) != 1 || got.Messages[0].Parts[0].Text != "lookup failed" {
+		t.Fatalf("got.Messages[0].Parts = %#v, want single lookup failed text part", got.Messages[0].Parts)
 	}
 }
 
@@ -980,6 +1057,288 @@ func TestAnthropicMessagesUsesDispatcherBackedPlan(t *testing.T) {
 	}
 	if resp.Type != "message" || resp.Role != "assistant" || len(resp.Content) != 1 || resp.Content[0].Text == "" {
 		t.Fatalf("resp = %#v, want anthropic message response", resp)
+	}
+}
+
+func TestAnthropicMessagesUsesOpenAIResponsesProvider(t *testing.T) {
+	var upstreamBody struct {
+		Model        string `json:"model"`
+		Instructions string `json:"instructions"`
+		Input        []struct {
+			Type      string `json:"type"`
+			Role      string `json:"role"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+			Content   []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"input"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %q, want /responses", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Fatalf("Authorization = %q, want Bearer test-key", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatalf("json.NewDecoder().Decode() error = %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_123",
+			"object": "response",
+			"model":  "gpt-5.4",
+			"status": "completed",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "hello from responses upstream",
+				}},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{
+		Name:        "anthropic-to-responses",
+		FromTags:    []string{"office"},
+		ToTags:      []string{"responses-tag"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}}, testDualProtocolInbounds(), []config.OutboundSpec{{
+		Name:      "responses",
+		Protocol:  "openai_responses",
+		Endpoint:  upstream.URL,
+		AuthToken: "test-key",
+		Tag:       "responses-tag",
+	}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-5",
+		"system": []map[string]any{{
+			"type": "text",
+			"text": "You are Claude Code, Anthropic's official CLI for Claude.",
+		}},
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "hello",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if upstreamBody.Model != "gpt-5.4" {
+		t.Fatalf("upstream model = %q, want gpt-5.4", upstreamBody.Model)
+	}
+	if upstreamBody.Instructions != "You are Claude Code, Anthropic's official CLI for Claude." {
+		t.Fatalf("upstream instructions = %q, want bridged system text", upstreamBody.Instructions)
+	}
+	if len(upstreamBody.Input) != 1 {
+		t.Fatalf("len(upstream input) = %d, want 1", len(upstreamBody.Input))
+	}
+	if upstreamBody.Input[0].Type != "message" || upstreamBody.Input[0].Role != "user" {
+		t.Fatalf("upstream input[0] = %#v, want user message input item", upstreamBody.Input[0])
+	}
+	if len(upstreamBody.Input[0].Content) != 1 || upstreamBody.Input[0].Content[0].Type != "input_text" || upstreamBody.Input[0].Content[0].Text != "hello" {
+		t.Fatalf("upstream input[0].Content = %#v, want input_text hello", upstreamBody.Input[0].Content)
+	}
+	if !strings.Contains(w.Body.String(), `"type":"message"`) || !strings.Contains(w.Body.String(), `"text":"hello from responses upstream"`) {
+		t.Fatalf("body = %q, want anthropic message response bridged from responses upstream", w.Body.String())
+	}
+}
+
+func TestAnthropicMessagesToolLoopUsesOpenAIResponsesProvider(t *testing.T) {
+	var upstreamRequests []struct {
+		Model string `json:"model"`
+		Input []struct {
+			Type      string `json:"type"`
+			Role      string `json:"role"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+			Output    string `json:"output"`
+			Content   []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"input"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %q, want /responses", r.URL.Path)
+		}
+		var body struct {
+			Model string `json:"model"`
+			Input []struct {
+				Type      string `json:"type"`
+				Role      string `json:"role"`
+				CallID    string `json:"call_id"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+				Output    string `json:"output"`
+				Content   []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("json.NewDecoder().Decode() error = %v", err)
+		}
+		upstreamRequests = append(upstreamRequests, body)
+		if len(upstreamRequests) == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":     "resp_tool_1",
+				"object": "response",
+				"model":  body.Model,
+				"output": []map[string]any{{
+					"type":      "function_call",
+					"call_id":   "call_123",
+					"name":      "get_weather",
+					"arguments": `{"city":"shanghai"}`,
+				}},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_tool_2",
+			"object": "response",
+			"model":  body.Model,
+			"status": "completed",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "shanghai is sunny",
+				}},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{
+		Name:        "anthropic-to-responses",
+		FromTags:    []string{"office"},
+		ToTags:      []string{"responses-tag"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}}, testDualProtocolInbounds(), []config.OutboundSpec{{
+		Name:      "responses",
+		Protocol:  "openai_responses",
+		Endpoint:  upstream.URL,
+		AuthToken: "test-key",
+		Tag:       "responses-tag",
+	}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	firstBody, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-5",
+		"tools": []map[string]any{{
+			"name":        "get_weather",
+			"description": "Get weather by city",
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"city": map[string]any{"type": "string"}},
+				"required":   []string{"city"},
+			},
+		}},
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "check shanghai weather",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	firstResp := httptest.NewRecorder()
+	mux.ServeHTTP(firstResp, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", firstBody))
+	if firstResp.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200, body = %s", firstResp.Code, firstResp.Body.String())
+	}
+	if !strings.Contains(firstResp.Body.String(), `"type":"tool_use"`) || !strings.Contains(firstResp.Body.String(), `"id":"call_123"`) {
+		t.Fatalf("first body = %q, want anthropic tool_use response", firstResp.Body.String())
+	}
+
+	secondBody, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-5",
+		"messages": []map[string]any{{
+			"role": "assistant",
+			"content": []map[string]any{{
+				"type":  "tool_use",
+				"id":    "call_123",
+				"name":  "get_weather",
+				"input": map[string]any{"city": "shanghai"},
+			}},
+		}, {
+			"role": "tool",
+			"content": []map[string]any{{
+				"type":        "tool_result",
+				"tool_use_id": "call_123",
+				"content": []map[string]any{{
+					"type": "text",
+					"text": "sunny",
+				}},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	secondResp := httptest.NewRecorder()
+	mux.ServeHTTP(secondResp, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", secondBody))
+	if secondResp.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want 200, body = %s", secondResp.Code, secondResp.Body.String())
+	}
+	if !strings.Contains(secondResp.Body.String(), `"type":"text"`) || !strings.Contains(secondResp.Body.String(), `"text":"shanghai is sunny"`) {
+		t.Fatalf("second body = %q, want final anthropic assistant text", secondResp.Body.String())
+	}
+
+	if len(upstreamRequests) != 2 {
+		t.Fatalf("len(upstreamRequests) = %d, want 2", len(upstreamRequests))
+	}
+	if upstreamRequests[0].Model != "gpt-5.4" {
+		t.Fatalf("upstreamRequests[0].Model = %q, want gpt-5.4", upstreamRequests[0].Model)
+	}
+	if len(upstreamRequests[0].Input) != 1 || upstreamRequests[0].Input[0].Type != "message" || upstreamRequests[0].Input[0].Role != "user" {
+		t.Fatalf("upstreamRequests[0].Input = %#v, want initial user message item", upstreamRequests[0].Input)
+	}
+	if len(upstreamRequests[1].Input) != 2 {
+		t.Fatalf("len(upstreamRequests[1].Input) = %d, want 2", len(upstreamRequests[1].Input))
+	}
+	if upstreamRequests[1].Input[0].Type != "function_call" || upstreamRequests[1].Input[0].CallID != "call_123" || upstreamRequests[1].Input[0].Name != "get_weather" {
+		t.Fatalf("upstreamRequests[1].Input[0] = %#v, want bridged function_call history", upstreamRequests[1].Input[0])
+	}
+	if upstreamRequests[1].Input[0].Arguments != `{"city":"shanghai"}` {
+		t.Fatalf("upstreamRequests[1].Input[0].Arguments = %q, want tool arguments JSON", upstreamRequests[1].Input[0].Arguments)
+	}
+	if upstreamRequests[1].Input[1].Type != "function_call_output" || upstreamRequests[1].Input[1].CallID != "call_123" || upstreamRequests[1].Input[1].Output != "sunny" {
+		t.Fatalf("upstreamRequests[1].Input[1] = %#v, want bridged function_call_output", upstreamRequests[1].Input[1])
 	}
 }
 
