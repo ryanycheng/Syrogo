@@ -151,7 +151,16 @@ Current release artifacts are planned for:
 
 After downloading a release archive, extract it and run the `syrogo` binary directly.
 
-For installation and deployment examples, see [`docs/deploy.md`](./docs/deploy.md).
+Syrogo also ships with one installer entrypoint that works both locally and remotely:
+
+```bash
+sudo bash ./scripts/install.sh --version v0.1.0
+curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.0
+```
+
+The installer expects a local config file at `/etc/syrogo/config.yaml` by default, reuses the same command path for upgrades, and keeps the installed config unless you pass `--force-config`.
+
+For complete deployment examples, see [`docs/deploy.md`](./docs/deploy.md).
 
 ### 4. Start the service
 
@@ -166,10 +175,10 @@ If you only want the smallest local verification path, you can point a route to 
 ### 5. Check health
 
 ```bash
-curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:23234/healthz
 ```
 
-If your listen address is not `:8080`, replace it with your actual config.
+If your listen address is not `:23234`, replace it with your actual config.
 
 ### 6. Verify protocol entrypoints
 

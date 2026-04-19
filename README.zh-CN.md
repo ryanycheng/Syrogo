@@ -151,7 +151,16 @@ cp configs/config.example.yaml configs/config.yaml
 
 下载后解压，直接运行其中的 `syrogo` 二进制即可。
 
-安装与部署示例请见 [`docs/deploy.zh-CN.md`](./docs/deploy.zh-CN.md)。
+Syrogo 现在提供统一安装入口，同时支持本地执行和远程安装：
+
+```bash
+sudo bash ./scripts/install.sh --version v0.1.0
+curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.0
+```
+
+安装器默认从 `/etc/syrogo/config.yaml` 读取目标机器上的本地配置，升级复用同一条命令路径，且默认保留已安装配置；只有显式传 `--force-config` 才会覆盖。
+
+完整部署示例请见 [`docs/deploy.zh-CN.md`](./docs/deploy.zh-CN.md)。
 
 ### 4. 启动服务
 
@@ -166,10 +175,10 @@ make run
 ### 5. 检查健康状态
 
 ```bash
-curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:23234/healthz
 ```
 
-如果你的监听端口不是 `:8080`，请按实际配置替换。
+如果你的监听端口不是 `:23234`，请按实际配置替换。
 
 ### 6. 验证协议入口
 

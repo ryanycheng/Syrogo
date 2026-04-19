@@ -1,0 +1,15 @@
+[Unit]
+Description=Syrogo AI Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__INSTALL_ROOT__
+ExecStart=__INSTALL_ROOT__/bin/syrogo -config __INSTALL_ROOT__/config/config.yaml
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 listeners:
   - name: "public-http"
-    listen: ":8080"
+    listen: ":23234"
     inbounds:
       - "openai-entry"
       - "responses-entry"

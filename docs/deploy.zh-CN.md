@@ -5,65 +5,29 @@
 本文面向 Syrogo `v0.1.x` 基线版本，重点提供一条**最小可用**的安装与部署路径。
 
 覆盖内容包括：
-- 下载 release 制品
-- 准备可运行配置
-- 启动服务
+- 在目标机器上准备可运行配置
+- Linux 本地与远程一键安装
 - 使用 `systemd` 托管
-- 基础升级与排障
+- 用同一入口完成升级
+- 基础排障
 
 ---
 
-## 1. 选择发布制品
+## 1. 在目标机器上准备配置
 
-根据你的主机平台下载对应压缩包：
+安装器要求目标机器本地已经有配置文件。
 
-- `syrogo_v0.1.x_linux_amd64.tar.gz`
-- `syrogo_v0.1.x_linux_arm64.tar.gz`
-- `syrogo_v0.1.x_darwin_amd64.tar.gz`
-- `syrogo_v0.1.x_darwin_arm64.tar.gz`
-
-下载后解压：
-
-```bash
-tar -xzf syrogo_v0.1.x_linux_amd64.tar.gz
-cd syrogo_linux_amd64
-```
-
-压缩包内包含：
-- `syrogo`
-- `README.md`
-- `LICENSE`
-
----
-
-## 2. 准备目录
-
-一个最小 Linux 部署目录可以是：
+默认路径：
 
 ```text
-/opt/syrogo/
-  bin/syrogo
-  config/config.yaml
-  logs/
-  tmp/
+/etc/syrogo/config.yaml
 ```
 
-示例：
+一种实用准备方式是：
 
 ```bash
-sudo mkdir -p /opt/syrogo/bin /opt/syrogo/config /opt/syrogo/logs /opt/syrogo/tmp
-sudo cp syrogo /opt/syrogo/bin/
-sudo chmod +x /opt/syrogo/bin/syrogo
-```
-
----
-
-## 3. 准备配置
-
-建议从仓库示例配置开始：
-
-```bash
-cp configs/config.example.yaml config.yaml
+sudo mkdir -p /etc/syrogo
+sudo cp configs/config.example.yaml /etc/syrogo/config.yaml
 ```
 
 然后把占位值替换成你环境中的真实值。
@@ -82,9 +46,101 @@ cp configs/config.example.yaml config.yaml
 
 ---
 
-## 4. 手工启动服务
+## 2. Linux 一键安装
 
-用显式配置路径启动：
+Syrogo 提供了一个统一安装入口，面向 Linux + `systemd` 主机。
+
+### 本地执行
+
+在仓库目录下可执行：
+
+```bash
+sudo bash ./scripts/install.sh --archive ./syrogo_v0.1.0_linux_amd64.tar.gz
+```
+
+或者：
+
+```bash
+sudo bash ./scripts/install.sh --version v0.1.0
+```
+
+### 远程 `curl | bash`
+
+```bash
+curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.0
+```
+
+### 覆盖默认配置路径
+
+如果你的配置文件不在默认位置，也可以显式指定：
+
+```bash
+curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.0 --config /path/to/config.yaml
+```
+
+安装器会自动：
+- 安装到 `/opt/syrogo`
+- 把二进制安装到 `/opt/syrogo/bin/syrogo`
+- 安装 `syrogo.service` 到 `/etc/systemd/system/syrogo.service`
+- 启用并重启 `syrogo` 服务
+- 最后对 `http://127.0.0.1:23234/healthz` 做一次健康检查
+
+当前边界：
+- 仅支持 Linux
+- 依赖 `systemd`
+- 需要 root 权限
+- 不会替你自动生成完整配置
+- 不处理 TLS、nginx、Docker、Kubernetes
+
+---
+
+## 3. 配置覆盖行为
+
+默认情况下，安装器会保留已经安装好的配置：
+
+```text
+/opt/syrogo/config/config.yaml
+```
+
+这意味着：
+- 首次安装时，需要目标机器上存在可读的本地配置文件
+- 后续升级默认复用已安装配置
+- 重复执行安装器时，不会覆盖已安装配置，除非你显式要求
+
+如果你确实要替换已安装配置，可传 `--force-config`：
+
+```bash
+sudo bash ./scripts/install.sh --version v0.1.1 --config /etc/syrogo/config.yaml --force-config
+```
+
+---
+
+## 4. 升级流程
+
+升级与首次安装使用同一条安装入口。
+
+示例：
+
+```bash
+curl -fsSL <raw-install-url> | sudo bash -s -- --version v0.1.1
+```
+
+或者：
+
+```bash
+sudo bash ./scripts/install.sh --version v0.1.1
+```
+
+一个最小升级流程如下：
+1. 只在需要时更新目标机器上的本地配置文件
+2. 用新版本号重新执行安装器
+3. 验证 `/healthz` 和一条真实协议请求
+
+---
+
+## 5. 手工启动服务
+
+如果你不走安装器，也可以继续用显式配置路径手工启动：
 
 ```bash
 /opt/syrogo/bin/syrogo -config /opt/syrogo/config/config.yaml
@@ -98,12 +154,12 @@ cp configs/config.example.yaml config.yaml
 
 ---
 
-## 5. 验证健康状态与路由
+## 6. 验证健康状态与路由
 
 先检查健康状态：
 
 ```bash
-curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:23234/healthz
 ```
 
 然后再验证你实际暴露的协议入口之一。
@@ -117,38 +173,12 @@ curl http://127.0.0.1:8080/healthz
 
 ---
 
-## 6. 使用 systemd 托管
+## 7. 使用 systemd 托管
 
-示例 unit 文件：
-
-```ini
-[Unit]
-Description=Syrogo AI Gateway
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/syrogo
-ExecStart=/opt/syrogo/bin/syrogo -config /opt/syrogo/config/config.yaml
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-保存到：
+安装器会把 unit 渲染到：
 
 ```text
 /etc/systemd/system/syrogo.service
-```
-
-然后启用并启动：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable syrogo
-sudo systemctl start syrogo
 ```
 
 常用命令：
@@ -157,28 +187,6 @@ sudo systemctl start syrogo
 sudo systemctl status syrogo
 sudo journalctl -u syrogo -f
 sudo systemctl restart syrogo
-```
-
----
-
-## 7. 升级流程
-
-一个最小升级流程如下：
-
-1. 下载新的 release 压缩包
-2. 解压出新的 `syrogo` 二进制
-3. 替换 `/opt/syrogo/bin/syrogo`
-4. 保留现有配置文件
-5. 重启服务
-6. 验证 `/healthz` 和一条真实协议请求
-
-示例：
-
-```bash
-sudo systemctl stop syrogo
-sudo cp syrogo /opt/syrogo/bin/syrogo
-sudo chmod +x /opt/syrogo/bin/syrogo
-sudo systemctl start syrogo
 ```
 
 ---
@@ -198,6 +206,15 @@ Syrogo 可以直接暴露，也可以放在反向代理后面。
 ---
 
 ## 9. 常见排障
+
+### 安装脚本在启动前失败
+
+优先检查：
+- 当前主机是否是 Linux
+- 是否存在 `systemd`
+- 是否以 root 身份执行
+- 目标机器上的本地配置路径是否存在
+- release 压缩包路径或 tag 是否正确
 
 ### 服务能启动，但请求失败
 
@@ -230,6 +247,7 @@ Syrogo 可以直接暴露，也可以放在反向代理后面。
 
 `v0.1.x` 当前还不覆盖：
 - Windows 部署
+- macOS 一键安装
 - Docker 镜像
 - Kubernetes manifests
 - Helm charts

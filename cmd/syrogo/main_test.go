@@ -8,14 +8,14 @@ import (
 func TestBuildStartupBannerDefaults(t *testing.T) {
 	got := buildStartupBanner(startupBannerData{
 		Tagline: "AI Gateway / Semantic Router",
-		Listens: []string{":8080"},
+		Listens: []string{":23234"},
 	})
 
 	checks := []string{
 		"____                   ____",
 		"AI Gateway / Semantic Router",
 		"version: dev",
-		"listen: :8080",
+		"listen: :23234",
 		"dev-log: off",
 		"trace: off",
 	}
