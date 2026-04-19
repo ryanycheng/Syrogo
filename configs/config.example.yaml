@@ -96,6 +96,6 @@ outbounds:
 
   - name: "anthropic-primary"
     protocol: "anthropic_messages"
-    endpoint: "https://cliproxyapi.todayto.com/v1"
+    endpoint: "https://example-anthropic-compatible.local/v1"
     auth_token: "${ANTHROPIC_API_KEY_PRIMARY}"
     tag: "anthropic-primary"
