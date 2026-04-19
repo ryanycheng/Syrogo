@@ -2,6 +2,18 @@
 
 中文 | [English](./README.md)
 
+<p align="center">
+  <img src="./docs/assets/SyroGo-logo.png" alt="SyroGo" width="500">
+</p>
+
+> Syrogo · AI Gateway / Semantic Router
+>
+> 用更清晰的边界、多协议接入和面向网关的编排能力，承接多模型流量。
+
+- **多协议入口** — 在同一个网关中统一承接 OpenAI Chat、OpenAI Responses 与 Anthropic Messages。
+- **面向真实场景的路由** — 支持按 client tag、目标模型、failover 与 round_robin 进行调度。
+- **面向上游适配的执行层** — 接多个 provider，而不把协议差异散落到每个客户端里。
+
 Syrogo 是一个面向多模型场景的 AI Gateway / Semantic Router。
 
 它不是只做单一协议转发的代理层，而是一个放在客户端与上游模型之间的中间系统，用来统一承接：
@@ -12,6 +24,14 @@ Syrogo 是一个面向多模型场景的 AI Gateway / Semantic Router。
 - 后续额度切换、统计、治理与多节点串接能力
 
 当前项目仍处于 0→1 骨架建设阶段，优先目标是把服务主链路、协议边界与路由模型打稳。
+
+---
+
+## 名字的由来
+
+Syrogo 这个名字结合了神经元 / Synapse 的意象、Router 的路由语义，以及 Go 的实现身份。
+
+它想表达的是：模型流量像神经信号一样被连接、传递与分发，而系统本身则是一个用 Go 构建的网关与路由层。
 
 ---
 

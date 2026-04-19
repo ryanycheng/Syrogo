@@ -2,6 +2,18 @@
 
 [中文](./README.zh-CN.md) | English
 
+<p align="center">
+  <img src="./docs/assets/SyroGo-logo.png" alt="SyroGo" width="500">
+</p>
+
+> Syrogo · AI Gateway / Semantic Router
+>
+> Route model traffic with clearer boundaries, multi-protocol access, and gateway-ready orchestration.
+
+- **Multi-protocol inbounds** — OpenAI Chat, OpenAI Responses, and Anthropic Messages in one gateway.
+- **Routing for real scenarios** — route by client tag, target model, failover, and round_robin.
+- **Provider-ready execution** — connect multiple upstreams without pushing protocol differences into every client.
+
 Syrogo is an AI Gateway / Semantic Router for multi-model scenarios.
 
 It is not just a thin proxy for forwarding a single protocol. It sits between clients and upstream model providers to unify:
@@ -12,6 +24,14 @@ It is not just a thin proxy for forwarding a single protocol. It sits between cl
 - future governance capabilities such as quota switching, usage statistics, and multi-node chaining
 
 The project is still in the 0→1 bootstrap stage. The current priority is to stabilize the main service path, protocol boundaries, and routing model.
+
+---
+
+## Why the name Syrogo
+
+Syrogo combines the imagery of synapses and neurons with the ideas of routing and Go.
+
+The name is meant to suggest connection, transfer, and dispatch across model traffic, while still making it clear that this is a gateway system built in Go.
 
 ---
 
