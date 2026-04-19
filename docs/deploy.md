@@ -204,7 +204,23 @@ sudo systemctl restart syrogo
 
 ---
 
-## 8. Reverse proxy and network notes
+## 8. Uninstall
+
+To remove the installed service and files under `/opt/syrogo` while keeping the config:
+
+```bash
+sudo bash ./scripts/install.sh --uninstall
+```
+
+To remove both the service and the default config file:
+
+```bash
+sudo bash ./scripts/install.sh --uninstall --purge-config
+```
+
+---
+
+## 9. Reverse proxy and network notes
 
 Syrogo can be exposed directly or placed behind a reverse proxy.
 

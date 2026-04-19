@@ -12,10 +12,13 @@ SYSTEMD_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 TMP_DIR=""
 VERSION=""
 ARCHIVE=""
+UNINSTALL=0
+PURGE_CONFIG=0
 SERVICE_USER="syrogo"
 SKIP_HEALTHCHECK=0
 FORCE_CONFIG=0
 CONFIG_INITIALIZED=0
+CONFIG_UPDATED=0
 HEALTH_URL="http://127.0.0.1:23234/healthz"
 
 usage() {
@@ -24,12 +27,16 @@ Usage:
   sudo bash ./scripts/install.sh
   sudo bash ./scripts/install.sh --archive <path>
   sudo bash ./scripts/install.sh --version <tag>
+  sudo bash ./scripts/install.sh --uninstall
+  sudo bash ./scripts/install.sh --uninstall --purge-config
   curl -fsSL <raw-install-url> | sudo bash -s --
   curl -fsSL <raw-install-url> | sudo bash -s -- --version <tag>
 
 Options:
   --archive <path>       Local release archive (.tar.gz)
   --version <tag>        Release tag such as v0.1.0
+  --uninstall            Remove installed service and files under /opt/syrogo
+  --purge-config         Remove /etc/syrogo/config.yaml together with --uninstall
   --config <path>        Local config source path (default: /etc/syrogo/config.yaml)
   --force-config         Overwrite /opt/syrogo/config/config.yaml from --config
   --user <name>          Service user (default: syrogo)
@@ -40,12 +47,13 @@ Options:
 
 Notes:
   - Local and remote install use the same script entrypoint.
-  - Without --version or --archive, the installer uses the latest GitHub release.
+  - Without --version or --archive, the installer uses the latest GitHub release with a short timeout.
   - On first install, if /etc/syrogo/config.yaml is missing, the installer downloads config.example.yaml there.
   - With --version, the example config is fetched from the matching release tag.
   - With --archive or latest release install, the example config is fetched from master.
   - The installer keeps an existing installed config by default.
   - Pass --force-config if you want to replace /opt/syrogo/config/config.yaml from --config.
+  - --uninstall keeps /etc/syrogo/config.yaml unless you also pass --purge-config.
 EOF
 }
 
@@ -90,6 +98,14 @@ parse_args() {
         VERSION="$2"
         shift 2
         ;;
+      --uninstall)
+        UNINSTALL=1
+        shift
+        ;;
+      --purge-config)
+        PURGE_CONFIG=1
+        shift
+        ;;
       --config)
         [ "$#" -ge 2 ] || fail "missing value for --config"
         CONFIG_SOURCE="$2"
@@ -132,19 +148,26 @@ parse_args() {
   CONFIG_PATH="$INSTALL_ROOT/config/config.yaml"
   SYSTEMD_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
-  if [ -n "$ARCHIVE" ] && [ -n "$VERSION" ]; then
-    fail "use either --archive or --version, not both"
+  if [ "$UNINSTALL" -eq 1 ] && { [ -n "$ARCHIVE" ] || [ -n "$VERSION" ] || [ "$FORCE_CONFIG" -eq 1 ] || [ "$SKIP_HEALTHCHECK" -eq 1 ]; }; then
+    fail "--uninstall cannot be combined with install or healthcheck flags"
+  fi
+
+  if [ "$PURGE_CONFIG" -eq 1 ] && [ "$UNINSTALL" -ne 1 ]; then
+    fail "--purge-config requires --uninstall"
+  fi
+
+  if [ "$UNINSTALL" -eq 1 ]; then
+    return
   fi
 }
 
 resolve_latest_version() {
-  local latest_url resolved tag
+  local api_url tag
   command -v curl >/dev/null 2>&1 || fail "curl is required to resolve the latest release"
-  latest_url="https://github.com/${REPO}/releases/latest"
-  resolved="$(curl -fsSL -o /dev/null -w '%{url_effective}' "$latest_url")"
-  tag="${resolved##*/}"
-  [ -n "$tag" ] || fail "failed to resolve latest release tag"
-  [ "$tag" != "latest" ] || fail "failed to resolve latest release tag"
+  api_url="https://api.github.com/repos/${REPO}/releases/latest"
+  log "resolving latest release from GitHub API"
+  tag="$(curl -fsSL --connect-timeout 5 --max-time 20 "$api_url" | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  [ -n "$tag" ] || fail "failed to resolve latest release tag, please pass --version explicitly"
   VERSION="$tag"
   log "resolved latest release: $VERSION"
 }
@@ -244,6 +267,7 @@ install_or_keep_config() {
   fi
 
   install -m 0644 "$CONFIG_SOURCE" "$CONFIG_PATH"
+  CONFIG_UPDATED=1
   log "installed config from $CONFIG_SOURCE"
 }
 
@@ -267,6 +291,46 @@ WantedBy=multi-user.target
 EOF
 }
 
+uninstall_service() {
+  if [ "$INSTALL_ROOT" != "/opt/syrogo" ]; then
+    fail "refusing to uninstall unexpected install root: $INSTALL_ROOT"
+  fi
+
+  if [ -f "$SYSTEMD_UNIT_PATH" ]; then
+    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+    rm -f "$SYSTEMD_UNIT_PATH"
+    log "removed service unit: $SYSTEMD_UNIT_PATH"
+  else
+    log "service unit not found: $SYSTEMD_UNIT_PATH"
+  fi
+
+  systemctl daemon-reload
+
+  if [ -d "$INSTALL_ROOT" ]; then
+    rm -rf "$INSTALL_ROOT"
+    log "removed install root: $INSTALL_ROOT"
+  else
+    log "install root not found: $INSTALL_ROOT"
+  fi
+
+  if [ "$PURGE_CONFIG" -eq 1 ]; then
+    if [ -f "$DEFAULT_CONFIG_SOURCE" ]; then
+      rm -f "$DEFAULT_CONFIG_SOURCE"
+      log "removed config: $DEFAULT_CONFIG_SOURCE"
+    else
+      log "config not found: $DEFAULT_CONFIG_SOURCE"
+    fi
+    if [ -d "$(dirname "$DEFAULT_CONFIG_SOURCE")" ]; then
+      rmdir --ignore-fail-on-non-empty "$(dirname "$DEFAULT_CONFIG_SOURCE")" >/dev/null 2>&1 || true
+    fi
+  else
+    log "kept config: $DEFAULT_CONFIG_SOURCE"
+  fi
+
+  log "uninstalled Syrogo from $INSTALL_ROOT"
+}
+
 start_service() {
   systemctl daemon-reload
   systemctl enable "$SERVICE_NAME" >/dev/null
@@ -276,20 +340,25 @@ start_service() {
 healthcheck() {
   [ "$SKIP_HEALTHCHECK" -eq 1 ] && return
   command -v curl >/dev/null 2>&1 || fail "curl is required for the final health check"
+  log "checking service health: $HEALTH_URL"
   for _ in 1 2 3 4 5; do
-    if curl -fsS "$HEALTH_URL" >/dev/null; then
+    if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
       log "health check passed: $HEALTH_URL"
       return
     fi
     sleep 1
   done
-  fail "health check failed: $HEALTH_URL"
+  fail "service started but health check is not ready yet: $HEALTH_URL"
 }
 
 main() {
   require_root
   require_linux_systemd
   parse_args "$@"
+  if [ "$UNINSTALL" -eq 1 ]; then
+    uninstall_service
+    return
+  fi
   if [ -z "$ARCHIVE" ] && [ -z "$VERSION" ]; then
     resolve_latest_version
   fi
@@ -308,7 +377,9 @@ main() {
   log "config path: $CONFIG_PATH"
   if [ "$CONFIG_INITIALIZED" -eq 1 ]; then
     log "example config initialized at $DEFAULT_CONFIG_SOURCE"
-    log "please edit the config and restart the service: systemctl restart $SERVICE_NAME"
+  fi
+  if [ "$CONFIG_UPDATED" -eq 1 ]; then
+    log "please review the config and restart the service after any changes: systemctl restart $SERVICE_NAME"
   fi
 }
 

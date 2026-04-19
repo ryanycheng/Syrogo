@@ -204,7 +204,23 @@ sudo systemctl restart syrogo
 
 ---
 
-## 8. 反向代理与网络说明
+## 8. 卸载
+
+如果只删除服务和 `/opt/syrogo` 下的安装内容，但保留配置：
+
+```bash
+sudo bash ./scripts/install.sh --uninstall
+```
+
+如果连默认配置文件一起删除：
+
+```bash
+sudo bash ./scripts/install.sh --uninstall --purge-config
+```
+
+---
+
+## 9. 反向代理与网络说明
 
 Syrogo 可以直接暴露，也可以放在反向代理后面。
 
