@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 type anthropicMessagesRequest struct {

@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"syrogo/internal/config"
-	"syrogo/internal/execution"
-	"syrogo/internal/provider"
-	"syrogo/internal/router"
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/execution"
+	"github.com/ryanycheng/Syrogo/internal/provider"
+	"github.com/ryanycheng/Syrogo/internal/router"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 type Handler struct {

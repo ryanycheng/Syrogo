@@ -4,12 +4,12 @@ import (
 	"log/slog"
 	"net/http"
 
-	"syrogo/internal/config"
-	"syrogo/internal/execution"
-	"syrogo/internal/gateway"
-	"syrogo/internal/provider"
-	"syrogo/internal/router"
-	"syrogo/internal/server"
+	"github.com/ryanycheng/Syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/execution"
+	"github.com/ryanycheng/Syrogo/internal/gateway"
+	"github.com/ryanycheng/Syrogo/internal/provider"
+	"github.com/ryanycheng/Syrogo/internal/router"
+	"github.com/ryanycheng/Syrogo/internal/server"
 )
 
 type App struct {

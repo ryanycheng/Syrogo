@@ -3,7 +3,7 @@ package gateway
 import (
 	"encoding/json"
 
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 func decodeJSONPart(part runtime.ContentPart) any {

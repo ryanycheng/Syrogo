@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"syrogo/internal/eventstream"
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/eventstream"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 func (h *Handler) handleOpenAIStreaming(w http.ResponseWriter, r *http.Request, req runtime.Request, plan runtime.ExecutionPlan, logger loggerLike) {

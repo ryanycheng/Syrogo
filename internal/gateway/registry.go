@@ -7,7 +7,7 @@ import (
 	"sort"
 	"sync"
 
-	"syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/config"
 )
 
 type InboundCodec interface {

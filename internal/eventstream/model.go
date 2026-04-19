@@ -3,7 +3,7 @@ package eventstream
 import (
 	"encoding/json"
 
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 type EventType string

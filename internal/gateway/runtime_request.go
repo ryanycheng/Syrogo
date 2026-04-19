@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"syrogo/internal/runtime"
-	"syrogo/internal/semantic"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/semantic"
 )
 
 type inboundMessage struct {

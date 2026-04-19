@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	"syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/config"
 )
 
 type Factory func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error)

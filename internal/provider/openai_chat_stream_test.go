@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 func TestDecodeOpenAIChatStreamParsesToolCallsAndUsage(t *testing.T) {

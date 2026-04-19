@@ -3,7 +3,7 @@ package eventstream
 import (
 	"testing"
 
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 func TestEventStreamFromRuntimeEmitsAnthropicFriendlySequence(t *testing.T) {

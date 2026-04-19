@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"strings"
 
-	"syrogo/internal/config"
-	"syrogo/internal/runtime"
-	"syrogo/internal/semantic"
+	"github.com/ryanycheng/Syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/semantic"
 )
 
 type openAIResponsesCodec struct{}

@@ -1,6 +1,6 @@
 package eventstream
 
-import "syrogo/internal/runtime"
+import "github.com/ryanycheng/Syrogo/internal/runtime"
 
 func EventsFromRuntimeResponse(resp runtime.Response) []Event {
 	events := make([]Event, 0, 2+len(resp.Message.Parts)+len(resp.Message.ToolCalls)+1)

@@ -3,7 +3,7 @@ package provider
 import (
 	"testing"
 
-	"syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/config"
 )
 
 func TestFactoryRegistryNewBuildsRegisteredProvider(t *testing.T) {

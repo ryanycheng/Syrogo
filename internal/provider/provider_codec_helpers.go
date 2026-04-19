@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 func normalizedToolSchema(raw json.RawMessage) json.RawMessage {

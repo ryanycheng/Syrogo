@@ -1,6 +1,6 @@
 package provider
 
-import "syrogo/internal/runtime"
+import "github.com/ryanycheng/Syrogo/internal/runtime"
 
 func streamResponse(resp runtime.Response) <-chan runtime.StreamEvent {
 	toolCallCount := len(resp.Message.ToolCalls)

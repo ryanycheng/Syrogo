@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	"syrogo/internal/config"
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 type openAIChatCodec struct{}

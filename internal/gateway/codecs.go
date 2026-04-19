@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 func dispatchOrWriteError(h *Handler, w http.ResponseWriter, r *http.Request, req runtime.Request, plan runtime.ExecutionPlan, logger *slog.Logger) (runtime.Response, bool) {

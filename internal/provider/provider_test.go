@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"syrogo/internal/config"
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 func boolPtr(v bool) *bool {

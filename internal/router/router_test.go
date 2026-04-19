@@ -3,9 +3,9 @@ package router
 import (
 	"testing"
 
-	"syrogo/internal/config"
-	"syrogo/internal/provider"
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/provider"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 func testOutbounds() []config.OutboundSpec {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"syrogo/internal/protocol"
+	"github.com/ryanycheng/Syrogo/internal/protocol"
 
 	"gopkg.in/yaml.v3"
 )

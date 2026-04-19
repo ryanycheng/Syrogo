@@ -1,4 +1,4 @@
-module syrogo
+module github.com/ryanycheng/Syrogo
 
 go 1.26.1
 

@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"syrogo/internal/config"
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 type Provider = runtime.CompletionProvider

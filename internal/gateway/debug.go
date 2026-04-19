@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 type inboundDebugSnapshot struct {

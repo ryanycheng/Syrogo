@@ -1,6 +1,6 @@
 package eventstream
 
-import "syrogo/internal/runtime"
+import "github.com/ryanycheng/Syrogo/internal/runtime"
 
 func EventStreamFromRuntime(events <-chan runtime.StreamEvent) <-chan Event {
 	ch := make(chan Event)

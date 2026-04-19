@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"syrogo/internal/config"
-	"syrogo/internal/eventstream"
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/eventstream"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 type anthropicMessagesCodec struct{}

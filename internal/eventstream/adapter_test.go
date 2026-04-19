@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 func TestEventsFromRuntimeResponsePreservesOrderAndFinishReason(t *testing.T) {

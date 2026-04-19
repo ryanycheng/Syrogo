@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"syrogo/internal/provider"
-	"syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/provider"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 type stubProvider struct {

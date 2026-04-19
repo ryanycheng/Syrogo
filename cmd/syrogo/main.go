@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"time"
 
-	"syrogo/internal/app"
-	"syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/app"
+	"github.com/ryanycheng/Syrogo/internal/config"
 )
 
 func main() {

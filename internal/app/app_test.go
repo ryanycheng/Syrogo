@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/config"
 )
 
 func baseConfig() config.Config {

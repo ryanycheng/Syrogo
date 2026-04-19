@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"testing"
 
-	"syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/config"
 )
 
 type stubInboundCodec struct{}
