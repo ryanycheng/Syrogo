@@ -141,7 +141,17 @@ Both single-listener and multi-listener setups are supported:
 
 With `listeners[]`, you can expose different inbound protocols on different ports for different scenarios.
 
-### 3. Start the service
+### 3. Install from GitHub Releases
+
+If you do not want to build from source, you can download a prebuilt archive from GitHub Releases.
+
+Current release artifacts are planned for:
+- Linux amd64 / arm64
+- macOS amd64 / arm64
+
+After downloading a release archive, extract it and run the `syrogo` binary directly.
+
+### 4. Start the service
 
 Prefer:
 
@@ -151,7 +161,7 @@ make run
 
 If you only want the smallest local verification path, you can point a route to the `mock` outbound.
 
-### 4. Check health
+### 5. Check health
 
 ```bash
 curl http://127.0.0.1:8080/healthz
@@ -159,14 +169,14 @@ curl http://127.0.0.1:8080/healthz
 
 If your listen address is not `:8080`, replace it with your actual config.
 
-### 5. Verify protocol entrypoints
+### 6. Verify protocol entrypoints
 
 Recommended paths to verify first:
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
 - `POST /v1/messages`
 
-### 6. Declare Responses compatibility
+### 7. Declare Responses compatibility
 
 If an `openai_responses` upstream only supports part of the official Responses API, you can declare compatibility boundaries explicitly on the outbound:
 
@@ -184,7 +194,7 @@ outbounds:
       responses_assistant_history_native: true
 ```
 
-### 7. Local debugging
+### 8. Local debugging
 
 For local development, you can use:
 

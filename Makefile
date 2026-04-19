@@ -7,6 +7,9 @@ dev:
 build:
 	go build -o ./bin/syrogo ./cmd/syrogo
 
+lint:
+	golangci-lint run
+
 fmt:
 	goimports -w ./cmd ./internal
 

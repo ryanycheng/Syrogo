@@ -2,6 +2,7 @@ bin/
 dist/
 tmp/
 docs/local/
+syrogo
 coverage.out
 *.test
 *.out

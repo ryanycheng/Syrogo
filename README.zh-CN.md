@@ -141,7 +141,17 @@ cp configs/config.example.yaml configs/config.yaml
 
 使用 `listeners[]` 时，可以把不同入口挂到不同端口，按场景暴露不同协议。
 
-### 3. 启动服务
+### 3. 从 GitHub Releases 下载
+
+如果你不想从源码构建，可以直接从 GitHub Releases 下载预编译压缩包。
+
+当前计划提供的发布制品平台：
+- Linux amd64 / arm64
+- macOS amd64 / arm64
+
+下载后解压，直接运行其中的 `syrogo` 二进制即可。
+
+### 4. 启动服务
 
 优先使用：
 
@@ -151,7 +161,7 @@ make run
 
 如果只想做最小本地验证，也可以把某个 route 指到 `mock` outbound。
 
-### 4. 检查健康状态
+### 5. 检查健康状态
 
 ```bash
 curl http://127.0.0.1:8080/healthz
@@ -159,14 +169,14 @@ curl http://127.0.0.1:8080/healthz
 
 如果你的监听端口不是 `:8080`，请按实际配置替换。
 
-### 5. 验证协议入口
+### 6. 验证协议入口
 
 当前建议优先验证：
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
 - `POST /v1/messages`
 
-### 6. 声明 Responses 兼容能力
+### 7. 声明 Responses 兼容能力
 
 如果某个 `openai_responses` 上游只兼容官方 Responses 的一部分能力，可以在 outbound 上显式声明能力边界：
 
@@ -184,7 +194,7 @@ outbounds:
       responses_assistant_history_native: true
 ```
 
-### 7. 本地调试
+### 8. 本地调试
 
 本地开发时可使用：
 
