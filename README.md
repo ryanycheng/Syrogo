@@ -1,152 +1,154 @@
 # Syrogo
 
-Syrogo 是一个面向多模型场景的 AI Gateway / Semantic Router。
+[中文](./README.zh-CN.md) | English
 
-它不是只做单一协议转发的代理层，而是一个放在客户端与上游模型之间的中间系统，用来统一承接：
-- 多种入口协议
-- 多上游 provider 接入
-- 按客户端场景进行路由
-- failover / round_robin 等基础调度
-- 后续额度切换、统计、治理与多节点串接能力
+Syrogo is an AI Gateway / Semantic Router for multi-model scenarios.
 
-当前项目仍处于 0→1 骨架建设阶段，优先目标是把服务主链路、协议边界与路由模型打稳。
+It is not just a thin proxy for forwarding a single protocol. It sits between clients and upstream model providers to unify:
+- multiple inbound protocols
+- multiple upstream providers
+- routing by client scenario
+- basic scheduling such as failover and round_robin
+- future governance capabilities such as quota switching, usage statistics, and multi-node chaining
 
----
-
-## 为什么做这个项目
-
-真实模型接入场景里，客户端协议、上游协议、模型命名、鉴权方式、稳定性策略都不统一。
-
-Syrogo 想解决的不是“再包一层 HTTP”，而是把这些变化收敛到清晰边界内：
-- 客户端按自己熟悉的协议接入
-- 系统内部转换成统一中立模型
-- 路由层只关注流量该去哪
-- provider 层只关注如何对接具体上游
-- 最终再按客户端期望的协议输出
-
-这样可以让接入、路由、切换、治理彼此解耦，而不是散落在每个 provider 或每条 handler 分支里。
+The project is still in the 0→1 bootstrap stage. The current priority is to stabilize the main service path, protocol boundaries, and routing model.
 
 ---
 
-## 设计原则
+## Why this project exists
 
-- 先做最小可运行闭环，再做能力扩展
-- 优先稳定 `cmd + internal` 分层，不为了“看起来标准”提前拆 `pkg`
-- `gateway` 负责入口协议解析与响应序列化
-- `runtime` 负责中立请求、响应与流事件模型
-- `router` / `execution` 负责路由决策与执行，不承担协议适配
-- `provider` 负责出站协议编码、上游调用与结果解码
-- 流式与非流式尽量共享同一套内部抽象，只在边界层做协议映射
+In real-world model access scenarios, client protocols, upstream protocols, model naming, authentication methods, and reliability strategies are often inconsistent.
+
+Syrogo is not trying to be “just another HTTP wrapper”. Its goal is to keep these moving parts within clear boundaries:
+- clients connect using the protocol they already know
+- requests are normalized into a unified internal model
+- routing focuses only on where traffic should go
+- providers focus only on how to talk to specific upstreams
+- responses are returned in the protocol the client expects
+
+This keeps access, routing, failover, and governance decoupled instead of scattering them across every provider and handler branch.
 
 ---
 
-## 当前已实现能力
+## Design principles
 
-当前版本已经支持：
+- Build the smallest runnable loop first, then expand capabilities
+- Keep the `cmd + internal` structure stable instead of introducing `pkg` too early just to look “standard”
+- Let `gateway` handle inbound protocol parsing and response serialization
+- Let `runtime` hold the neutral request, response, and stream models
+- Let `router` / `execution` handle routing and execution rather than protocol adaptation
+- Let `provider` handle outbound encoding, upstream calls, and result decoding
+- Reuse the same internal abstractions for streaming and non-streaming as much as possible, and keep protocol-specific mapping at the boundary
 
-- Go HTTP 服务启动与优雅退出
-- 配置加载与基础校验
+---
+
+## Current capabilities
+
+The current version supports:
+
+- Go HTTP service startup and graceful shutdown
+- config loading and basic validation
 - `GET /healthz`
-- 单监听与多监听配置
-- 每个 listener 可绑定不同入口
-- 三类入口协议
+- single-listener and multi-listener configuration
+- binding different inbounds to different listeners
+- three inbound protocols
   - `POST /v1/chat/completions`
   - `POST /v1/responses`
   - `POST /v1/messages`
-- 按客户端场景进行 tag-first routing
-- 单条规则内支持：
+- tag-first routing by client scenario
+- per-rule support for:
   - `failover`
   - `round_robin`
-- 支持按路由指定目标模型
-- 多类出站协议
+- route-level target model selection
+- multiple outbound protocols
   - `mock`
   - `openai_chat`
   - `openai_responses`
   - `anthropic_messages`
-- OpenAI-compatible 与 Anthropic-compatible 上游调用
-- 基础 SSE 流式返回
-- 最小 tool calling 闭环
-- `openai_responses` 的兼容能力声明
-- 本地开发日志与 trace 调试能力
-- 关键链路单元测试、回归测试与流程测试
+- OpenAI-compatible and Anthropic-compatible upstream calls
+- basic SSE streaming responses
+- a minimal tool-calling loop
+- `openai_responses` compatibility declarations
+- local development logging and trace debugging
+- unit, regression, and flow/integration coverage for key paths
 
 ---
 
-## 项目结构
+## Project structure
 
 ```text
 cmd/
-  syrogo/                    # 程序入口
+  syrogo/                    # program entry
 
 internal/
-  app/                       # 应用装配
-  config/                    # 配置定义、加载、校验
-  execution/                 # 执行计划消费与 fallback
-  eventstream/               # 中立流事件整理与快照
-  gateway/                   # inbound protocol / HTTP handler / 响应序列化
-  provider/                  # outbound protocol / 上游适配
-  router/                    # tag-first 路由决策
-  runtime/                   # 中立标准模型
-  server/                    # HTTP server 生命周期
+  app/                       # application wiring
+  config/                    # config definitions, loading, validation
+  execution/                 # execution plan consumption and fallback
+  eventstream/               # neutral stream event normalization and snapshots
+  gateway/                   # inbound protocol / HTTP handler / response serialization
+  provider/                  # outbound protocol / upstream adaptation
+  router/                    # tag-first routing decisions
+  runtime/                   # neutral runtime model
+  server/                    # HTTP server lifecycle
 
 configs/
-  config.example.yaml        # 功能展示版配置
-  config.yaml                # 本地手测配置（已 gitignore）
+  config.example.yaml        # feature-oriented example config
+  config.yaml                # local manual test config (gitignored)
 ```
 
 ---
 
-## 快速开始
+## Quick start
 
-### 1. 准备配置
+### 1. Prepare config
 
-从示例配置复制一份本地配置：
+Copy the example config to a local config file:
 
 ```bash
 cp configs/config.example.yaml configs/config.yaml
 ```
 
-然后把 `configs/config.yaml` 中的 token、endpoint、auth_token 改成你本地可用的真实值。
+Then replace the token, endpoint, and auth_token fields in `configs/config.yaml` with real values available in your environment.
 
-注意：当前实现不会自动读取 `.env`，也不会自动展开 `${VAR}`。如果配置文件里保留占位符字符串，它会被原样读入。
+Note: the current implementation does not automatically read `.env` and does not expand `${VAR}`. If placeholder strings remain in the config file, they will be read as-is.
 
-### 2. 选择监听与入口
+### 2. Choose listeners and inbounds
 
-当前既支持单监听，也支持多监听：
+Both single-listener and multi-listener setups are supported:
 
-- `server.listen`：单监听
-- `listeners[]`：多监听
+- `server.listen`: single listener
+- `listeners[]`: multiple listeners
 
-使用 `listeners[]` 时，可以把不同入口挂到不同端口，按场景暴露不同协议。
+With `listeners[]`, you can expose different inbound protocols on different ports for different scenarios.
 
-### 3. 启动服务
+### 3. Start the service
 
-优先使用：
+Prefer:
 
 ```bash
 make run
 ```
 
-如果只想做最小本地验证，也可以把某个 route 指到 `mock` outbound。
+If you only want the smallest local verification path, you can point a route to the `mock` outbound.
 
-### 4. 检查健康状态
+### 4. Check health
 
 ```bash
 curl http://127.0.0.1:8080/healthz
 ```
 
-如果你的监听端口不是 `:8080`，请按实际配置替换。
+If your listen address is not `:8080`, replace it with your actual config.
 
-### 5. 验证协议入口
+### 5. Verify protocol entrypoints
 
-当前建议优先验证：
+Recommended paths to verify first:
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
 - `POST /v1/messages`
 
-### 6. 声明 Responses 兼容能力
+### 6. Declare Responses compatibility
 
-如果某个 `openai_responses` 上游只兼容官方 Responses 的一部分能力，可以在 outbound 上显式声明能力边界：
+If an `openai_responses` upstream only supports part of the official Responses API, you can declare compatibility boundaries explicitly on the outbound:
 
 ```yaml
 outbounds:
@@ -162,54 +164,54 @@ outbounds:
       responses_assistant_history_native: true
 ```
 
-### 7. 本地调试
+### 7. Local debugging
 
-本地开发时可使用：
+For local development, you can use:
 
-- `--dev-log`：把日志同时输出到 stdout 与 `tmp/dev.log`
-- `SYROGO_TRACE=1` 或 `SYROGO_TRACE=full`：输出 trace 调试文件到 `tmp/trace`
+- `--dev-log`: write logs to both stdout and `tmp/dev.log`
+- `SYROGO_TRACE=1` or `SYROGO_TRACE=full`: write trace files to `tmp/trace`
 
-更细的协议语义、调试开关与维护约束，请看：
+For more detailed protocol semantics, debug switches, and maintenance constraints, see:
 - `.claude/rules/architecture.md`
 - `.claude/rules/engineering.md`
 
 ---
 
-## 当前边界
+## Current boundaries
 
-当前阶段还**不追求**：
+At the current stage, Syrogo is **not** trying to optimize for:
 
-- 复杂插件系统
-- gRPC / MCP / WebSocket 等额外接入层
-- 完整 semantic routing
-- 对外 Go SDK 或 `pkg` 级公共库抽象
-- 为未来假设需求提前搭建平台层
-- multimodal 全量无损支持
-- 所有上游协议能力的一比一透传
+- complex plugin systems
+- extra access layers such as gRPC / MCP / WebSocket
+- full semantic routing
+- a public Go SDK or `pkg`-level shared library surface
+- a platform layer built in advance for hypothetical future needs
+- full-fidelity multimodal support
+- one-to-one passthrough for every upstream protocol feature
 
-当前更重要的是：
+What matters more right now is:
 
-**先把协议入口、内部抽象、路由执行与 provider 边界稳定下来。**
+**stabilizing protocol entrypoints, internal abstractions, routing execution, and provider boundaries first.**
 
 ---
 
 ## Roadmap
 
-接下来优先推进的方向：
+The next priorities are:
 
-- 持续稳固多协议入口与多协议出站闭环
-- 继续增强 routing、fallback、round_robin 的可验证性
-- 完善 provider 适配边界与错误分类
-- 逐步补齐治理相关能力
-  - 额度切换
-  - 统计
-  - 多节点串接
-- 在不破坏主链路抽象的前提下，再扩展更多 provider 与协议能力
+- keep strengthening the multi-inbound / multi-outbound closed loop
+- improve the verifiability of routing, fallback, and round_robin behavior
+- refine provider adaptation boundaries and error classification
+- gradually add governance-related capabilities
+  - quota switching
+  - statistics
+  - multi-node chaining
+- extend more providers and protocol capabilities without breaking the main abstraction path
 
 ---
 
-## 说明
+## Notes
 
-README 主要面向项目介绍、功能边界、配置用法和使用入口。
+This README focuses on project positioning, capability boundaries, configuration usage, and entry-level usage.
 
-更细的链路维护知识、协议边界、流式抽象、测试门槛与改动 guardrails，统一沉淀在 `.claude/rules` 中，避免产品说明与开发规则混写。
+More detailed maintenance knowledge about protocol boundaries, stream abstractions, test thresholds, and change guardrails is documented in `.claude/rules` to keep product-facing documentation separate from development rules.

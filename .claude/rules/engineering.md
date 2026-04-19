@@ -86,6 +86,7 @@
 - README 应该承担总览与导航职责；当细节对维护者更重要时，优先链接到 `.claude/rules/architecture.md`、`.claude/rules/engineering.md` 或后续专门文档。
 - README 的快速开始应尽量短，优先给出最小可运行路径，而不是一次解释全部内部原理。
 - 当 README 与规则发生取舍冲突时：README 优先服务“用户理解产品和上手”，rules 优先服务“维护者理解实现与约束”。
+- 若维护双语 README，默认对外首页使用英文 `README.md`，中文内容放在 `README.zh-CN.md`，并在两个文件顶部提供显式语言切换链接。
 
 ## Documentation updates
 - README 负责项目定位、功能边界、配置用法、快速体验与 roadmap，不承担细粒度排障手册职责。
