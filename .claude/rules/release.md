@@ -19,3 +19,4 @@
 ## Collaboration
 - 项目级发布 skill 位于 `.claude/skills/release/`。
 - 当用户要求发布版本时，优先使用该 skill，并复用现有 workflow，而不是本地重写发布流程。
+- 发布完成后，默认补一份适合 GitHub Release 的 release note 摘要，便于直接复用。
