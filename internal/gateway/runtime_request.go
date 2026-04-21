@@ -31,6 +31,15 @@ type inboundToolDefinition struct {
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
+type openAIChatToolDefinition struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Parameters  json.RawMessage `json:"parameters"`
+	} `json:"function"`
+}
+
 type inboundRequest struct {
 	Model              string                  `json:"model"`
 	System             json.RawMessage         `json:"system"`
@@ -45,20 +54,32 @@ type inboundRequest struct {
 	OutputConfig       json.RawMessage         `json:"output_config"`
 }
 
-func buildRuntimeRequest(req inboundRequest) (runtime.Request, error) {
-	semanticReq, err := buildSemanticRequest(req)
+func buildRuntimeRequestFromOpenAIChat(req inboundRequest, tools []openAIChatToolDefinition) (runtime.Request, error) {
+	semanticReq, err := buildSemanticRequest(req, func() ([]semantic.ToolDefinition, error) {
+		return parseOpenAIChatTools(tools)
+	})
 	if err != nil {
 		return runtime.Request{}, err
 	}
 	return lowerSemanticRequest(semanticReq), nil
 }
 
-func buildSemanticRequest(req inboundRequest) (semantic.Request, error) {
+func buildRuntimeRequest(req inboundRequest) (runtime.Request, error) {
+	semanticReq, err := buildSemanticRequest(req, func() ([]semantic.ToolDefinition, error) {
+		return parseInboundTools(req.Tools)
+	})
+	if err != nil {
+		return runtime.Request{}, err
+	}
+	return lowerSemanticRequest(semanticReq), nil
+}
+
+func buildSemanticRequest(req inboundRequest, toolsParser func() ([]semantic.ToolDefinition, error)) (semantic.Request, error) {
 	instructions, systemText, err := parseInboundSystem(req.System)
 	if err != nil {
 		return semantic.Request{}, err
 	}
-	tools, err := parseInboundTools(req.Tools)
+	tools, err := toolsParser()
 	if err != nil {
 		return semantic.Request{}, err
 	}
@@ -125,6 +146,37 @@ func parseInboundSystem(raw json.RawMessage) ([]semantic.Segment, string, error)
 	}
 
 	return nil, "", fmt.Errorf("unsupported system content")
+}
+
+func parseOpenAIChatTools(raw []openAIChatToolDefinition) ([]semantic.ToolDefinition, error) {
+	tools := make([]semantic.ToolDefinition, 0, len(raw))
+	for _, tool := range raw {
+		if tool.Type != "" && tool.Type != "function" {
+			return nil, fmt.Errorf("unsupported tool type %q", tool.Type)
+		}
+		if tool.Function.Name == "" {
+			return nil, fmt.Errorf("tool name is required")
+		}
+		inputSchema := json.RawMessage(`{}`)
+		if len(tool.Function.Parameters) > 0 {
+			var schema any
+			if err := json.Unmarshal(tool.Function.Parameters, &schema); err != nil {
+				return nil, fmt.Errorf("invalid tool parameters for %q: %w", tool.Function.Name, err)
+			}
+			encoded, err := json.Marshal(schema)
+			if err != nil {
+				return nil, fmt.Errorf("marshal tool parameters for %q: %w", tool.Function.Name, err)
+			}
+			inputSchema = encoded
+		}
+		tools = append(tools, semantic.ToolDefinition{
+			Type:        "function",
+			Name:        tool.Function.Name,
+			Description: tool.Function.Description,
+			InputSchema: inputSchema,
+		})
+	}
+	return tools, nil
 }
 
 func parseInboundTools(raw []inboundToolDefinition) ([]semantic.ToolDefinition, error) {

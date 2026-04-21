@@ -13,6 +13,20 @@ import (
 
 type openAIChatCodec struct{}
 
+type openAIChatInboundRequest struct {
+	Model              string                    `json:"model"`
+	System             json.RawMessage           `json:"system"`
+	MaxTokens          int                       `json:"max_tokens"`
+	Messages           []inboundMessage          `json:"messages"`
+	Tools              []openAIChatToolDefinition `json:"tools"`
+	Stream             bool                      `json:"stream"`
+	PreviousResponseID string                    `json:"previous_response_id"`
+	Metadata           json.RawMessage           `json:"metadata"`
+	Thinking           json.RawMessage           `json:"thinking"`
+	ContextManagement  json.RawMessage           `json:"context_management"`
+	OutputConfig       json.RawMessage           `json:"output_config"`
+}
+
 func (openAIChatCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) {
 	if r.Method != http.MethodPost {
 		logger.Warn("request rejected", slog.String("reason", "method not allowed"))
@@ -27,7 +41,7 @@ func (openAIChatCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var req inboundRequest
+	var req openAIChatInboundRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		logger.Warn("request decode failed",
 			slog.Any("error", err),
@@ -50,7 +64,18 @@ func (openAIChatCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	internalReq, err := buildRuntimeRequest(req)
+	internalReq, err := buildRuntimeRequestFromOpenAIChat(inboundRequest{
+		Model:              req.Model,
+		System:             req.System,
+		MaxTokens:          req.MaxTokens,
+		Messages:           req.Messages,
+		Stream:             req.Stream,
+		PreviousResponseID: req.PreviousResponseID,
+		Metadata:           req.Metadata,
+		Thinking:           req.Thinking,
+		ContextManagement:  req.ContextManagement,
+		OutputConfig:       req.OutputConfig,
+	}, req.Tools)
 	if err != nil {
 		logger.Warn("request normalize failed",
 			slog.String("model", req.Model),

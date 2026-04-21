@@ -905,6 +905,42 @@ func TestBuildRuntimeRequestAnthropicMixedAssistantContentSplitsTextAndToolCall(
 	}
 }
 
+func TestBuildRuntimeRequestFromOpenAIChatParsesOfficialToolsFormat(t *testing.T) {
+	req := inboundRequest{
+		Model: "gpt-4o-mini",
+		Messages: []inboundMessage{{
+			Role:    "user",
+			Content: json.RawMessage(`"hello"`),
+		}},
+	}
+	tools := []openAIChatToolDefinition{{Type: "function"}}
+	tools[0].Function.Name = "get_weather"
+	tools[0].Function.Description = "Query weather by city"
+	tools[0].Function.Parameters = json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`)
+
+	got, err := buildRuntimeRequestFromOpenAIChat(req, tools)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequestFromOpenAIChat() error = %v", err)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("len(got.Tools) = %d, want 1", len(got.Tools))
+	}
+	if got.Tools[0].Name != "get_weather" || got.Tools[0].Description != "Query weather by city" {
+		t.Fatalf("got.Tools[0] = %#v, want parsed OpenAI tool metadata", got.Tools[0])
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(got.Tools[0].InputSchema, &schema); err != nil {
+		t.Fatalf("json.Unmarshal(got.Tools[0].InputSchema) error = %v", err)
+	}
+	if schema["type"] != "object" {
+		t.Fatalf("schema[type] = %#v, want object", schema["type"])
+	}
+	props, _ := schema["properties"].(map[string]any)
+	if _, ok := props["city"]; !ok {
+		t.Fatalf("schema[properties] = %#v, want city property", schema["properties"])
+	}
+}
+
 func TestBuildRuntimeRequestRejectsToolWithoutName(t *testing.T) {
 	req := inboundRequest{
 		Model: "claude-sonnet-4-5",
@@ -1140,6 +1176,85 @@ func TestChatCompletionsStreamsSSE(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "data: [DONE]\n\n") {
 		t.Fatalf("body = %q, want done sentinel", w.Body.String())
+	}
+}
+
+func TestChatCompletionsAcceptsOfficialToolsFormat(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Tools []struct {
+				Type     string `json:"type"`
+				Function struct {
+					Name        string          `json:"name"`
+					Description string          `json:"description"`
+					Parameters  json.RawMessage `json:"parameters"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("json.NewDecoder() error = %v", err)
+		}
+		if len(req.Tools) != 1 || req.Tools[0].Type != "function" || req.Tools[0].Function.Name != "get_weather" {
+			t.Fatalf("req.Tools = %#v, want official OpenAI chat tools forwarded", req.Tools)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl_123",
+			"object": "chat.completion",
+			"model":  "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"index": 0,
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": "hello from upstream",
+				},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"openai": provider.NewOpenAICompatible("openai", upstream.URL, []string{"test-key"}, upstream.Client()),
+	}, testRoutingConfig(), testInbounds(), []config.OutboundSpec{{
+		Name:      "openai",
+		Protocol:  "openai_chat",
+		Endpoint:  upstream.URL,
+		AuthToken: "test-key",
+		Tag:       "mock-tag",
+	}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-4o-mini",
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": "hello",
+		}},
+		"tools": []map[string]any{{
+			"type": "function",
+			"function": map[string]any{
+				"name": "get_weather",
+				"description": "Query weather by city",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{"city": map[string]any{"type": "string"}},
+					"required": []string{"city"},
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "hello from upstream") {
+		t.Fatalf("body = %q, want upstream response", w.Body.String())
 	}
 }
 
