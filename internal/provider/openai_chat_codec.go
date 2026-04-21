@@ -20,7 +20,7 @@ type openAIChatRequest struct {
 	Messages   []openAIChatMessage    `json:"messages"`
 	MaxTokens  int                    `json:"max_tokens,omitempty"`
 	Tools      []openAIToolDefinition `json:"tools,omitempty"`
-	ToolChoice string                 `json:"tool_choice,omitempty"`
+	ToolChoice json.RawMessage        `json:"tool_choice,omitempty"`
 }
 
 type openAIToolDefinition struct {
@@ -53,6 +53,11 @@ type openAIChatResponseEnvelope struct {
 		FinishReason string            `json:"finish_reason"`
 		Message      openAIChatMessage `json:"message"`
 	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage,omitempty"`
 }
 
 func encodeOpenAIChatRequest(req runtime.Request) any {
@@ -115,7 +120,11 @@ func encodeOpenAIChatRequest(req runtime.Request) any {
 			})
 		}
 		if len(payload.Tools) > 0 {
-			payload.ToolChoice = "auto"
+			if len(req.ToolChoice) > 0 {
+				payload.ToolChoice = append(json.RawMessage(nil), req.ToolChoice...)
+			} else {
+				payload.ToolChoice = json.RawMessage(`"auto"`)
+			}
 		}
 	}
 	return payload
@@ -179,5 +188,17 @@ func decodeOpenAIChatResponse(resp openAIChatResponseEnvelope) (runtime.Response
 		Model:        resp.Model,
 		FinishReason: finishReason,
 		Message:      message,
+		Usage:        usageFromOpenAIChatEnvelope(resp),
 	}, nil
+}
+
+func usageFromOpenAIChatEnvelope(resp openAIChatResponseEnvelope) *runtime.Usage {
+	if resp.Usage == nil {
+		return nil
+	}
+	return &runtime.Usage{
+		InputTokens:  resp.Usage.PromptTokens,
+		OutputTokens: resp.Usage.CompletionTokens,
+		TotalTokens:  resp.Usage.TotalTokens,
+	}
 }

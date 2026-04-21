@@ -69,6 +69,7 @@ type GenerateOptions struct {
 	ThinkingType       string
 	ContextManagement  json.RawMessage
 	OutputEffort       string
+	ToolChoice         json.RawMessage
 }
 
 const (

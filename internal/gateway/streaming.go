@@ -35,8 +35,9 @@ func (h *Handler) handleOpenAIStreaming(w http.ResponseWriter, r *http.Request, 
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
+	toolArgumentSnapshots := map[int]string{}
 	for event := range events {
-		if err := writeOpenAISSE(w, openAIStreamChunk(event)); err != nil {
+		if err := writeOpenAISSE(w, openAIStreamChunkWithArgumentsDelta(event, toolArgumentSnapshots)); err != nil {
 			logger.Error("stream write failed", kvAny("error", err))
 			return
 		}

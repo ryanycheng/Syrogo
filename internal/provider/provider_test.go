@@ -105,8 +105,8 @@ func TestEncodeOpenAIChatRequestIncludesToolDefinitions(t *testing.T) {
 	if len(tools) != 1 {
 		t.Fatalf("len(tools) = %d, want 1", len(tools))
 	}
-	if body.ToolChoice != "auto" {
-		t.Fatalf("body.ToolChoice = %q, want auto", body.ToolChoice)
+	if string(body.ToolChoice) != `"auto"` {
+		t.Fatalf("body.ToolChoice = %s, want \"auto\"", string(body.ToolChoice))
 	}
 	if tools[0].Type != "function" || tools[0].Function.Name != "get_weather" || tools[0].Function.Description != "Query weather by city" {
 		t.Fatalf("tools[0] = %#v, want encoded tool definition", tools[0])
@@ -152,8 +152,8 @@ func TestEncodeOpenAIChatRequestKeepsClaudeCodeBuiltinTools(t *testing.T) {
 	if body.Tools[0].Function.Name != "CronCreate" || body.Tools[1].Function.Name != "Read" || body.Tools[2].Function.Name != "TodoWrite" || body.Tools[3].Function.Name != "get_weather" {
 		t.Fatalf("body.Tools = %#v, want builtin tools preserved", body.Tools)
 	}
-	if body.ToolChoice != "auto" {
-		t.Fatalf("body.ToolChoice = %q, want auto", body.ToolChoice)
+	if string(body.ToolChoice) != `"auto"` {
+		t.Fatalf("body.ToolChoice = %s, want \"auto\"", string(body.ToolChoice))
 	}
 }
 
@@ -174,8 +174,8 @@ func TestEncodeOpenAIChatRequestDropsNonObjectSchemaTools(t *testing.T) {
 	if len(body.Tools) != 0 {
 		t.Fatalf("len(body.Tools) = %d, want 0", len(body.Tools))
 	}
-	if body.ToolChoice != "" {
-		t.Fatalf("body.ToolChoice = %q, want empty", body.ToolChoice)
+	if len(body.ToolChoice) != 0 {
+		t.Fatalf("body.ToolChoice = %s, want empty", string(body.ToolChoice))
 	}
 }
 
@@ -232,6 +232,11 @@ func TestDecodeOpenAIChatResponseMapsAssistantMessage(t *testing.T) {
 		}{
 			{Message: openAIChatMessage{Role: "assistant", Content: "hello from upstream"}},
 		},
+		Usage: &struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		}{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 	})
 	if err != nil {
 		t.Fatalf("decodeOpenAIChatResponse() error = %v", err)
@@ -241,6 +246,9 @@ func TestDecodeOpenAIChatResponseMapsAssistantMessage(t *testing.T) {
 	}
 	if got := resp.Message.Parts[0].Text; got != "hello from upstream" {
 		t.Fatalf("resp.Message.Parts[0].Text = %q, want hello from upstream", got)
+	}
+	if resp.Usage == nil || resp.Usage.TotalTokens != 15 {
+		t.Fatalf("resp.Usage = %#v, want total tokens 15", resp.Usage)
 	}
 }
 

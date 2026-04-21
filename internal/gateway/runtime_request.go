@@ -46,6 +46,7 @@ type inboundRequest struct {
 	MaxTokens          int                     `json:"max_tokens"`
 	Messages           []inboundMessage        `json:"messages"`
 	Tools              []inboundToolDefinition `json:"tools"`
+	ToolChoice         json.RawMessage         `json:"tool_choice"`
 	Stream             bool                    `json:"stream"`
 	PreviousResponseID string                  `json:"previous_response_id"`
 	Metadata           json.RawMessage         `json:"metadata"`
@@ -96,6 +97,7 @@ func buildSemanticRequest(req inboundRequest, toolsParser func() ([]semantic.Too
 			ThinkingType:       parseThinkingType(req.Thinking),
 			ContextManagement:  normalizedOptionalJSONObject(req.ContextManagement),
 			OutputEffort:       parseOutputEffort(req.OutputConfig),
+			ToolChoice:         append(json.RawMessage(nil), req.ToolChoice...),
 		},
 	}
 	if systemText != "" && len(result.Instructions) == 0 {
@@ -275,7 +277,7 @@ func normalizeToolTurnSegments(toolCallID string, segments []semantic.Segment) [
 }
 
 func parseInboundContent(role string, raw json.RawMessage) ([]semantic.Segment, string, error) {
-	if len(raw) == 0 {
+	if len(raw) == 0 || string(raw) == "null" {
 		return []semantic.Segment{{Kind: semantic.SegmentText, Text: ""}}, "", nil
 	}
 
@@ -433,6 +435,7 @@ func lowerSemanticRequest(req semantic.Request) runtime.Request {
 		OutputEffort:       req.Options.OutputEffort,
 		Messages:           make([]runtime.Message, 0, len(req.Turns)),
 		Tools:              make([]runtime.ToolDefinition, 0, len(req.Tools)),
+		ToolChoice:         append(json.RawMessage(nil), req.Options.ToolChoice...),
 	}
 	for _, tool := range req.Tools {
 		result.Tools = append(result.Tools, runtime.ToolDefinition{Type: tool.Type, Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema, Format: append(json.RawMessage(nil), tool.Format...), Raw: append(json.RawMessage(nil), tool.Raw...)})

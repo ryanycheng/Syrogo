@@ -941,6 +941,42 @@ func TestBuildRuntimeRequestFromOpenAIChatParsesOfficialToolsFormat(t *testing.T
 	}
 }
 
+func TestBuildRuntimeRequestFromOpenAIChatPreservesToolChoiceAndNullContent(t *testing.T) {
+	req := inboundRequest{
+		Model:      "gpt-4o-mini",
+		ToolChoice: json.RawMessage(`{"type":"function","function":{"name":"get_weather"}}`),
+		Messages: []inboundMessage{{
+			Role:    "assistant",
+			Content: json.RawMessage(`null`),
+			ToolCalls: []inboundToolCall{{
+				ID:   "call_123",
+				Type: "function",
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{Name: "get_weather", Arguments: `{"city":"shanghai"}`},
+			}},
+		}},
+	}
+
+	got, err := buildRuntimeRequestFromOpenAIChat(req, nil)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequestFromOpenAIChat() error = %v", err)
+	}
+	if string(got.ToolChoice) != `{"type":"function","function":{"name":"get_weather"}}` {
+		t.Fatalf("got.ToolChoice = %s, want preserved function tool_choice", string(got.ToolChoice))
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("len(got.Messages) = %d, want 1", len(got.Messages))
+	}
+	if got.Messages[0].Role != runtime.MessageRoleAssistant {
+		t.Fatalf("got.Messages[0].Role = %q, want assistant", got.Messages[0].Role)
+	}
+	if len(got.Messages[0].ToolCalls) != 1 || got.Messages[0].ToolCalls[0].Name != "get_weather" {
+		t.Fatalf("got.Messages[0].ToolCalls = %#v, want preserved tool call", got.Messages[0].ToolCalls)
+	}
+}
+
 func TestBuildRuntimeRequestRejectsToolWithoutName(t *testing.T) {
 	req := inboundRequest{
 		Model: "claude-sonnet-4-5",
@@ -1228,18 +1264,18 @@ func TestChatCompletionsAcceptsOfficialToolsFormat(t *testing.T) {
 	body, err := json.Marshal(map[string]any{
 		"model": "gpt-4o-mini",
 		"messages": []map[string]any{{
-			"role": "user",
+			"role":    "user",
 			"content": "hello",
 		}},
 		"tools": []map[string]any{{
 			"type": "function",
 			"function": map[string]any{
-				"name": "get_weather",
+				"name":        "get_weather",
 				"description": "Query weather by city",
 				"parameters": map[string]any{
-					"type": "object",
+					"type":       "object",
 					"properties": map[string]any{"city": map[string]any{"type": "string"}},
-					"required": []string{"city"},
+					"required":   []string{"city"},
 				},
 			},
 		}},
@@ -1255,6 +1291,86 @@ func TestChatCompletionsAcceptsOfficialToolsFormat(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "hello from upstream") {
 		t.Fatalf("body = %q, want upstream response", w.Body.String())
+	}
+}
+
+func TestChatCompletionsWritesArgumentsDeltaForStreamingToolCalls(t *testing.T) {
+	snapshots := map[int]string{}
+
+	first := openAIStreamChunkWithArgumentsDelta(runtime.StreamEvent{
+		Type:          runtime.StreamEventContentDelta,
+		ResponseID:    "chatcmpl_123",
+		Model:         "gpt-4o-mini",
+		ToolCallIndex: 0,
+		ToolCall: &runtime.ToolCall{
+			ID:        "call_123",
+			Name:      "get_weather",
+			Arguments: `{"city":"sha`,
+		},
+	}, snapshots)
+	second := openAIStreamChunkWithArgumentsDelta(runtime.StreamEvent{
+		Type:          runtime.StreamEventContentDelta,
+		ResponseID:    "chatcmpl_123",
+		Model:         "gpt-4o-mini",
+		ToolCallIndex: 0,
+		ToolCall: &runtime.ToolCall{
+			ID:        "call_123",
+			Name:      "get_weather",
+			Arguments: `{"city":"shanghai"}`,
+		},
+	}, snapshots)
+
+	firstBody, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("json.Marshal(first) error = %v", err)
+	}
+	secondBody, err := json.Marshal(second)
+	if err != nil {
+		t.Fatalf("json.Marshal(second) error = %v", err)
+	}
+
+	if !strings.Contains(string(firstBody), `"arguments":"{\"city\":\"sha"`) {
+		t.Fatalf("first chunk = %s, want first arguments delta", firstBody)
+	}
+	if !strings.Contains(string(secondBody), `"arguments":"nghai\"}"`) {
+		t.Fatalf("second chunk = %s, want incremental arguments delta", secondBody)
+	}
+	if strings.Contains(string(secondBody), `"arguments":"{\"city\":\"shanghai\"}"`) {
+		t.Fatalf("second chunk = %s, want delta not full snapshot", secondBody)
+	}
+}
+
+func TestChatCompletionsWritesFinishReasonUsageAndNullContentForToolCalls(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	w := httptest.NewRecorder()
+	writeOpenAIChatResponse(w, runtime.Response{
+		ID:           "chatcmpl_123",
+		Object:       "chat.completion",
+		Model:        "gpt-4o-mini",
+		FinishReason: runtime.FinishReasonToolUse,
+		Message: runtime.Message{
+			Role: runtime.MessageRoleAssistant,
+			ToolCalls: []runtime.ToolCall{{
+				ID:        "call_123",
+				Name:      "get_weather",
+				Arguments: `{"city":"shanghai"}`,
+			}},
+		},
+		Usage: &runtime.Usage{InputTokens: 11, OutputTokens: 7, TotalTokens: 18},
+	})
+	_ = h
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("body = %q, want tool_calls finish_reason", got)
+	}
+	if !strings.Contains(got, `"content":null`) {
+		t.Fatalf("body = %q, want null content for tool call message", got)
+	}
+	if !strings.Contains(got, `"prompt_tokens":11`) || !strings.Contains(got, `"completion_tokens":7`) || !strings.Contains(got, `"total_tokens":18`) {
+		t.Fatalf("body = %q, want OpenAI usage object", got)
 	}
 }
 

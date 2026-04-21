@@ -14,17 +14,18 @@ import (
 type openAIChatCodec struct{}
 
 type openAIChatInboundRequest struct {
-	Model              string                    `json:"model"`
-	System             json.RawMessage           `json:"system"`
-	MaxTokens          int                       `json:"max_tokens"`
-	Messages           []inboundMessage          `json:"messages"`
+	Model              string                     `json:"model"`
+	System             json.RawMessage            `json:"system"`
+	MaxTokens          int                        `json:"max_tokens"`
+	Messages           []inboundMessage           `json:"messages"`
 	Tools              []openAIChatToolDefinition `json:"tools"`
-	Stream             bool                      `json:"stream"`
-	PreviousResponseID string                    `json:"previous_response_id"`
-	Metadata           json.RawMessage           `json:"metadata"`
-	Thinking           json.RawMessage           `json:"thinking"`
-	ContextManagement  json.RawMessage           `json:"context_management"`
-	OutputConfig       json.RawMessage           `json:"output_config"`
+	ToolChoice         json.RawMessage            `json:"tool_choice"`
+	Stream             bool                       `json:"stream"`
+	PreviousResponseID string                     `json:"previous_response_id"`
+	Metadata           json.RawMessage            `json:"metadata"`
+	Thinking           json.RawMessage            `json:"thinking"`
+	ContextManagement  json.RawMessage            `json:"context_management"`
+	OutputConfig       json.RawMessage            `json:"output_config"`
 }
 
 func (openAIChatCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) {
@@ -69,6 +70,8 @@ func (openAIChatCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Request
 		System:             req.System,
 		MaxTokens:          req.MaxTokens,
 		Messages:           req.Messages,
+		Tools:              nil,
+		ToolChoice:         req.ToolChoice,
 		Stream:             req.Stream,
 		PreviousResponseID: req.PreviousResponseID,
 		Metadata:           req.Metadata,
@@ -116,9 +119,13 @@ func (openAIChatCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Request
 }
 
 func writeOpenAIChatResponse(w http.ResponseWriter, resp runtime.Response) {
+	content := any(firstTextPart(resp.Message))
+	if len(resp.Message.ToolCalls) > 0 && content == "" {
+		content = nil
+	}
 	message := map[string]any{
 		"role":    string(resp.Message.Role),
-		"content": firstTextPart(resp.Message),
+		"content": content,
 	}
 	if len(resp.Message.ToolCalls) > 0 {
 		toolCalls := make([]map[string]any, 0, len(resp.Message.ToolCalls))
@@ -138,18 +145,41 @@ func writeOpenAIChatResponse(w http.ResponseWriter, resp runtime.Response) {
 		message["tool_call_id"] = resp.Message.ToolCallID
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":     resp.ID,
-		"object": resp.Object,
-		"model":  resp.Model,
-		"choices": []map[string]any{{
-			"index":   0,
-			"message": message,
-		}},
-	})
+	choice := map[string]any{
+		"index":         0,
+		"message":       message,
+		"finish_reason": openAIFinishReason(resp.FinishReason),
+	}
+	body := map[string]any{
+		"id":      resp.ID,
+		"object":  resp.Object,
+		"model":   resp.Model,
+		"choices": []map[string]any{choice},
+	}
+	if resp.Usage != nil {
+		body["usage"] = map[string]any{
+			"prompt_tokens":     resp.Usage.InputTokens,
+			"completion_tokens": resp.Usage.OutputTokens,
+			"total_tokens":      resp.Usage.TotalTokens,
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
-func openAIStreamChunk(event runtime.StreamEvent) any {
+func openAIFinishReason(reason runtime.FinishReason) string {
+	switch reason {
+	case runtime.FinishReasonToolUse:
+		return "tool_calls"
+	case runtime.FinishReasonLength:
+		return "length"
+	case runtime.FinishReasonStop, runtime.FinishReasonEndTurn, runtime.FinishReasonError:
+		return "stop"
+	default:
+		return string(reason)
+	}
+}
+
+func openAIStreamChunkWithArgumentsDelta(event runtime.StreamEvent, toolArgumentSnapshots map[int]string) any {
 	chunk := map[string]any{
 		"id":     event.ResponseID,
 		"object": "chat.completion.chunk",
@@ -168,13 +198,19 @@ func openAIStreamChunk(event runtime.StreamEvent) any {
 			delta["content"] = event.Delta.Text
 		}
 		if event.ToolCall != nil {
+			arguments := event.ToolCall.Arguments
+			if toolArgumentSnapshots != nil {
+				previous := toolArgumentSnapshots[event.ToolCallIndex]
+				arguments = strings.TrimPrefix(arguments, previous)
+				toolArgumentSnapshots[event.ToolCallIndex] = event.ToolCall.Arguments
+			}
 			delta["tool_calls"] = []map[string]any{{
 				"index": event.ToolCallIndex,
 				"id":    event.ToolCall.ID,
 				"type":  "function",
 				"function": map[string]any{
 					"name":      event.ToolCall.Name,
-					"arguments": event.ToolCall.Arguments,
+					"arguments": arguments,
 				},
 			}}
 		}
@@ -188,7 +224,7 @@ func openAIStreamChunk(event runtime.StreamEvent) any {
 		chunk["choices"] = []map[string]any{{
 			"index":         0,
 			"delta":         map[string]any{},
-			"finish_reason": string(event.FinishReason),
+			"finish_reason": openAIFinishReason(event.FinishReason),
 		}}
 	case runtime.StreamEventError:
 		message := "stream error"

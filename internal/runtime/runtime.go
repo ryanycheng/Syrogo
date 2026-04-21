@@ -92,6 +92,7 @@ type Request struct {
 	MaxTokens          int
 	Messages           []Message
 	Tools              []ToolDefinition
+	ToolChoice         json.RawMessage
 	Stream             bool
 	PreviousResponseID string
 	Metadata           json.RawMessage
