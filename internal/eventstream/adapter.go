@@ -22,9 +22,13 @@ func EventsFromRuntimeResponse(resp runtime.Response) []Event {
 			block.Type = BlockTypeText
 			block.Text = part.Text
 		}
+		delta := Event{Type: EventTypeContentBlockDelta, MessageID: resp.ID, Model: resp.Model, Role: resp.Message.Role, BlockIndex: blockIndex, Block: &block}
+		if block.Type == BlockTypeText {
+			delta.TextDelta = block.Text
+		}
 		events = append(events,
 			Event{Type: EventTypeContentBlockStart, MessageID: resp.ID, Model: resp.Model, Role: resp.Message.Role, BlockIndex: blockIndex, Block: &block},
-			Event{Type: EventTypeContentBlockDelta, MessageID: resp.ID, Model: resp.Model, Role: resp.Message.Role, BlockIndex: blockIndex, Block: &block, TextDelta: block.Text},
+			delta,
 			Event{Type: EventTypeContentBlockStop, MessageID: resp.ID, Model: resp.Model, Role: resp.Message.Role, BlockIndex: blockIndex},
 		)
 		blockIndex++

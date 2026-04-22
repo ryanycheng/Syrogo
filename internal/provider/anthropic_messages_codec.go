@@ -33,6 +33,7 @@ type anthropicContentBlock struct {
 	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
+	Value     json.RawMessage `json:"value,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	IsError   bool            `json:"is_error,omitempty"`
 	Content   any             `json:"content,omitempty"`
@@ -83,7 +84,17 @@ func encodeAnthropicMessagesRequest(req runtime.Request) any {
 						encoded.Content = append(encoded.Content, anthropicContentBlock{Type: "text", Text: part.Text})
 					}
 				case runtime.ContentPartTypeJSON:
-					encoded.Content = append(encoded.Content, anthropicContentBlock{Type: "text", Text: string(part.Data)})
+					var value any
+					if err := json.Unmarshal(part.Data, &value); err != nil {
+						encoded.Content = append(encoded.Content, anthropicContentBlock{Type: "text", Text: string(part.Data)})
+						continue
+					}
+					raw, err := json.Marshal(value)
+					if err != nil {
+						encoded.Content = append(encoded.Content, anthropicContentBlock{Type: "text", Text: string(part.Data)})
+						continue
+					}
+					encoded.Content = append(encoded.Content, anthropicContentBlock{Type: "json", Value: raw})
 				}
 			}
 			for _, call := range msg.ToolCalls {
@@ -134,6 +145,14 @@ func decodeAnthropicMessagesResponse(resp anthropicMessagesEnvelope) (runtime.Re
 		case "text":
 			if block.Text != "" {
 				message.Parts = append(message.Parts, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: block.Text})
+			}
+		case "json":
+			payload := block.Value
+			if len(payload) == 0 {
+				payload = json.RawMessage(block.Text)
+			}
+			if len(payload) > 0 {
+				message.Parts = append(message.Parts, runtime.ContentPart{Type: runtime.ContentPartTypeJSON, Data: append(json.RawMessage(nil), payload...)})
 			}
 		case "tool_use":
 			message.ToolCalls = append(message.ToolCalls, runtime.ToolCall{

@@ -392,6 +392,38 @@ func TestEncodeAnthropicMessagesRequestPreservesMixedToolResultOrder(t *testing.
 	}
 }
 
+func TestDecodeAnthropicMessagesResponsePreservesJSONBlock(t *testing.T) {
+	resp, err := decodeAnthropicMessagesResponse(anthropicMessagesEnvelope{
+		ID:         "msg_json",
+		Type:       "message",
+		Role:       "assistant",
+		Model:      "claude-sonnet-4-5",
+		StopReason: "end_turn",
+		Content: []anthropicContentBlock{{
+			Type: "text",
+			Text: "before json",
+		}, {
+			Type:  "json",
+			Value: json.RawMessage(`{"city":"shanghai","forecast":"sunny"}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("decodeAnthropicMessagesResponse() error = %v", err)
+	}
+	if len(resp.Message.Parts) != 2 {
+		t.Fatalf("len(resp.Message.Parts) = %d, want 2", len(resp.Message.Parts))
+	}
+	if resp.Message.Parts[0].Type != runtime.ContentPartTypeText || resp.Message.Parts[0].Text != "before json" {
+		t.Fatalf("resp.Message.Parts[0] = %#v, want text part", resp.Message.Parts[0])
+	}
+	if resp.Message.Parts[1].Type != runtime.ContentPartTypeJSON {
+		t.Fatalf("resp.Message.Parts[1] = %#v, want json part", resp.Message.Parts[1])
+	}
+	if string(resp.Message.Parts[1].Data) != `{"city":"shanghai","forecast":"sunny"}` {
+		t.Fatalf("resp.Message.Parts[1].Data = %s, want raw json payload", resp.Message.Parts[1].Data)
+	}
+}
+
 func TestDecodeAnthropicMessagesResponseSplitsMixedTextAndToolUse(t *testing.T) {
 	resp, err := decodeAnthropicMessagesResponse(anthropicMessagesEnvelope{
 		ID:         "msg_123",
@@ -1220,6 +1252,42 @@ func TestAnthropicMessagesCompatibleStreamCompletionDoesNotSendStreamToUpstream(
 		t.Fatalf("StreamCompletion() error = %v", err)
 	}
 	for range ch {
+	}
+}
+
+func TestAnthropicMessagesCompatibleStreamCompletionPreservesJSONBlock(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_json",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       "claude-sonnet-4-5",
+			"stop_reason": "end_turn",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "before json",
+			}, {
+				"type":  "json",
+				"value": map[string]any{"city": "shanghai", "forecast": "sunny"},
+			}},
+			"usage": map[string]any{"input_tokens": 11, "output_tokens": 7},
+		})
+	}))
+	defer server.Close()
+
+	p := NewAnthropicMessagesCompatible("anthropic", server.URL, []string{"test-key"}, server.Client())
+	ch, err := p.StreamCompletion(context.Background(), runtime.Request{Model: "claude-sonnet-4-5"})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	foundJSON := false
+	for event := range ch {
+		if event.Delta != nil && event.Delta.Type == runtime.ContentPartTypeJSON {
+			foundJSON = string(event.Delta.Data) == `{"city":"shanghai","forecast":"sunny"}`
+		}
+	}
+	if !foundJSON {
+		t.Fatal("did not find json delta in anthropic stream fallback")
 	}
 }
 

@@ -1961,6 +1961,51 @@ func TestAnthropicMessagesStreamingUsesInputJSONDeltaForToolUse(t *testing.T) {
 	}
 }
 
+func TestAnthropicMessagesStreamingPreservesJSONContentBlock(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_json",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       "claude-sonnet-4-5",
+			"stop_reason": "end_turn",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "before json",
+			}, {
+				"type":  "json",
+				"value": map[string]any{"city": "shanghai", "forecast": "sunny"},
+			}},
+			"usage": map[string]any{"input_tokens": 11, "output_tokens": 7},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"anthropic": provider.NewAnthropicMessagesCompatible("anthropic", upstream.URL, []string{"test-key"}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"anthropic-tag"}, Strategy: "failover"}}}, testDualProtocolInbounds(), []config.OutboundSpec{{Name: "anthropic", Protocol: "anthropic_messages", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "anthropic-tag"}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "claude-sonnet-4-5", "stream": true, "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `"type":"json"`) || !strings.Contains(got, `"value":{"city":"shanghai","forecast":"sunny"}`) {
+		t.Fatalf("body = %q, want anthropic json content block", got)
+	}
+	if strings.Contains(got, `"text":"{\"city\":\"shanghai\",\"forecast\":\"sunny\"}"`) {
+		t.Fatalf("body = %q, want no json block downgraded to text", got)
+	}
+}
+
 func TestAnthropicMessagesStreamingAlwaysEmitsUsageShape(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

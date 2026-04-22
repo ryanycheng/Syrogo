@@ -20,14 +20,28 @@ func EventStreamFromRuntime(events <-chan runtime.StreamEvent) <-chan Event {
 				}
 			case runtime.StreamEventContentDelta:
 				if event.Delta != nil {
-					if textBlockIndex == -1 {
-						textBlockIndex = nextBlockIndex
+					switch event.Delta.Type {
+					case runtime.ContentPartTypeJSON:
+						if textBlockIndex != -1 {
+							ch <- Event{Type: EventTypeContentBlockStop, MessageID: event.ResponseID, Model: event.Model, Role: event.MessageRole, BlockIndex: textBlockIndex}
+							textBlockIndex = -1
+						}
+						blockIndex := nextBlockIndex
 						nextBlockIndex++
-						block := ContentBlock{Type: BlockTypeText, Text: ""}
-						ch <- Event{Type: EventTypeContentBlockStart, MessageID: event.ResponseID, Model: event.Model, Role: event.MessageRole, BlockIndex: textBlockIndex, Block: &block}
+						block := ContentBlock{Type: BlockTypeJSON, Data: append([]byte(nil), event.Delta.Data...)}
+						ch <- Event{Type: EventTypeContentBlockStart, MessageID: event.ResponseID, Model: event.Model, Role: event.MessageRole, BlockIndex: blockIndex, Block: &block}
+						ch <- Event{Type: EventTypeContentBlockDelta, MessageID: event.ResponseID, Model: event.Model, Role: event.MessageRole, BlockIndex: blockIndex, Block: &block}
+						ch <- Event{Type: EventTypeContentBlockStop, MessageID: event.ResponseID, Model: event.Model, Role: event.MessageRole, BlockIndex: blockIndex}
+					default:
+						if textBlockIndex == -1 {
+							textBlockIndex = nextBlockIndex
+							nextBlockIndex++
+							block := ContentBlock{Type: BlockTypeText, Text: ""}
+							ch <- Event{Type: EventTypeContentBlockStart, MessageID: event.ResponseID, Model: event.Model, Role: event.MessageRole, BlockIndex: textBlockIndex, Block: &block}
+						}
+						block := ContentBlock{Type: BlockTypeText, Text: event.Delta.Text}
+						ch <- Event{Type: EventTypeContentBlockDelta, MessageID: event.ResponseID, Model: event.Model, Role: event.MessageRole, BlockIndex: textBlockIndex, Block: &block, TextDelta: event.Delta.Text}
 					}
-					block := ContentBlock{Type: BlockTypeText, Text: event.Delta.Text}
-					ch <- Event{Type: EventTypeContentBlockDelta, MessageID: event.ResponseID, Model: event.Model, Role: event.MessageRole, BlockIndex: textBlockIndex, Block: &block, TextDelta: event.Delta.Text}
 				}
 				if event.ToolCall != nil {
 					if textBlockIndex != -1 {

@@ -239,7 +239,11 @@ func anthropicStreamFramesFromEventStream(events <-chan eventstream.Event) <-cha
 						contentBlock["name"] = event.Block.ToolCall.Name
 					}
 				case eventstream.BlockTypeJSON:
-					contentBlock["text"] = string(event.Block.Data)
+					var value any
+					if err := json.Unmarshal(event.Block.Data, &value); err != nil {
+						value = string(event.Block.Data)
+					}
+					contentBlock["value"] = value
 				}
 				frames <- anthropicSSEFrame{event: "content_block_start", payload: map[string]any{"type": "content_block_start", "index": event.BlockIndex, "content_block": contentBlock}}
 			case eventstream.EventTypeContentBlockDelta:
