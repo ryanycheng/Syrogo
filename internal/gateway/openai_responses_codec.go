@@ -36,8 +36,9 @@ type openAIResponsesInputItem struct {
 }
 
 type openAIResponsesContentPart struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text,omitempty"`
+	Value json.RawMessage `json:"value,omitempty"`
 }
 
 type openAIResponsesTool struct {
@@ -317,12 +318,16 @@ func parseOpenAIResponsesFunctionOutput(raw json.RawMessage) ([]semantic.Segment
 	if err := json.Unmarshal(raw, &parts); err == nil {
 		segments := make([]semantic.Segment, 0, len(parts))
 		for _, part := range parts {
-			if part.Type == "output_text" || part.Type == "text" || part.Type == "input_text" {
+			switch part.Type {
+			case "output_text", "text", "input_text":
 				segments = append(segments, semantic.Segment{Kind: semantic.SegmentText, Text: part.Text})
+			case "json":
+				payload := normalizedJSONOrRaw(part.Value)
+				segments = append(segments, semantic.Segment{Kind: semantic.SegmentData, Data: &semantic.DataPart{Format: "json", Value: payload}})
 			}
 		}
 		if len(segments) == 0 {
-			return nil, fmt.Errorf("function_call_output.output must include at least one text part")
+			return nil, fmt.Errorf("function_call_output.output must include at least one supported part")
 		}
 		return segments, nil
 	}
@@ -351,13 +356,22 @@ func buildOpenAIResponsesOutput(resp runtime.Response) []map[string]any {
 	output := make([]map[string]any, 0, 1+len(resp.Message.ToolCalls))
 	messageContent := make([]map[string]any, 0, len(resp.Message.Parts))
 	for _, part := range resp.Message.Parts {
-		if part.Type != runtime.ContentPartTypeText {
-			continue
+		switch part.Type {
+		case runtime.ContentPartTypeText:
+			messageContent = append(messageContent, map[string]any{
+				"type": "output_text",
+				"text": part.Text,
+			})
+		case runtime.ContentPartTypeJSON:
+			var value any
+			if err := json.Unmarshal(part.Data, &value); err != nil {
+				value = string(part.Data)
+			}
+			messageContent = append(messageContent, map[string]any{
+				"type":  "json",
+				"value": value,
+			})
 		}
-		messageContent = append(messageContent, map[string]any{
-			"type": "output_text",
-			"text": part.Text,
-		})
 	}
 	if len(messageContent) > 0 {
 		output = append(output, map[string]any{

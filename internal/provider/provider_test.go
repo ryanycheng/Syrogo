@@ -458,6 +458,40 @@ func TestDecodeAnthropicMessagesResponseSplitsMixedTextAndToolUse(t *testing.T) 
 	}
 }
 
+func TestDecodeOpenAIResponsesResponsePreservesJSONBlock(t *testing.T) {
+	resp, err := decodeOpenAIResponsesResponse(openAIResponsesEnvelope{
+		ID:     "resp_json_123",
+		Object: "response",
+		Model:  "gpt-4o-mini",
+		Output: []openAIResponsesOutputItem{{
+			Type: "message",
+			Role: "assistant",
+			Content: []openAIResponsesTextPart{{
+				Type: "output_text",
+				Text: "before json",
+			}, {
+				Type:  "json",
+				Value: json.RawMessage(`{"city":"shanghai","forecast":"sunny"}`),
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("decodeOpenAIResponsesResponse() error = %v", err)
+	}
+	if len(resp.Message.Parts) != 2 {
+		t.Fatalf("len(resp.Message.Parts) = %d, want 2", len(resp.Message.Parts))
+	}
+	if resp.Message.Parts[0].Type != runtime.ContentPartTypeText || resp.Message.Parts[0].Text != "before json" {
+		t.Fatalf("resp.Message.Parts[0] = %#v, want text part", resp.Message.Parts[0])
+	}
+	if resp.Message.Parts[1].Type != runtime.ContentPartTypeJSON {
+		t.Fatalf("resp.Message.Parts[1] = %#v, want json part", resp.Message.Parts[1])
+	}
+	if string(resp.Message.Parts[1].Data) != `{"city":"shanghai","forecast":"sunny"}` {
+		t.Fatalf("resp.Message.Parts[1].Data = %s, want raw json payload", resp.Message.Parts[1].Data)
+	}
+}
+
 func TestDecodeOpenAIResponsesResponseDropsEmptyTextParts(t *testing.T) {
 	resp, err := decodeOpenAIResponsesResponse(openAIResponsesEnvelope{
 		ID:     "resp_123",

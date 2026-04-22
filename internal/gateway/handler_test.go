@@ -822,7 +822,7 @@ func TestBuildRuntimeRequestFromResponsesPreservesTools(t *testing.T) {
 	}
 }
 
-func TestBuildRuntimeRequestFromResponsesFunctionOutputDropsNonTextParts(t *testing.T) {
+func TestBuildRuntimeRequestFromResponsesFunctionOutputPreservesMixedContentOrder(t *testing.T) {
 	req := openAIResponsesRequest{
 		Model: "gpt-4o-mini",
 		Input: json.RawMessage(`[
@@ -846,11 +846,17 @@ func TestBuildRuntimeRequestFromResponsesFunctionOutputDropsNonTextParts(t *test
 	if got.Messages[0].ToolCallID != "call_123" {
 		t.Fatalf("got.Messages[0].ToolCallID = %q, want call_123", got.Messages[0].ToolCallID)
 	}
-	if len(got.Messages[0].Parts) != 1 {
-		t.Fatalf("len(got.Messages[0].Parts) = %d, want 1", len(got.Messages[0].Parts))
+	if len(got.Messages[0].Parts) != 2 {
+		t.Fatalf("len(got.Messages[0].Parts) = %d, want 2", len(got.Messages[0].Parts))
 	}
 	if got.Messages[0].Parts[0].Type != runtime.ContentPartTypeText || got.Messages[0].Parts[0].Text != "partial text" {
-		t.Fatalf("got.Messages[0].Parts = %#v, want only text part preserved", got.Messages[0].Parts)
+		t.Fatalf("got.Messages[0].Parts[0] = %#v, want first text part", got.Messages[0].Parts[0])
+	}
+	if got.Messages[0].Parts[1].Type != runtime.ContentPartTypeJSON {
+		t.Fatalf("got.Messages[0].Parts[1] = %#v, want json part", got.Messages[0].Parts[1])
+	}
+	if string(got.Messages[0].Parts[1].Data) != `{"city":"shanghai"}` {
+		t.Fatalf("got.Messages[0].Parts[1].Data = %s, want raw json payload", got.Messages[0].Parts[1].Data)
 	}
 }
 
@@ -1271,6 +1277,57 @@ func TestResponsesUsesOpenAIResponsesProvider(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "hello from responses upstream") {
 		t.Fatalf("body = %q, want upstream responses content", w.Body.String())
+	}
+}
+
+func TestResponsesWritesMixedAssistantContentWithoutDroppingJSON(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %q, want /responses", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&map[string]any{}); err != nil {
+			t.Fatalf("json.NewDecoder() error = %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_json_123",
+			"object": "response",
+			"model":  "gpt-4o-mini",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "before json",
+				}, {
+					"type":  "json",
+					"value": map[string]any{"city": "shanghai", "forecast": "sunny"},
+				}},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, config.OutboundCapabilities{}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"responses-tag"}, Strategy: "failover"}}}, testDualProtocolInbounds(), []config.OutboundSpec{{Name: "responses", Protocol: "openai_responses", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "responses-tag"}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "gpt-4o-mini", "input": "hello"})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"type":"output_text"`) || !strings.Contains(w.Body.String(), `"text":"before json"`) {
+		t.Fatalf("body = %q, want text content block", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"type":"json"`) || !strings.Contains(w.Body.String(), `"value":{"city":"shanghai","forecast":"sunny"}`) {
+		t.Fatalf("body = %q, want json content block", w.Body.String())
 	}
 }
 

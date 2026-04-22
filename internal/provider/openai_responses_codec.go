@@ -8,8 +8,9 @@ import (
 )
 
 type openAIResponsesTextPart struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text,omitempty"`
+	Value json.RawMessage `json:"value,omitempty"`
 }
 
 type openAIResponsesInputItem struct {
@@ -215,8 +216,19 @@ func decodeOpenAIResponsesResponse(resp openAIResponsesEnvelope) (runtime.Respon
 				message.Role = runtime.MessageRole(item.Role)
 			}
 			for _, part := range item.Content {
-				if part.Text != "" {
-					message.Parts = append(message.Parts, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: part.Text})
+				switch part.Type {
+				case "json":
+					payload := part.Value
+					if len(payload) == 0 {
+						payload = json.RawMessage(part.Text)
+					}
+					if len(payload) > 0 {
+						message.Parts = append(message.Parts, runtime.ContentPart{Type: runtime.ContentPartTypeJSON, Data: append(json.RawMessage(nil), payload...)})
+					}
+				default:
+					if part.Text != "" {
+						message.Parts = append(message.Parts, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: part.Text})
+					}
 				}
 			}
 		case "function_call":
