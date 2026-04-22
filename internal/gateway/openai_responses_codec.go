@@ -417,6 +417,7 @@ func buildOpenAIResponsesOutput(resp runtime.Response) []map[string]any {
 func openAIResponsesStreamFrames(plan runtime.ExecutionPlan, events <-chan runtime.StreamEvent) []openAIResponsesSSEFrame {
 	frames := make([]openAIResponsesSSEFrame, 0, 8)
 	textItemStarted := false
+	jsonPartCount := 0
 	messageItemID := "msg_0"
 	messageOutputIndex := 0
 	toolOutputIndex := 1
@@ -424,6 +425,7 @@ func openAIResponsesStreamFrames(plan runtime.ExecutionPlan, events <-chan runti
 	model := plannedModel(plan)
 	role := string(runtime.MessageRoleAssistant)
 	text := ""
+	messageParts := make([]map[string]any, 0, 1)
 	toolCalls := make([]runtime.ToolCall, 0)
 	var usage *runtime.Usage
 	sequence := 1
@@ -465,16 +467,20 @@ func openAIResponsesStreamFrames(plan runtime.ExecutionPlan, events <-chan runti
 	}
 
 	messageItem := func(status string) map[string]any {
-		return map[string]any{
-			"id":     messageItemID,
-			"status": status,
-			"type":   "message",
-			"role":   role,
-			"content": []map[string]any{{
+		content := messageParts
+		if len(content) == 0 {
+			content = []map[string]any{{
 				"type":        "output_text",
-				"text":        text,
+				"text":        "",
 				"annotations": []any{},
-			}},
+			}}
+		}
+		return map[string]any{
+			"id":      messageItemID,
+			"status":  status,
+			"type":    "message",
+			"role":    role,
+			"content": content,
 		}
 	}
 
@@ -527,26 +533,53 @@ func openAIResponsesStreamFrames(plan runtime.ExecutionPlan, events <-chan runti
 			})
 		case runtime.StreamEventContentDelta:
 			if event.Delta != nil {
-				if !textItemStarted {
+				switch event.Delta.Type {
+				case runtime.ContentPartTypeJSON:
+					var value any
+					if err := json.Unmarshal(event.Delta.Data, &value); err != nil {
+						value = string(event.Delta.Data)
+					}
+					contentIndex := len(messageParts)
+					part := map[string]any{
+						"type":  "json",
+						"value": value,
+					}
+					messageParts = append(messageParts, part)
 					appendFrame("response.content_part.added", map[string]any{
 						"output_index":  messageOutputIndex,
 						"item_id":       messageItemID,
-						"content_index": 0,
-						"part": map[string]any{
-							"type":        "output_text",
-							"text":        "",
-							"annotations": []any{},
-						},
+						"content_index": contentIndex,
+						"part":          part,
 					})
-					textItemStarted = true
+					appendFrame("response.content_part.done", map[string]any{
+						"output_index":  messageOutputIndex,
+						"item_id":       messageItemID,
+						"content_index": contentIndex,
+						"part":          part,
+					})
+					jsonPartCount++
+				default:
+					if !textItemStarted {
+						appendFrame("response.content_part.added", map[string]any{
+							"output_index":  messageOutputIndex,
+							"item_id":       messageItemID,
+							"content_index": 0,
+							"part": map[string]any{
+								"type":        "output_text",
+								"text":        "",
+								"annotations": []any{},
+							},
+						})
+						textItemStarted = true
+					}
+					text += event.Delta.Text
+					appendFrame("response.output_text.delta", map[string]any{
+						"output_index":  messageOutputIndex,
+						"item_id":       messageItemID,
+						"content_index": 0,
+						"delta":         event.Delta.Text,
+					})
 				}
-				text += event.Delta.Text
-				appendFrame("response.output_text.delta", map[string]any{
-					"output_index":  messageOutputIndex,
-					"item_id":       messageItemID,
-					"content_index": 0,
-					"delta":         event.Delta.Text,
-				})
 			}
 			if event.ToolCall != nil {
 				call := *event.ToolCall
@@ -587,6 +620,16 @@ func openAIResponsesStreamFrames(plan runtime.ExecutionPlan, events <-chan runti
 			}
 		case runtime.StreamEventMessageEnd:
 			if textItemStarted {
+				textPart := map[string]any{
+					"type":        "output_text",
+					"text":        text,
+					"annotations": []any{},
+				}
+				if len(messageParts) == 0 {
+					messageParts = append(messageParts, textPart)
+				} else {
+					messageParts = append([]map[string]any{textPart}, messageParts...)
+				}
 				appendFrame("response.output_text.done", map[string]any{
 					"output_index":  messageOutputIndex,
 					"item_id":       messageItemID,
@@ -597,15 +640,11 @@ func openAIResponsesStreamFrames(plan runtime.ExecutionPlan, events <-chan runti
 					"output_index":  messageOutputIndex,
 					"item_id":       messageItemID,
 					"content_index": 0,
-					"part": map[string]any{
-						"type":        "output_text",
-						"text":        text,
-						"annotations": []any{},
-					},
+					"part":          textPart,
 				})
 			}
 			output := make([]map[string]any, 0, 1+len(toolCalls))
-			if textItemStarted || len(toolCalls) == 0 {
+			if textItemStarted || jsonPartCount > 0 || len(toolCalls) == 0 {
 				output = append(output, messageItem("completed"))
 			}
 			for _, call := range toolCalls {

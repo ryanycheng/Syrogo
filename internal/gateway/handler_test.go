@@ -1211,7 +1211,65 @@ func TestResponsesStreamsSSE(t *testing.T) {
 	}
 }
 
-func TestResponsesUsesOpenAIResponsesProvider(t *testing.T) {
+func TestResponsesStreamsSSEPreservesJSONContentPart(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %q, want /responses", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&map[string]any{}); err != nil {
+			t.Fatalf("json.NewDecoder() error = %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_json_stream_123",
+			"object": "response",
+			"model":  "gpt-4o-mini",
+			"status": "completed",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "before json",
+				}, {
+					"type":  "json",
+					"value": map[string]any{"city": "shanghai", "forecast": "sunny"},
+				}},
+			}},
+			"usage": map[string]any{"input_tokens": 9, "output_tokens": 4, "total_tokens": 13},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, config.OutboundCapabilities{}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"responses-tag"}, Strategy: "failover"}}}, testDualProtocolInbounds(), []config.OutboundSpec{{Name: "responses", Protocol: "openai_responses", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "responses-tag"}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model":  "gpt-4o-mini",
+		"stream": true,
+		"input":  "hello",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `event: response.content_part.added`) || !strings.Contains(got, `"type":"json"`) || !strings.Contains(got, `"value":{"city":"shanghai","forecast":"sunny"}`) {
+		t.Fatalf("body = %q, want json content part frames", got)
+	}
+	if !strings.Contains(got, `event: response.completed`) {
+		t.Fatalf("body = %q, want completed frame", got)
+	}
+}
+
+func TestResponsesForwardsToolsToOpenAIResponsesUpstream(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/responses" {
 			t.Fatalf("path = %q, want /responses", r.URL.Path)

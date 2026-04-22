@@ -278,7 +278,85 @@ func TestNewStreamsOpenAIUsageShapeFromListener(t *testing.T) {
 	}
 }
 
-func TestNewSupportsAnthropicInboundProtocol(t *testing.T) {
+func TestNewStreamsResponsesJSONContentPartFromResponsesOutbound(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q, want /v1/responses", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_json_stream_123",
+			"object": "response",
+			"model":  "gpt-4o-mini",
+			"status": "completed",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "before json",
+				}, {
+					"type":  "json",
+					"value": map[string]any{"city": "shanghai", "forecast": "sunny"},
+				}},
+			}},
+			"usage": map[string]any{"input_tokens": 9, "output_tokens": 4, "total_tokens": 13},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds = append(cfg.Inbounds, config.InboundSpec{
+		Name:     "responses-entry",
+		Protocol: "openai_responses",
+		Path:     "/v1/responses",
+		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-office"}},
+	})
+	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "responses-stream-route",
+		FromTags:    []string{"responses-office"},
+		ToTags:      []string{"responses-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-4o-mini",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "cliproxy-responses",
+		Protocol:  "openai_responses",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "responses-primary",
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model":  "gpt-4o-mini",
+		"stream": true,
+		"input":  "hello",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `event: response.content_part.added`) || !strings.Contains(got, `"type":"json"`) || !strings.Contains(got, `"value":{"city":"shanghai","forecast":"sunny"}`) {
+		t.Fatalf("body = %q, want json content part frames", got)
+	}
+	if !strings.Contains(got, `event: response.completed`) {
+		t.Fatalf("body = %q, want completed frame", got)
+	}
+}
+
+func TestNewBridgesAnthropicInboundToOpenAIResponsesOutbound(t *testing.T) {
 	app, err := New(baseDualProtocolConfig())
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
