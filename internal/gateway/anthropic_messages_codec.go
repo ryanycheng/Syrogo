@@ -133,9 +133,13 @@ func writeAnthropicMessageResponse(w http.ResponseWriter, resp runtime.Response)
 				"text": part.Text,
 			})
 		case runtime.ContentPartTypeJSON:
+			var value any
+			if err := json.Unmarshal(part.Data, &value); err != nil {
+				value = string(part.Data)
+			}
 			content = append(content, map[string]any{
-				"type": "text",
-				"text": string(part.Data),
+				"type":  "json",
+				"value": value,
 			})
 		}
 	}

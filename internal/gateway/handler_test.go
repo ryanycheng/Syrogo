@@ -491,6 +491,59 @@ func TestLowerSemanticTurnPreservesToolResultErrorFlag(t *testing.T) {
 	}
 }
 
+func TestWriteAnthropicMessageResponsePreservesMixedContent(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeAnthropicMessageResponse(w, runtime.Response{
+		ID:           "msg_123",
+		Object:       "message",
+		Model:        "claude-sonnet-4-5",
+		FinishReason: runtime.FinishReasonToolUse,
+		Message: runtime.Message{
+			Role: runtime.MessageRoleAssistant,
+			Parts: []runtime.ContentPart{{
+				Type: runtime.ContentPartTypeText,
+				Text: "lookup failed",
+			}, {
+				Type: runtime.ContentPartTypeJSON,
+				Data: json.RawMessage(`{"city":"shanghai","forecast":"sunny"}`),
+			}},
+			ToolCalls: []runtime.ToolCall{{ID: "tool_123", Name: "get_weather", Arguments: `{"city":"shanghai"}`}},
+		},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var body struct {
+		StopReason string `json:"stop_reason"`
+		Content    []struct {
+			Type  string         `json:"type"`
+			Text  string         `json:"text"`
+			ID    string         `json:"id"`
+			Name  string         `json:"name"`
+			Value map[string]any `json:"value"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if body.StopReason != "tool_use" {
+		t.Fatalf("body.StopReason = %q, want tool_use", body.StopReason)
+	}
+	if len(body.Content) != 3 {
+		t.Fatalf("len(body.Content) = %d, want 3", len(body.Content))
+	}
+	if body.Content[0].Type != "text" || body.Content[0].Text != "lookup failed" {
+		t.Fatalf("body.Content[0] = %#v, want text block", body.Content[0])
+	}
+	if body.Content[1].Type != "json" || body.Content[1].Value["city"] != "shanghai" || body.Content[1].Value["forecast"] != "sunny" {
+		t.Fatalf("body.Content[1] = %#v, want json block", body.Content[1])
+	}
+	if body.Content[2].Type != "tool_use" || body.Content[2].ID != "tool_123" || body.Content[2].Name != "get_weather" {
+		t.Fatalf("body.Content[2] = %#v, want tool_use block", body.Content[2])
+	}
+}
+
 func TestWriteAnthropicMessageResponseMapsToolUseStopReason(t *testing.T) {
 	w := httptest.NewRecorder()
 	writeAnthropicMessageResponse(w, runtime.Response{
@@ -1325,10 +1378,10 @@ func TestChatCompletionsAcceptsOfficialToolsFormat(t *testing.T) {
 
 func TestChatCompletionsStreamingCompatibilityChunks(t *testing.T) {
 	tests := []struct {
-		name    string
-		event   runtime.StreamEvent
-		check   func(t *testing.T, body string)
-		shared  map[int]string
+		name   string
+		event  runtime.StreamEvent
+		check  func(t *testing.T, body string)
+		shared map[int]string
 	}{
 		{
 			name: "usage field names",
