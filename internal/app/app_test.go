@@ -1045,6 +1045,78 @@ func TestNewStreamsAnthropicToolsFromAnthropicMessagesOutbound(t *testing.T) {
 	}
 }
 
+func TestNewStreamsAnthropicJSONBlockFromAnthropicMessagesOutbound(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_json_stream",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       "claude-sonnet-4-6",
+			"stop_reason": "end_turn",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "before json",
+			}, {
+				"type":  "json",
+				"value": map[string]any{"city": "shanghai", "forecast": "sunny"},
+			}},
+			"usage": map[string]any{"input_tokens": 9, "output_tokens": 4},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds[1].Clients[0].Tag = "anthropic-to-messages"
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "anthropic-to-messages-route",
+		FromTags:    []string{"anthropic-to-messages"},
+		ToTags:      []string{"anthropic-primary"},
+		Strategy:    "failover",
+		TargetModel: "claude-sonnet-4-6",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "cliproxy-messages",
+		Protocol:  "anthropic_messages",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "anthropic-primary",
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model":  "claude-sonnet-4-5",
+		"stream": true,
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "hello",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("stream status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `"type":"json"`) || !strings.Contains(got, `"value":{"city":"shanghai","forecast":"sunny"}`) {
+		t.Fatalf("body = %q, want anthropic json content block in listener stream", got)
+	}
+	if strings.Contains(got, `"text":"{\"city\":\"shanghai\",\"forecast\":\"sunny\"}"`) {
+		t.Fatalf("body = %q, want no downgraded json text block", got)
+	}
+}
+
 func TestNewCompletesAnthropicToolLoopThroughAnthropicMessagesOutbound(t *testing.T) {
 	requests := make([]anthropicMessagesUpstreamRequest, 0, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
