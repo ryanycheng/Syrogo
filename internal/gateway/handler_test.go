@@ -2118,8 +2118,13 @@ func TestAnthropicMessagesStreamingPreservesJSONContentBlock(t *testing.T) {
 		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
 	}
 	got := w.Body.String()
-	if !strings.Contains(got, `"type":"json"`) || !strings.Contains(got, `"value":{"city":"shanghai","forecast":"sunny"}`) {
+	textIndex := strings.Index(got, `"text":"before json"`)
+	jsonIndex := strings.Index(got, `"value":{"city":"shanghai","forecast":"sunny"}`)
+	if !strings.Contains(got, `"type":"json"`) || jsonIndex == -1 {
 		t.Fatalf("body = %q, want anthropic json content block", got)
+	}
+	if textIndex == -1 || textIndex > jsonIndex {
+		t.Fatalf("body = %q, want text block before json block", got)
 	}
 	if strings.Contains(got, `"text":"{\"city\":\"shanghai\",\"forecast\":\"sunny\"}"`) {
 		t.Fatalf("body = %q, want no json block downgraded to text", got)
