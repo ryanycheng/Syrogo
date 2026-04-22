@@ -1857,6 +1857,61 @@ func TestNewRejectsResponsesPreviousResponseIDWhenCapabilityDisabled(t *testing.
 	}
 }
 
+func TestNewRejectsResponsesBuiltinToolsWhenCapabilityDisabled(t *testing.T) {
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds = append(cfg.Inbounds, config.InboundSpec{
+		Name:     "responses-entry",
+		Protocol: "openai_responses",
+		Path:     "/v1/responses",
+		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-to-responses"}},
+	})
+	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "responses-to-responses-route",
+		FromTags:    []string{"responses-to-responses"},
+		ToTags:      []string{"responses-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}
+	falseValue := false
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "cliproxy-responses",
+		Protocol:  "openai_responses",
+		Endpoint:  "https://example.com/v1",
+		AuthToken: "bridge-key",
+		Tag:       "responses-primary",
+		Capabilities: config.OutboundCapabilities{
+			ResponsesBuiltinTools: &falseValue,
+		},
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-4o-mini",
+		"input": "查一下今天的 AI 新闻",
+		"tools": []map[string]any{{
+			"type": "web_search",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "outbound does not support responses builtin tools") {
+		t.Fatalf("body = %q, want builtin tools capability error", w.Body.String())
+	}
+}
+
 func TestNewBridgesResponsesFunctionCallOutputMixedContentToAnthropicOutbound(t *testing.T) {
 	var requests []struct {
 		Model    string                     `json:"model"`
