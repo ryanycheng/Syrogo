@@ -2098,6 +2098,204 @@ func TestNewRejectsResponsesBuiltinToolsWhenCapabilityDisabled(t *testing.T) {
 	}
 }
 
+func TestNewBridgesResponsesInboundToOpenAIChatOutbound(t *testing.T) {
+	var upstreamBody struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer bridge-key" {
+			t.Fatalf("Authorization = %q, want Bearer bridge-key", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl_resp_to_chat_1",
+			"object": "chat.completion",
+			"model":  upstreamBody.Model,
+			"choices": []map[string]any{{
+				"index": 0,
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": "pong",
+				},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]any{"prompt_tokens": 18, "completion_tokens": 13, "total_tokens": 31},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds = append(cfg.Inbounds, config.InboundSpec{
+		Name:     "responses-entry",
+		Protocol: "openai_responses",
+		Path:     "/v1/responses",
+		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-to-chat"}},
+	})
+	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "responses-to-chat-route",
+		FromTags:    []string{"responses-to-chat"},
+		ToTags:      []string{"openai-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "cliproxy-chat",
+		Protocol:  "openai_chat",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "openai-primary",
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-4o-mini",
+		"input": "hello",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("route status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if upstreamBody.Model != "gpt-5.4" {
+		t.Fatalf("upstream model = %q, want gpt-5.4", upstreamBody.Model)
+	}
+	if len(upstreamBody.Messages) != 1 {
+		t.Fatalf("len(upstream messages) = %d, want 1", len(upstreamBody.Messages))
+	}
+	if upstreamBody.Messages[0].Role != "user" || upstreamBody.Messages[0].Content != "hello" {
+		t.Fatalf("upstream user = %#v, want bridged user message", upstreamBody.Messages[0])
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `"object":"response"`) || !strings.Contains(got, `"text":"pong"`) {
+		t.Fatalf("body = %q, want responses response bridged from chat outbound", got)
+	}
+	if !strings.Contains(got, `"input_tokens":18`) || !strings.Contains(got, `"output_tokens":13`) || !strings.Contains(got, `"total_tokens":31`) {
+		t.Fatalf("body = %q, want responses usage mapped from chat outbound", got)
+	}
+}
+
+func TestNewBridgesResponsesInboundToOpenAIResponsesOutbound(t *testing.T) {
+	var upstreamBody struct {
+		Model string `json:"model"`
+		Input []struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"input"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q, want /v1/responses", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer bridge-key" {
+			t.Fatalf("Authorization = %q, want Bearer bridge-key", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_to_resp_1",
+			"object": "response",
+			"model":  upstreamBody.Model,
+			"status": "completed",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "pong",
+				}},
+			}},
+			"usage": map[string]any{"input_tokens": 18, "output_tokens": 13, "total_tokens": 31},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds = append(cfg.Inbounds, config.InboundSpec{
+		Name:     "responses-entry",
+		Protocol: "openai_responses",
+		Path:     "/v1/responses",
+		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-to-responses"}},
+	})
+	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "responses-to-responses-route",
+		FromTags:    []string{"responses-to-responses"},
+		ToTags:      []string{"responses-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "responses-primary",
+		Protocol:  "openai_responses",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "responses-primary",
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-4o-mini",
+		"input": "hello",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("route status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if upstreamBody.Model != "gpt-5.4" {
+		t.Fatalf("upstream model = %q, want gpt-5.4", upstreamBody.Model)
+	}
+	if len(upstreamBody.Input) != 1 {
+		t.Fatalf("len(upstream input) = %d, want 1", len(upstreamBody.Input))
+	}
+	if upstreamBody.Input[0].Type != "message" || upstreamBody.Input[0].Role != "user" {
+		t.Fatalf("upstream input[0] = %#v, want user message item", upstreamBody.Input[0])
+	}
+	if len(upstreamBody.Input[0].Content) != 1 || upstreamBody.Input[0].Content[0].Type != "input_text" || upstreamBody.Input[0].Content[0].Text != "hello" {
+		t.Fatalf("upstream input content = %#v, want bridged input_text hello", upstreamBody.Input[0].Content)
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `"object":"response"`) || !strings.Contains(got, `"text":"pong"`) {
+		t.Fatalf("body = %q, want responses response from responses outbound", got)
+	}
+	if !strings.Contains(got, `"input_tokens":18`) || !strings.Contains(got, `"output_tokens":13`) || !strings.Contains(got, `"total_tokens":31`) {
+		t.Fatalf("body = %q, want responses usage object", got)
+	}
+}
+
 func TestNewBridgesOpenAIChatInboundToAnthropicOutbound(t *testing.T) {
 	var requests []struct {
 		Model    string                     `json:"model"`
@@ -2291,6 +2489,110 @@ func TestNewBridgesAnthropicEmptyToolResultContentToAnthropicOutbound(t *testing
 	}
 	if toolResult.Content != "" {
 		t.Fatalf("toolResult.Content = %#v, want empty string for empty tool_result payload", toolResult.Content)
+	}
+}
+
+func TestNewBridgesResponsesInboundToAnthropicOutbound(t *testing.T) {
+	var requests []struct {
+		Model    string                     `json:"model"`
+		Messages []anthropicUpstreamMessage `json:"messages"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("path = %q, want /v1/messages", r.URL.Path)
+		}
+		if got := r.Header.Get("x-api-key"); got != "bridge-key" {
+			t.Fatalf("x-api-key = %q, want bridge-key", got)
+		}
+		var body struct {
+			Model    string                     `json:"model"`
+			Messages []anthropicUpstreamMessage `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		requests = append(requests, body)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_resp_to_anth_1",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       body.Model,
+			"stop_reason": "end_turn",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "pong",
+			}},
+			"usage": map[string]any{"input_tokens": 18, "output_tokens": 13},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds = append(cfg.Inbounds, config.InboundSpec{
+		Name:     "responses-entry",
+		Protocol: "openai_responses",
+		Path:     "/v1/responses",
+		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-to-anthropic"}},
+	})
+	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "responses-to-anthropic-route",
+		FromTags:    []string{"responses-to-anthropic"},
+		ToTags:      []string{"anthropic-primary"},
+		Strategy:    "failover",
+		TargetModel: "claude-sonnet-4-6",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "anthropic-primary",
+		Protocol:  "anthropic_messages",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "anthropic-primary",
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-4o-mini",
+		"input": "hello",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("route status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if len(requests) != 1 {
+		t.Fatalf("len(requests) = %d, want 1", len(requests))
+	}
+	if requests[0].Model != "claude-sonnet-4-6" {
+		t.Fatalf("upstream model = %q, want claude-sonnet-4-6", requests[0].Model)
+	}
+	if len(requests[0].Messages) != 1 {
+		t.Fatalf("len(upstream messages) = %d, want 1", len(requests[0].Messages))
+	}
+	if requests[0].Messages[0].Role != "user" {
+		t.Fatalf("upstream role = %q, want user", requests[0].Messages[0].Role)
+	}
+	if len(requests[0].Messages[0].Content) != 1 {
+		t.Fatalf("len(upstream content) = %d, want 1", len(requests[0].Messages[0].Content))
+	}
+	if requests[0].Messages[0].Content[0].Type != "text" || requests[0].Messages[0].Content[0].Text != "hello" {
+		t.Fatalf("upstream content[0] = %#v, want text hello", requests[0].Messages[0].Content[0])
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `"object":"response"`) || !strings.Contains(got, `"text":"pong"`) {
+		t.Fatalf("body = %q, want responses response bridged from anthropic outbound", got)
+	}
+	if !strings.Contains(got, `"input_tokens":18`) || !strings.Contains(got, `"output_tokens":13`) || !strings.Contains(got, `"total_tokens":31`) {
+		t.Fatalf("body = %q, want responses usage mapped from anthropic outbound", got)
 	}
 }
 

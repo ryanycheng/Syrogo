@@ -338,7 +338,7 @@ func writeOpenAIResponsesResponse(w http.ResponseWriter, resp runtime.Response) 
 	output := buildOpenAIResponsesOutput(resp)
 	body := map[string]any{
 		"id":     resp.ID,
-		"object": nonEmpty(resp.Object, "response"),
+		"object": "response",
 		"model":  resp.Model,
 		"output": output,
 	}
