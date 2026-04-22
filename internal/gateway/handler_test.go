@@ -830,6 +830,35 @@ func TestBuildRuntimeRequestFromResponsesFunctionOutputPreservesErrorStatus(t *t
 	}
 }
 
+func TestBuildRuntimeRequestAllowsEmptyAnthropicToolResultContent(t *testing.T) {
+	req := inboundRequest{
+		Model: "claude-sonnet-4-5",
+		Messages: []inboundMessage{{
+			Role: "tool",
+			Content: json.RawMessage(`[
+				{"type":"tool_result","tool_use_id":"toolu_empty","content":[]}
+			]`),
+		}},
+	}
+
+	got, err := buildRuntimeRequest(req)
+	if err != nil {
+		t.Fatalf("buildRuntimeRequest() error = %v", err)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("len(got.Messages) = %d, want 1", len(got.Messages))
+	}
+	if got.Messages[0].Role != runtime.MessageRoleTool {
+		t.Fatalf("got.Messages[0].Role = %q, want tool", got.Messages[0].Role)
+	}
+	if got.Messages[0].ToolCallID != "toolu_empty" {
+		t.Fatalf("got.Messages[0].ToolCallID = %q, want toolu_empty", got.Messages[0].ToolCallID)
+	}
+	if len(got.Messages[0].Parts) != 1 || got.Messages[0].Parts[0].Type != runtime.ContentPartTypeText || got.Messages[0].Parts[0].Text != "" {
+		t.Fatalf("got.Messages[0].Parts = %#v, want synthesized empty tool result part", got.Messages[0].Parts)
+	}
+}
+
 func TestBuildRuntimeRequestPreservesAnthropicMixedToolResultContentOrder(t *testing.T) {
 	req := inboundRequest{
 		Model: "claude-sonnet-4-5",
@@ -1294,6 +1323,27 @@ func TestChatCompletionsAcceptsOfficialToolsFormat(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsWritesStreamingUsageWithOpenAIFieldNames(t *testing.T) {
+	chunk := openAIStreamChunkWithArgumentsDelta(runtime.StreamEvent{
+		Type:       runtime.StreamEventUsage,
+		ResponseID: "chatcmpl_123",
+		Model:      "gpt-4o-mini",
+		Usage:      &runtime.Usage{InputTokens: 11, OutputTokens: 7, TotalTokens: 18},
+	}, map[int]string{})
+
+	body, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatalf("json.Marshal(chunk) error = %v", err)
+	}
+	got := string(body)
+	if !strings.Contains(got, `"prompt_tokens":11`) || !strings.Contains(got, `"completion_tokens":7`) || !strings.Contains(got, `"total_tokens":18`) {
+		t.Fatalf("chunk = %s, want OpenAI usage field names", body)
+	}
+	if strings.Contains(got, `"InputTokens"`) || strings.Contains(got, `"OutputTokens"`) || strings.Contains(got, `"TotalTokens"`) {
+		t.Fatalf("chunk = %s, want no runtime usage field names", body)
+	}
+}
+
 func TestChatCompletionsWritesArgumentsDeltaForStreamingToolCalls(t *testing.T) {
 	snapshots := map[int]string{}
 
@@ -1371,6 +1421,33 @@ func TestChatCompletionsWritesFinishReasonUsageAndNullContentForToolCalls(t *tes
 	}
 	if !strings.Contains(got, `"prompt_tokens":11`) || !strings.Contains(got, `"completion_tokens":7`) || !strings.Contains(got, `"total_tokens":18`) {
 		t.Fatalf("body = %q, want OpenAI usage object", got)
+	}
+}
+
+func TestAnthropicMessagesAcceptsEmptyToolResultContent(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testDualProtocolInbounds(), testOutbounds())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-5",
+		"messages": []map[string]any{{
+			"role": "tool",
+			"content": []map[string]any{{
+				"type": "tool_result",
+				"tool_use_id": "toolu_empty",
+				"content": []any{},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
 	}
 }
 

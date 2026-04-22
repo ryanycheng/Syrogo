@@ -219,7 +219,13 @@ func openAIStreamChunkWithArgumentsDelta(event runtime.StreamEvent, toolArgument
 			"delta": delta,
 		}}
 	case runtime.StreamEventUsage:
-		chunk["usage"] = event.Usage
+		if event.Usage != nil {
+			chunk["usage"] = map[string]any{
+				"prompt_tokens":     event.Usage.InputTokens,
+				"completion_tokens": event.Usage.OutputTokens,
+				"total_tokens":      event.Usage.TotalTokens,
+			}
+		}
 	case runtime.StreamEventMessageEnd:
 		chunk["choices"] = []map[string]any{{
 			"index":         0,

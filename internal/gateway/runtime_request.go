@@ -415,7 +415,7 @@ func parseToolResultContent(raw json.RawMessage) ([]semantic.Segment, error) {
 			segments = append(segments, semantic.Segment{Kind: semantic.SegmentData, Data: &semantic.DataPart{Format: block.Type, Value: append(json.RawMessage(nil), payload...)}})
 		}
 		if len(segments) == 0 {
-			return nil, fmt.Errorf("tool_result content must include at least one block")
+			return nil, nil
 		}
 		return segments, nil
 	}
