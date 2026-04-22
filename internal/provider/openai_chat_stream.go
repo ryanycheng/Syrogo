@@ -32,9 +32,11 @@ type openAIChatStreamChunk struct {
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-		TotalTokens  int `json:"total_tokens"`
+		InputTokens      int `json:"input_tokens"`
+		OutputTokens     int `json:"output_tokens"`
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
 	} `json:"usage,omitempty"`
 }
 
@@ -83,7 +85,7 @@ func decodeOpenAIChatStream(body io.Reader) (<-chan runtime.StreamEvent, error) 
 			}
 			if len(chunk.Choices) == 0 {
 				if chunk.Usage != nil {
-					usage = &runtime.Usage{InputTokens: chunk.Usage.InputTokens, OutputTokens: chunk.Usage.OutputTokens, TotalTokens: chunk.Usage.TotalTokens}
+					usage = usageFromOpenAIChatStreamChunk(chunk)
 					ch <- runtime.StreamEvent{Type: runtime.StreamEventUsage, ResponseID: messageID, Model: model, MessageRole: role, Usage: usage}
 				}
 				continue
@@ -123,7 +125,7 @@ func decodeOpenAIChatStream(body io.Reader) (<-chan runtime.StreamEvent, error) 
 				ch <- runtime.StreamEvent{Type: runtime.StreamEventContentDelta, ResponseID: messageID, Model: model, MessageRole: role, ToolCall: &tool, ToolCallIndex: call.Index}
 			}
 			if chunk.Usage != nil {
-				usage = &runtime.Usage{InputTokens: chunk.Usage.InputTokens, OutputTokens: chunk.Usage.OutputTokens, TotalTokens: chunk.Usage.TotalTokens}
+				usage = usageFromOpenAIChatStreamChunk(chunk)
 				ch <- runtime.StreamEvent{Type: runtime.StreamEventUsage, ResponseID: messageID, Model: model, MessageRole: role, Usage: usage}
 			}
 			switch choice.FinishReason {
@@ -147,6 +149,25 @@ func decodeOpenAIChatStream(body io.Reader) (<-chan runtime.StreamEvent, error) 
 		ch <- runtime.StreamEvent{Type: runtime.StreamEventMessageEnd, ResponseID: messageID, Model: model, MessageRole: role, FinishReason: finishReason, Usage: usage}
 	}()
 	return ch, nil
+}
+
+func usageFromOpenAIChatStreamChunk(chunk openAIChatStreamChunk) *runtime.Usage {
+	if chunk.Usage == nil {
+		return nil
+	}
+	inputTokens := chunk.Usage.InputTokens
+	if inputTokens == 0 {
+		inputTokens = chunk.Usage.PromptTokens
+	}
+	outputTokens := chunk.Usage.OutputTokens
+	if outputTokens == 0 {
+		outputTokens = chunk.Usage.CompletionTokens
+	}
+	return &runtime.Usage{
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  chunk.Usage.TotalTokens,
+	}
 }
 
 func compactJSONString(value string) string {

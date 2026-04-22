@@ -152,7 +152,7 @@ func writeOpenAIChatResponse(w http.ResponseWriter, resp runtime.Response) {
 	}
 	body := map[string]any{
 		"id":      resp.ID,
-		"object":  resp.Object,
+		"object":  "chat.completion",
 		"model":   resp.Model,
 		"choices": []map[string]any{choice},
 	}

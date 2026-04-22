@@ -49,6 +49,40 @@ func TestDecodeOpenAIChatStreamParsesToolCallsAndUsage(t *testing.T) {
 	}
 }
 
+func TestDecodeOpenAIChatStreamAcceptsOpenAIUsageFieldNames(t *testing.T) {
+	body := strings.NewReader(strings.Join([]string{
+		`data: {"id":"chatcmpl-usage-1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"delta":{"role":"assistant"},"finish_reason":""}]}`,
+		`data: {"id":"chatcmpl-usage-1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"delta":{"content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":18,"completion_tokens":13,"total_tokens":31}}`,
+		`data: [DONE]`,
+	}, "\n\n"))
+
+	ch, err := decodeOpenAIChatStream(body)
+	if err != nil {
+		t.Fatalf("decodeOpenAIChatStream() error = %v", err)
+	}
+
+	var usageEvent *runtime.StreamEvent
+	var endEvent *runtime.StreamEvent
+	for event := range ch {
+		e := event
+		if e.Type == runtime.StreamEventUsage {
+			usageEvent = &e
+		}
+		if e.Type == runtime.StreamEventMessageEnd {
+			endEvent = &e
+		}
+	}
+	if usageEvent == nil || usageEvent.Usage == nil {
+		t.Fatalf("usageEvent = %#v, want usage event", usageEvent)
+	}
+	if usageEvent.Usage.InputTokens != 18 || usageEvent.Usage.OutputTokens != 13 || usageEvent.Usage.TotalTokens != 31 {
+		t.Fatalf("usageEvent.Usage = %#v, want prompt=18 completion=13 total=31", usageEvent.Usage)
+	}
+	if endEvent == nil || endEvent.Usage == nil || endEvent.Usage.InputTokens != 18 || endEvent.Usage.OutputTokens != 13 || endEvent.Usage.TotalTokens != 31 {
+		t.Fatalf("endEvent = %#v, want final usage carried through", endEvent)
+	}
+}
+
 func TestDecodeOpenAIChatStreamDoesNotEmitEmptyToolArgumentsBeforeDelta(t *testing.T) {
 	body := strings.NewReader(strings.Join([]string{
 		`data: {"id":"chatcmpl-2","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"delta":{"role":"assistant"},"finish_reason":""}]}`,

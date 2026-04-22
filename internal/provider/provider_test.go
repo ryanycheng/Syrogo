@@ -952,6 +952,31 @@ func TestEncodeAnthropicMessagesRequestPreservesJSONToolResultPayload(t *testing
 	}
 }
 
+func TestEncodeAnthropicMessagesRequestUsesEmptyStringForEmptyToolResult(t *testing.T) {
+	payload := encodeAnthropicMessagesRequest(runtime.Request{
+		Model: "claude-sonnet-4-5",
+		Messages: []runtime.Message{{
+			Role:       runtime.MessageRoleTool,
+			ToolCallID: "tool_empty",
+		}},
+	})
+
+	body, ok := payload.(anthropicMessagesRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want anthropicMessagesRequest", payload)
+	}
+	if len(body.Messages) != 1 {
+		t.Fatalf("len(body.Messages) = %d, want 1", len(body.Messages))
+	}
+	got := body.Messages[0].Content[0]
+	if got.Type != "tool_result" || got.ToolUseID != "tool_empty" {
+		t.Fatalf("body.Messages[0].Content[0] = %#v, want tool_result with tool use id", got)
+	}
+	if got.Content != "" {
+		t.Fatalf("got.Content = %#v, want empty string for empty tool_result payload", got.Content)
+	}
+}
+
 func TestEncodeAnthropicMessagesRequestPreservesToolResultErrorFlag(t *testing.T) {
 	payload := encodeAnthropicMessagesRequest(runtime.Request{
 		Model: "claude-sonnet-4-5",
