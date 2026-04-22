@@ -164,6 +164,8 @@ Without `--version` or `--archive`, the installer resolves the latest GitHub rel
 
 For complete deployment examples, see [`docs/deploy.md`](./docs/deploy.md).
 
+For current project risks and suggested next steps, see [`docs/risk.md`](./docs/risk.md).
+
 ### 4. Start the service
 
 Prefer:

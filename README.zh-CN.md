@@ -164,6 +164,8 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 
 完整部署示例请见 [`docs/deploy.zh-CN.md`](./docs/deploy.zh-CN.md)。
 
+当前项目风险与建议下一步请见 [`docs/risk.zh-CN.md`](./docs/risk.zh-CN.md)。
+
 ### 4. 启动服务
 
 优先使用：
