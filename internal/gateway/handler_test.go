@@ -1323,71 +1323,88 @@ func TestChatCompletionsAcceptsOfficialToolsFormat(t *testing.T) {
 	}
 }
 
-func TestChatCompletionsWritesStreamingUsageWithOpenAIFieldNames(t *testing.T) {
-	chunk := openAIStreamChunkWithArgumentsDelta(runtime.StreamEvent{
-		Type:       runtime.StreamEventUsage,
-		ResponseID: "chatcmpl_123",
-		Model:      "gpt-4o-mini",
-		Usage:      &runtime.Usage{InputTokens: 11, OutputTokens: 7, TotalTokens: 18},
-	}, map[int]string{})
-
-	body, err := json.Marshal(chunk)
-	if err != nil {
-		t.Fatalf("json.Marshal(chunk) error = %v", err)
-	}
-	got := string(body)
-	if !strings.Contains(got, `"prompt_tokens":11`) || !strings.Contains(got, `"completion_tokens":7`) || !strings.Contains(got, `"total_tokens":18`) {
-		t.Fatalf("chunk = %s, want OpenAI usage field names", body)
-	}
-	if strings.Contains(got, `"InputTokens"`) || strings.Contains(got, `"OutputTokens"`) || strings.Contains(got, `"TotalTokens"`) {
-		t.Fatalf("chunk = %s, want no runtime usage field names", body)
-	}
-}
-
-func TestChatCompletionsWritesArgumentsDeltaForStreamingToolCalls(t *testing.T) {
-	snapshots := map[int]string{}
-
-	first := openAIStreamChunkWithArgumentsDelta(runtime.StreamEvent{
-		Type:          runtime.StreamEventContentDelta,
-		ResponseID:    "chatcmpl_123",
-		Model:         "gpt-4o-mini",
-		ToolCallIndex: 0,
-		ToolCall: &runtime.ToolCall{
-			ID:        "call_123",
-			Name:      "get_weather",
-			Arguments: `{"city":"sha`,
+func TestChatCompletionsStreamingCompatibilityChunks(t *testing.T) {
+	tests := []struct {
+		name    string
+		event   runtime.StreamEvent
+		check   func(t *testing.T, body string)
+		shared  map[int]string
+	}{
+		{
+			name: "usage field names",
+			event: runtime.StreamEvent{
+				Type:       runtime.StreamEventUsage,
+				ResponseID: "chatcmpl_123",
+				Model:      "gpt-4o-mini",
+				Usage:      &runtime.Usage{InputTokens: 11, OutputTokens: 7, TotalTokens: 18},
+			},
+			check: func(t *testing.T, body string) {
+				t.Helper()
+				if !strings.Contains(body, `"prompt_tokens":11`) || !strings.Contains(body, `"completion_tokens":7`) || !strings.Contains(body, `"total_tokens":18`) {
+					t.Fatalf("chunk = %s, want OpenAI usage field names", body)
+				}
+				if strings.Contains(body, `"InputTokens"`) || strings.Contains(body, `"OutputTokens"`) || strings.Contains(body, `"TotalTokens"`) {
+					t.Fatalf("chunk = %s, want no runtime usage field names", body)
+				}
+			},
+			shared: map[int]string{},
 		},
-	}, snapshots)
-	second := openAIStreamChunkWithArgumentsDelta(runtime.StreamEvent{
-		Type:          runtime.StreamEventContentDelta,
-		ResponseID:    "chatcmpl_123",
-		Model:         "gpt-4o-mini",
-		ToolCallIndex: 0,
-		ToolCall: &runtime.ToolCall{
-			ID:        "call_123",
-			Name:      "get_weather",
-			Arguments: `{"city":"shanghai"}`,
-		},
-	}, snapshots)
-
-	firstBody, err := json.Marshal(first)
-	if err != nil {
-		t.Fatalf("json.Marshal(first) error = %v", err)
-	}
-	secondBody, err := json.Marshal(second)
-	if err != nil {
-		t.Fatalf("json.Marshal(second) error = %v", err)
 	}
 
-	if !strings.Contains(string(firstBody), `"arguments":"{\"city\":\"sha"`) {
-		t.Fatalf("first chunk = %s, want first arguments delta", firstBody)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chunk := openAIStreamChunkWithArgumentsDelta(tt.event, tt.shared)
+			body, err := json.Marshal(chunk)
+			if err != nil {
+				t.Fatalf("json.Marshal(chunk) error = %v", err)
+			}
+			tt.check(t, string(body))
+		})
 	}
-	if !strings.Contains(string(secondBody), `"arguments":"nghai\"}"`) {
-		t.Fatalf("second chunk = %s, want incremental arguments delta", secondBody)
-	}
-	if strings.Contains(string(secondBody), `"arguments":"{\"city\":\"shanghai\"}"`) {
-		t.Fatalf("second chunk = %s, want delta not full snapshot", secondBody)
-	}
+
+	t.Run("tool call arguments delta", func(t *testing.T) {
+		snapshots := map[int]string{}
+		first := openAIStreamChunkWithArgumentsDelta(runtime.StreamEvent{
+			Type:          runtime.StreamEventContentDelta,
+			ResponseID:    "chatcmpl_123",
+			Model:         "gpt-4o-mini",
+			ToolCallIndex: 0,
+			ToolCall: &runtime.ToolCall{
+				ID:        "call_123",
+				Name:      "get_weather",
+				Arguments: `{"city":"sha`,
+			},
+		}, snapshots)
+		second := openAIStreamChunkWithArgumentsDelta(runtime.StreamEvent{
+			Type:          runtime.StreamEventContentDelta,
+			ResponseID:    "chatcmpl_123",
+			Model:         "gpt-4o-mini",
+			ToolCallIndex: 0,
+			ToolCall: &runtime.ToolCall{
+				ID:        "call_123",
+				Name:      "get_weather",
+				Arguments: `{"city":"shanghai"}`,
+			},
+		}, snapshots)
+
+		firstBody, err := json.Marshal(first)
+		if err != nil {
+			t.Fatalf("json.Marshal(first) error = %v", err)
+		}
+		secondBody, err := json.Marshal(second)
+		if err != nil {
+			t.Fatalf("json.Marshal(second) error = %v", err)
+		}
+		if !strings.Contains(string(firstBody), `"arguments":"{\"city\":\"sha"`) {
+			t.Fatalf("first chunk = %s, want first arguments delta", firstBody)
+		}
+		if !strings.Contains(string(secondBody), `"arguments":"nghai\"}"`) {
+			t.Fatalf("second chunk = %s, want incremental arguments delta", secondBody)
+		}
+		if strings.Contains(string(secondBody), `"arguments":"{\"city\":\"shanghai\"}"`) {
+			t.Fatalf("second chunk = %s, want delta not full snapshot", secondBody)
+		}
+	})
 }
 
 func TestChatCompletionsWritesFinishReasonUsageAndNullContentForToolCalls(t *testing.T) {
@@ -1424,30 +1441,43 @@ func TestChatCompletionsWritesFinishReasonUsageAndNullContentForToolCalls(t *tes
 	}
 }
 
-func TestAnthropicMessagesAcceptsEmptyToolResultContent(t *testing.T) {
+func TestAnthropicMessagesCompatibilityInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "accepts empty tool_result content",
+			body: map[string]any{
+				"model": "claude-sonnet-4-5",
+				"messages": []map[string]any{{
+					"role": "tool",
+					"content": []map[string]any{{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_empty",
+						"content":     []any{},
+					}},
+				}},
+			},
+		},
+	}
+
 	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testDualProtocolInbounds(), testOutbounds())
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	body, err := json.Marshal(map[string]any{
-		"model": "claude-sonnet-4-5",
-		"messages": []map[string]any{{
-			"role": "tool",
-			"content": []map[string]any{{
-				"type": "tool_result",
-				"tool_use_id": "toolu_empty",
-				"content": []any{},
-			}},
-		}},
-	})
-	if err != nil {
-		t.Fatalf("json.Marshal() error = %v", err)
-	}
-
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(tt.body)
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+			}
+		})
 	}
 }
 
