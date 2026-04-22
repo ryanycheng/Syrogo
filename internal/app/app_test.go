@@ -1192,8 +1192,13 @@ func TestNewStreamsAnthropicJSONBlockFromAnthropicMessagesOutbound(t *testing.T)
 		t.Fatalf("stream status = %d, want 200, body = %s", w.Code, w.Body.String())
 	}
 	got := w.Body.String()
-	if !strings.Contains(got, `"type":"json"`) || !strings.Contains(got, `"value":{"city":"shanghai","forecast":"sunny"}`) {
+	textIndex := strings.Index(got, `"text":"before json"`)
+	jsonIndex := strings.Index(got, `"value":{"city":"shanghai","forecast":"sunny"}`)
+	if !strings.Contains(got, `"type":"json"`) || jsonIndex == -1 {
 		t.Fatalf("body = %q, want anthropic json content block in listener stream", got)
+	}
+	if textIndex == -1 || textIndex > jsonIndex {
+		t.Fatalf("body = %q, want text block before json block", got)
 	}
 	if strings.Contains(got, `"text":"{\"city\":\"shanghai\",\"forecast\":\"sunny\"}"`) {
 		t.Fatalf("body = %q, want no downgraded json text block", got)
@@ -1796,6 +1801,59 @@ func TestNewBridgesAnthropicToolsToOpenAIResponsesOutbound(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"type":"tool_use"`) || !strings.Contains(w.Body.String(), `"name":"get_weather"`) {
 		t.Fatalf("body = %q, want anthropic tool_use response", w.Body.String())
+	}
+}
+
+func TestNewRejectsResponsesPreviousResponseIDWhenCapabilityDisabled(t *testing.T) {
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds[1].Clients[0].Tag = "anthropic-to-responses"
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "anthropic-to-responses-route",
+		FromTags:    []string{"anthropic-to-responses"},
+		ToTags:      []string{"responses-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}
+	falseValue := false
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "cliproxy-responses",
+		Protocol:  "openai_responses",
+		Endpoint:  "https://example.com/v1",
+		AuthToken: "bridge-key",
+		Tag:       "responses-primary",
+		Capabilities: config.OutboundCapabilities{
+			ResponsesPreviousResponseID: &falseValue,
+		},
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model":                "claude-sonnet-4-6",
+		"previous_response_id": "resp_prev_123",
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "继续之前的对话",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "outbound does not support responses previous_response_id continuation") {
+		t.Fatalf("body = %q, want previous_response_id capability error", w.Body.String())
 	}
 }
 
