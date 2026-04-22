@@ -210,6 +210,74 @@ func TestNewStreamsSSEFromListener(t *testing.T) {
 	}
 }
 
+func TestNewStreamsOpenAIUsageShapeFromListener(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		if got := r.Header.Get("Accept"); got != "text/event-stream" {
+			t.Fatalf("Accept = %q, want text/event-stream", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, strings.Join([]string{
+			`data: {"id":"chatcmpl-stream-usage","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"delta":{"role":"assistant"}}]}`,
+			`data: {"id":"chatcmpl-stream-usage","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"delta":{"content":"pong"}}]}`,
+			`data: {"id":"chatcmpl-stream-usage","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}`,
+			`data: [DONE]`,
+		}, "\n\n"))
+	}))
+	defer upstream.Close()
+
+	cfg := baseConfig()
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "openai-stream",
+		Protocol:  "openai_chat",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "stream-key",
+		Tag:       "openai-tag",
+	}}
+	cfg.Routing.Rules[0].ToTags = []string{"openai-tag"}
+	cfg.Routing.Rules[0].TargetModel = "gpt-4o-mini"
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model":  "gpt-4",
+		"stream": true,
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "hello",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("stream status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+
+	got := w.Body.String()
+	if !strings.Contains(got, `"prompt_tokens":11`) || !strings.Contains(got, `"completion_tokens":7`) || !strings.Contains(got, `"total_tokens":18`) {
+		t.Fatalf("body = %q, want OpenAI usage field names", got)
+	}
+	if strings.Contains(got, `"input_tokens":`) || strings.Contains(got, `"output_tokens":`) {
+		t.Fatalf("body = %q, want no provider usage field names", got)
+	}
+	if !strings.Contains(got, `"finish_reason":"stop"`) || !strings.Contains(got, "data: [DONE]\n\n") {
+		t.Fatalf("body = %q, want stop finish_reason and DONE frame", got)
+	}
+}
+
 func TestNewSupportsAnthropicInboundProtocol(t *testing.T) {
 	app, err := New(baseDualProtocolConfig())
 	if err != nil {
