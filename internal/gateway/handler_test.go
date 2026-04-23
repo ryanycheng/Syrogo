@@ -1628,6 +1628,64 @@ func TestResponsesStreamsFunctionToolCallFrames(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamsCustomToolCallFrames(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %q, want /responses", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&map[string]any{}); err != nil {
+			t.Fatalf("json.NewDecoder() error = %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_custom_stream_123",
+			"object": "response",
+			"model":  "gpt-4o-mini",
+			"output": []map[string]any{{
+				"type":    "custom_tool_call",
+				"call_id": "call_custom_123",
+				"name":    "shell_exec",
+				"input":   "echo hello",
+			}},
+			"usage": map[string]any{"input_tokens": 9, "output_tokens": 4, "total_tokens": 13},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, config.OutboundCapabilities{}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"responses-tag"}, Strategy: "failover"}}}, testDualProtocolInbounds(), []config.OutboundSpec{{Name: "responses", Protocol: "openai_responses", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "responses-tag"}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model":  "gpt-4o-mini",
+		"stream": true,
+		"input":  "hello",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `event: response.output_item.added`) || !strings.Contains(got, `"type":"custom_tool_call"`) || !strings.Contains(got, `"call_id":"call_custom_123"`) {
+		t.Fatalf("body = %q, want custom_tool_call output item added", got)
+	}
+	if strings.Contains(got, `event: response.function_call_arguments.done`) {
+		t.Fatalf("body = %q, should not emit function_call_arguments.done for custom tool", got)
+	}
+	if !strings.Contains(got, `"input":"echo hello"`) {
+		t.Fatalf("body = %q, want custom tool input payload", got)
+	}
+	if !strings.Contains(got, `event: response.output_item.done`) || !strings.Contains(got, `event: response.completed`) {
+		t.Fatalf("body = %q, want output_item.done and completed frames", got)
+	}
+}
+
 func TestChatCompletionsStreamsSSE(t *testing.T) {
 	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
 	mux := http.NewServeMux()
@@ -2403,6 +2461,100 @@ func TestAnthropicMessagesStreamingAlwaysEmitsUsageShape(t *testing.T) {
 	}
 	if !strings.Contains(got, `"stop_reason":"end_turn"`) {
 		t.Fatalf("body = %q, want normalized anthropic stop reason", got)
+	}
+}
+
+func TestAnthropicMessagesStreamingBridgesToolUseFromOpenAIResponsesProvider(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %q, want /responses", r.URL.Path)
+		}
+		var body struct {
+			Tools []struct {
+				Type string `json:"type"`
+				Name string `json:"name"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("json.NewDecoder() error = %v", err)
+		}
+		if len(body.Tools) != 1 || body.Tools[0].Type != "function" || body.Tools[0].Name != "get_weather" {
+			t.Fatalf("body.Tools = %#v, want forwarded function tool", body.Tools)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_tool_stream_bridge_123",
+			"object": "response",
+			"model":  "gpt-5.4",
+			"output": []map[string]any{{
+				"type":      "function_call",
+				"call_id":   "call_123",
+				"name":      "get_weather",
+				"arguments": `{"city":"shanghai"}`,
+			}},
+			"usage": map[string]any{"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{
+		"responses": provider.NewOpenAIResponsesCompatible("responses", upstream.URL, []string{"test-key"}, config.OutboundCapabilities{}, upstream.Client()),
+	}, config.RoutingConfig{Rules: []config.RoutingRule{{
+		Name:        "anthropic-to-responses",
+		FromTags:    []string{"office"},
+		ToTags:      []string{"responses-tag"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}}, testDualProtocolInbounds(), []config.OutboundSpec{{
+		Name:      "responses",
+		Protocol:  "openai_responses",
+		Endpoint:  upstream.URL,
+		AuthToken: "test-key",
+		Tag:       "responses-tag",
+	}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model":  "claude-sonnet-4-5",
+		"stream": true,
+		"tools": []map[string]any{{
+			"name":        "get_weather",
+			"description": "Get weather by city",
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"city": map[string]any{"type": "string"}},
+				"required":   []string{"city"},
+			},
+		}},
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "check shanghai weather",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `event: content_block_start`) || !strings.Contains(got, `"type":"tool_use"`) || !strings.Contains(got, `"id":"call_123"`) || !strings.Contains(got, `"name":"get_weather"`) || !strings.Contains(got, `"input":{}`) {
+		t.Fatalf("body = %q, want anthropic tool_use content block start", got)
+	}
+	if !strings.Contains(got, `"type":"input_json_delta"`) || (!strings.Contains(got, `"partial_json":"{\"city\":\"shanghai\"}"`) && (!strings.Contains(got, `"partial_json":"{\"city\":\"sh`) || !strings.Contains(got, `"partial_json":"anghai\"}"`))) {
+		t.Fatalf("body = %q, want anthropic input_json_delta for bridged responses tool call", got)
+	}
+	if !strings.Contains(got, `"stop_reason":"tool_use"`) {
+		t.Fatalf("body = %q, want tool_use stop reason", got)
+	}
+	if !strings.Contains(got, `"usage":{"input_tokens":11,"output_tokens":7}`) {
+		t.Fatalf("body = %q, want anthropic snake_case usage from responses provider", got)
 	}
 }
 

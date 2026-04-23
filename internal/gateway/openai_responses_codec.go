@@ -610,23 +610,32 @@ func openAIResponsesStreamFrames(plan runtime.ExecutionPlan, events <-chan runti
 				call := *event.ToolCall
 				toolCalls = append(toolCalls, call)
 				itemID := nonEmpty(call.ID, fmt.Sprintf("call_%d", event.ToolCallIndex))
+				item := map[string]any{
+					"id":      itemID,
+					"status":  "in_progress",
+					"type":    "function_call",
+					"call_id": call.ID,
+					"name":    call.Name,
+				}
+				if call.Type == "custom" {
+					item["type"] = "custom_tool_call"
+					item["input"] = call.Input
+				} else {
+					item["arguments"] = ""
+				}
 				appendFrame("response.output_item.added", map[string]any{
 					"output_index": toolOutputIndex + event.ToolCallIndex,
-					"item": map[string]any{
-						"id":        itemID,
-						"status":    "in_progress",
-						"type":      "function_call",
-						"call_id":   call.ID,
-						"name":      call.Name,
-						"arguments": "",
-					},
+					"item":         item,
 				})
-				appendFrame("response.function_call_arguments.done", map[string]any{
-					"output_index": toolOutputIndex + event.ToolCallIndex,
-					"item_id":      itemID,
-					"name":         call.Name,
-					"arguments":    call.Arguments,
-				})
+				if call.Type != "custom" {
+					appendFrame("response.function_call_arguments.done", map[string]any{
+						"output_index": toolOutputIndex + event.ToolCallIndex,
+						"item_id":      itemID,
+						"name":         call.Name,
+						"arguments":    call.Arguments,
+					})
+				}
+
 				appendFrame("response.output_item.done", map[string]any{
 					"output_index": toolOutputIndex + event.ToolCallIndex,
 					"item":         functionCallItem(call, "completed"),
