@@ -1389,6 +1389,57 @@ func TestAnthropicMessagesCompatibleStreamCompletionEmitsToolCallDelta(t *testin
 	}
 }
 
+func TestAnthropicMessagesCompatibleStreamCompletionEmitsFinishReasonAndUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_usage_123",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       "claude-sonnet-4-5",
+			"stop_reason": "tool_use",
+			"content": []map[string]any{{
+				"type":  "tool_use",
+				"id":    "tool_123",
+				"name":  "get_weather",
+				"input": map[string]any{"city": "shanghai"},
+			}},
+			"usage": map[string]any{"input_tokens": 11, "output_tokens": 7},
+		})
+	}))
+	defer server.Close()
+
+	p := NewAnthropicMessagesCompatible("anthropic", server.URL, []string{"test-key"}, server.Client())
+	ch, err := p.StreamCompletion(context.Background(), runtime.Request{Model: "claude-sonnet-4-5", Stream: true})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+
+	var usageEvent *runtime.StreamEvent
+	var endEvent *runtime.StreamEvent
+	for event := range ch {
+		if event.Usage != nil {
+			e := event
+			usageEvent = &e
+		}
+		if event.Type == runtime.StreamEventMessageEnd {
+			e := event
+			endEvent = &e
+		}
+	}
+	if usageEvent == nil {
+		t.Fatal("usageEvent = nil, want usage event from local replay stream")
+	}
+	if usageEvent.Usage.InputTokens != 11 || usageEvent.Usage.OutputTokens != 7 {
+		t.Fatalf("usageEvent.Usage = %#v, want preserved usage", usageEvent.Usage)
+	}
+	if endEvent == nil {
+		t.Fatal("endEvent = nil, want message end")
+	}
+	if endEvent.FinishReason != runtime.FinishReasonToolUse {
+		t.Fatalf("endEvent.FinishReason = %q, want tool_use", endEvent.FinishReason)
+	}
+}
+
 func TestOpenAIResponsesCompatibleStreamCompletionDoesNotSendStreamToUpstream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req openAIResponsesRequest
