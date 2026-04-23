@@ -361,6 +361,87 @@ func TestNewStreamsResponsesJSONContentPartFromResponsesOutbound(t *testing.T) {
 	}
 }
 
+func TestNewStreamsResponsesFunctionToolCallUsageFromResponsesOutbound(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q, want /v1/responses", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_tool_stream_usage_123",
+			"object": "response",
+			"model":  "gpt-4o-mini",
+			"output": []map[string]any{{
+				"type":      "function_call",
+				"call_id":   "call_123",
+				"name":      "get_weather",
+				"arguments": `{"city":"shanghai"}`,
+			}},
+			"usage": map[string]any{"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds = append(cfg.Inbounds, config.InboundSpec{
+		Name:     "responses-entry",
+		Protocol: "openai_responses",
+		Path:     "/v1/responses",
+		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-office"}},
+	})
+	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "responses-stream-route",
+		FromTags:    []string{"responses-office"},
+		ToTags:      []string{"responses-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-4o-mini",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "responses-primary",
+		Protocol:  "openai_responses",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "responses-primary",
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model":  "gpt-4o-mini",
+		"stream": true,
+		"input":  "hello",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `event: response.output_item.added`) || !strings.Contains(got, `"type":"function_call"`) || !strings.Contains(got, `"call_id":"call_123"`) {
+		t.Fatalf("body = %q, want function_call output item added", got)
+	}
+	if !strings.Contains(got, `event: response.function_call_arguments.done`) || !strings.Contains(got, `"arguments":"{\"city\":\"shanghai\"}"`) {
+		t.Fatalf("body = %q, want function_call arguments done frame", got)
+	}
+	if !strings.Contains(got, `event: response.output_item.done`) || !strings.Contains(got, `"name":"get_weather"`) {
+		t.Fatalf("body = %q, want function_call output item done", got)
+	}
+	if !strings.Contains(got, `event: response.completed`) || !strings.Contains(got, `"input_tokens":11`) || !strings.Contains(got, `"output_tokens":7`) || !strings.Contains(got, `"total_tokens":18`) {
+		t.Fatalf("body = %q, want completed frame with usage", got)
+	}
+	if strings.Index(got, `event: response.output_item.added`) > strings.Index(got, `event: response.function_call_arguments.done`) || strings.Index(got, `event: response.function_call_arguments.done`) > strings.Index(got, `event: response.output_item.done`) || strings.Index(got, `event: response.output_item.done`) > strings.Index(got, `event: response.completed`) {
+		t.Fatalf("body = %q, want stable function_call streaming frame order", got)
+	}
+}
+
 func TestNewBridgesAnthropicInboundToOpenAIResponsesOutbound(t *testing.T) {
 	app, err := New(baseDualProtocolConfig())
 	if err != nil {

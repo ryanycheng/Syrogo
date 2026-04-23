@@ -1389,6 +1389,62 @@ func TestAnthropicMessagesCompatibleStreamCompletionEmitsToolCallDelta(t *testin
 	}
 }
 
+func TestOpenAIResponsesCompatibleStreamCompletionDoesNotSendStreamToUpstream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req openAIResponsesRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		if req.Model != "gpt-4o-mini" {
+			t.Fatalf("req.Model = %q, want gpt-4o-mini", req.Model)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_stream_123",
+			"object": "response",
+			"model":  req.Model,
+			"output": []map[string]any{{
+				"type":      "function_call",
+				"call_id":   "call_123",
+				"name":      "get_weather",
+				"arguments": `{"city":"shanghai"}`,
+			}},
+			"usage": map[string]any{"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
+		})
+	}))
+	defer server.Close()
+
+	p := NewOpenAIResponsesCompatible("responses", server.URL, []string{"test-key"}, config.OutboundCapabilities{}, server.Client())
+	ch, err := p.StreamCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini", Stream: true})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+
+	var toolEvent *runtime.StreamEvent
+	var usageEvent *runtime.StreamEvent
+	for event := range ch {
+		if event.ToolCall != nil {
+			e := event
+			toolEvent = &e
+		}
+		if event.Usage != nil {
+			e := event
+			usageEvent = &e
+		}
+	}
+	if toolEvent == nil {
+		t.Fatal("toolEvent = nil, want tool call delta from local replay stream")
+	}
+	if toolEvent.ToolCall.ID != "call_123" || toolEvent.ToolCall.Name != "get_weather" {
+		t.Fatalf("toolEvent.ToolCall = %#v, want decoded tool call", toolEvent.ToolCall)
+	}
+	if usageEvent == nil {
+		t.Fatal("usageEvent = nil, want usage event from local replay stream")
+	}
+	if usageEvent.Usage.InputTokens != 11 || usageEvent.Usage.OutputTokens != 7 || usageEvent.Usage.TotalTokens != 18 {
+		t.Fatalf("usageEvent.Usage = %#v, want preserved usage", usageEvent.Usage)
+	}
+}
+
 func TestOpenAICompatibleChatCompletionSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
