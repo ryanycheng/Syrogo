@@ -389,6 +389,110 @@ func TestNewBridgesAnthropicInboundToOpenAIResponsesOutbound(t *testing.T) {
 	}
 }
 
+func TestNewBridgesAnthropicInboundToAnthropicOutbound(t *testing.T) {
+	var upstreamBody anthropicMessagesUpstreamRequest
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("path = %q, want /v1/messages", r.URL.Path)
+		}
+		if got := r.Header.Get("x-api-key"); got != "bridge-key" {
+			t.Fatalf("x-api-key = %q, want bridge-key", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_anthropic_to_anthropic_1",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       upstreamBody.Model,
+			"stop_reason": "end_turn",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "pong",
+			}},
+			"usage": map[string]any{"input_tokens": 18, "output_tokens": 13},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds[1].Clients[0].Tag = "anthropic-to-anthropic"
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "anthropic-to-anthropic-route",
+		FromTags:    []string{"anthropic-to-anthropic"},
+		ToTags:      []string{"anthropic-primary"},
+		Strategy:    "failover",
+		TargetModel: "claude-sonnet-4-6",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "anthropic-primary",
+		Protocol:  "anthropic_messages",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "anthropic-primary",
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model":      "claude-sonnet-4-5",
+		"max_tokens": 256,
+		"system": []map[string]any{{
+			"type": "text",
+			"text": "You are a helpful assistant.",
+		}},
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "只回复 pong",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("route status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if upstreamBody.Model != "claude-sonnet-4-6" {
+		t.Fatalf("upstream model = %q, want claude-sonnet-4-6", upstreamBody.Model)
+	}
+	if upstreamBody.MaxTokens != 256 {
+		t.Fatalf("upstream max_tokens = %d, want 256", upstreamBody.MaxTokens)
+	}
+	if upstreamBody.System != "You are a helpful assistant." {
+		t.Fatalf("upstream system = %q, want bridged system text", upstreamBody.System)
+	}
+	if len(upstreamBody.Messages) != 1 {
+		t.Fatalf("len(upstream messages) = %d, want 1", len(upstreamBody.Messages))
+	}
+	if upstreamBody.Messages[0].Role != "user" {
+		t.Fatalf("upstream role = %q, want user", upstreamBody.Messages[0].Role)
+	}
+	if len(upstreamBody.Messages[0].Content) != 1 {
+		t.Fatalf("len(upstream content) = %d, want 1", len(upstreamBody.Messages[0].Content))
+	}
+	if upstreamBody.Messages[0].Content[0].Type != "text" || upstreamBody.Messages[0].Content[0].Text != "只回复 pong" {
+		t.Fatalf("upstream content[0] = %#v, want text pong request", upstreamBody.Messages[0].Content[0])
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `"type":"message"`) || !strings.Contains(got, `"text":"pong"`) {
+		t.Fatalf("body = %q, want anthropic message response with pong", got)
+	}
+	if !strings.Contains(got, `"input_tokens":18`) || !strings.Contains(got, `"output_tokens":13`) {
+		t.Fatalf("body = %q, want anthropic usage object", got)
+	}
+}
+
 func TestNewBridgesOpenAIChatInboundToOpenAIResponsesOutbound(t *testing.T) {
 	var upstreamBody struct {
 		Model string `json:"model"`
