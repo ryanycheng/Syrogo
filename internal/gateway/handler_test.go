@@ -1403,13 +1403,13 @@ func TestResponsesCustomToolLoopUsesOpenAIResponsesProvider(t *testing.T) {
 			Format json.RawMessage `json:"format"`
 		} `json:"tools"`
 		Input []struct {
-			Type    string `json:"type"`
-			Role    string `json:"role"`
-			CallID  string `json:"call_id"`
-			Name    string `json:"name"`
-			Input   string `json:"input"`
-			Output  string `json:"output"`
-			Status  string `json:"status"`
+			Type   string `json:"type"`
+			Role   string `json:"role"`
+			CallID string `json:"call_id"`
+			Name   string `json:"name"`
+			Input  string `json:"input"`
+			Output string `json:"output"`
+			Status string `json:"status"`
 		} `json:"input"`
 	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

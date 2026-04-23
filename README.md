@@ -93,6 +93,18 @@ The current version supports:
 - local development logging and trace debugging
 - unit, regression, and flow/integration coverage for key paths
 
+### Protocol and capability matrix
+
+| Area | Current support | Notes |
+| --- | --- | --- |
+| Inbound protocols | `openai_chat`, `openai_responses`, `anthropic_messages` | Exposed as `/v1/chat/completions`, `/v1/responses`, `/v1/messages` |
+| Outbound protocols | `mock`, `openai_chat`, `openai_responses`, `anthropic_messages` | Routing selects outbound by tag |
+| Routing | `failover`, `round_robin`, `target_model` override | Match starts from inbound client tag |
+| Streaming | Chat / Responses / Messages SSE serialization | Some compatibility paths replay local `runtime.StreamEvent` instead of upstream frame passthrough |
+| Tool calling | Minimal function tool loop and custom tool coverage | Responses and Anthropic bridge paths have regression coverage |
+| Responses capabilities | `responses_previous_response_id`, `responses_builtin_tools`, `responses_tool_result_status_error`, `responses_assistant_history_native` | Capability declarations only apply to `openai_responses` outbounds |
+| Validation and tests | Config validation, smoke tests, protocol regressions | `make test`, `make build`, `make lint` pass locally |
+
 ---
 
 ## Project structure
