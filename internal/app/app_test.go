@@ -3259,6 +3259,75 @@ func TestNewBridgesAnthropicLeadingSystemReminderToOpenAIResponsesWithoutInstruc
 	}
 }
 
+func TestNewBindsAllCoreInboundsForMinimalSmoke(t *testing.T) {
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds = append(cfg.Inbounds, config.InboundSpec{
+		Name:     "responses-entry",
+		Protocol: "openai_responses",
+		Path:     "/v1/responses",
+		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "office"}},
+	})
+	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	if len(listeners) != 1 {
+		t.Fatalf("len(listeners) = %d, want 1", len(listeners))
+	}
+
+	chatBody, err := json.Marshal(map[string]any{
+		"model": "gpt-4o-mini",
+		"messages": []map[string]any{{
+			"role":    "user",
+			"content": "hello",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(chatBody) error = %v", err)
+	}
+	chatResp := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(chatResp, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", chatBody))
+	if chatResp.Code != http.StatusOK {
+		t.Fatalf("chat status = %d, want 200, body = %s", chatResp.Code, chatResp.Body.String())
+	}
+
+	responsesBody, err := json.Marshal(map[string]any{
+		"model": "gpt-4o-mini",
+		"input": "hello",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(responsesBody) error = %v", err)
+	}
+	responsesResp := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(responsesResp, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", responsesBody))
+	if responsesResp.Code != http.StatusOK {
+		t.Fatalf("responses status = %d, want 200, body = %s", responsesResp.Code, responsesResp.Body.String())
+	}
+
+	anthropicBody, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-5",
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "hello",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(anthropicBody) error = %v", err)
+	}
+	anthropicResp := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(anthropicResp, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", anthropicBody))
+	if anthropicResp.Code != http.StatusOK {
+		t.Fatalf("anthropic status = %d, want 200, body = %s", anthropicResp.Code, anthropicResp.Body.String())
+	}
+}
+
 func TestNewFailsWithUnsupportedProviderProtocol(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Outbounds = []config.OutboundSpec{{Name: "bad", Protocol: "unknown", Tag: "bad-tag"}}
