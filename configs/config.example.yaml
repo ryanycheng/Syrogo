@@ -87,7 +87,8 @@ outbounds:
     auth_token: "${OPENAI_RESPONSES_API_KEY_PRIMARY}"
     tag: "responses-primary"
     # Optional provider-specific Responses compatibility overrides.
-    # Example for a partially compatible upstream:
+    # Use this when the upstream is only partially compatible with the official Responses API.
+    # Disabled capabilities are rejected or rewritten by the provider compatibility layer.
     # capabilities:
     #   responses_previous_response_id: false
     #   responses_builtin_tools: false

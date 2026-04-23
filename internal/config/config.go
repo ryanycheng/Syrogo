@@ -174,6 +174,13 @@ func (c Config) Validate() error {
 				return fmt.Errorf("outbounds.%s.auth_token is required", outbound.Name)
 			}
 		}
+		switch outbound.Protocol {
+		case "openai_responses":
+		case "mock", "openai_chat", "anthropic_messages":
+			if outbound.Capabilities != (OutboundCapabilities{}) {
+				return fmt.Errorf("outbounds.%s.capabilities is only supported for openai_responses", outbound.Name)
+			}
+		}
 		outboundNames[outbound.Name] = struct{}{}
 		outboundTags[outbound.Tag] = struct{}{}
 	}

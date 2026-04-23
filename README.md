@@ -87,6 +87,7 @@ The current version supports:
   - `anthropic_messages`
 - OpenAI-compatible and Anthropic-compatible upstream calls
 - basic SSE streaming responses
+- local replay streaming for some compatibility paths
 - a minimal tool-calling loop
 - `openai_responses` compatibility declarations
 - local development logging and trace debugging
@@ -190,6 +191,28 @@ Recommended paths to verify first:
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
 - `POST /v1/messages`
+
+Minimal local verification examples:
+
+```bash
+curl http://127.0.0.1:23234/healthz
+
+curl http://127.0.0.1:23234/v1/chat/completions \
+  -H 'Authorization: Bearer <chat-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}'
+
+curl http://127.0.0.1:23234/v1/responses \
+  -H 'Authorization: Bearer <responses-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o-mini","input":"hello"}'
+
+curl http://127.0.0.1:23234/v1/messages \
+  -H 'x-api-key: <anthropic-token>' \
+  -H 'anthropic-version: 2023-06-01' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-sonnet-4-5","max_tokens":128,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}'
+```
 
 ### 7. Declare Responses compatibility
 

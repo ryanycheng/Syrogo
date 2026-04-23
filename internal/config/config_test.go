@@ -211,6 +211,27 @@ func TestConfigValidateSupportsOpenAIResponsesOutbound(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRejectsCapabilitiesOnNonResponsesOutbound(t *testing.T) {
+	cfg := validConfig()
+	disabled := false
+	cfg.Outbounds[0] = OutboundSpec{
+		Name:      "openai",
+		Protocol:  "openai_chat",
+		Tag:       "openai-tag",
+		Endpoint:  "https://example.com/v1",
+		AuthToken: "key-1",
+		Capabilities: OutboundCapabilities{
+			ResponsesBuiltinTools: &disabled,
+		},
+	}
+	cfg.Routing.Rules[0].ToTags = []string{"openai-tag"}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "outbounds.openai.capabilities is only supported for openai_responses" {
+		t.Fatalf("Validate() error = %v, want unsupported capabilities error", err)
+	}
+}
+
 func TestConfigLoadParsesOutboundCapabilities(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
