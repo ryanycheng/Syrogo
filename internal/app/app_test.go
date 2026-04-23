@@ -2400,6 +2400,267 @@ func TestNewBridgesResponsesInboundToOpenAIResponsesOutbound(t *testing.T) {
 	}
 }
 
+func TestNewRewritesResponsesAssistantHistoryWhenCapabilityDisabled(t *testing.T) {
+	var upstreamBody struct {
+		Model string `json:"model"`
+		Input []struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"input"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_assistant_history_1",
+			"object": "response",
+			"model":  upstreamBody.Model,
+			"status": "completed",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "pong",
+				}},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds = append(cfg.Inbounds, config.InboundSpec{
+		Name:     "responses-entry",
+		Protocol: "openai_responses",
+		Path:     "/v1/responses",
+		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-to-responses"}},
+	})
+	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
+	falseValue := false
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "responses-to-responses-route",
+		FromTags:    []string{"responses-to-responses"},
+		ToTags:      []string{"responses-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "responses-primary",
+		Protocol:  "openai_responses",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "responses-primary",
+		Capabilities: config.OutboundCapabilities{
+			ResponsesAssistantHistoryNative: &falseValue,
+		},
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-4o-mini",
+		"input": []map[string]any{{
+			"type": "message",
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "input_text",
+				"text": "hello",
+			}},
+		}, {
+			"type": "message",
+			"role": "assistant",
+			"content": []map[string]any{{
+				"type": "output_text",
+				"text": "assistant reply",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/responses", "responses-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if len(upstreamBody.Input) != 2 {
+		t.Fatalf("len(upstream input) = %d, want 2", len(upstreamBody.Input))
+	}
+	if upstreamBody.Input[1].Role != "user" {
+		t.Fatalf("upstream input[1].Role = %q, want user", upstreamBody.Input[1].Role)
+	}
+	if len(upstreamBody.Input[1].Content) != 1 {
+		t.Fatalf("len(upstream input[1].Content) = %d, want 1", len(upstreamBody.Input[1].Content))
+	}
+	if got := upstreamBody.Input[1].Content[0].Text; got != "Previous assistant message:\nassistant reply" {
+		t.Fatalf("upstream rewritten assistant text = %q, want rewritten assistant history", got)
+	}
+}
+
+func TestNewDropsResponsesToolResultErrorStatusWhenCapabilityDisabled(t *testing.T) {
+	requests := make([]struct {
+		Model string `json:"model"`
+		Input []struct {
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+			Name   string `json:"name"`
+			Output string `json:"output"`
+			Status string `json:"status"`
+		} `json:"input"`
+	}, 0, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+			Input []struct {
+				Type   string `json:"type"`
+				CallID string `json:"call_id"`
+				Name   string `json:"name"`
+				Output string `json:"output"`
+				Status string `json:"status"`
+			} `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		requests = append(requests, body)
+		if len(requests) == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":     "resp_tools_drop_status_1",
+				"object": "response",
+				"model":  body.Model,
+				"output": []map[string]any{{
+					"type":      "function_call",
+					"call_id":   "call_123",
+					"name":      "get_weather",
+					"arguments": `{"city":"shanghai"}`,
+				}},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_tools_drop_status_2",
+			"object": "response",
+			"model":  body.Model,
+			"status": "completed",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "上海天气晴朗。",
+				}},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseDualProtocolConfig()
+	cfg.Inbounds[1].Clients[0].Tag = "anthropic-to-responses"
+	falseValue := false
+	cfg.Routing.Rules = []config.RoutingRule{{
+		Name:        "anthropic-to-responses-route",
+		FromTags:    []string{"anthropic-to-responses"},
+		ToTags:      []string{"responses-primary"},
+		Strategy:    "failover",
+		TargetModel: "gpt-5.4",
+	}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "responses-primary",
+		Protocol:  "openai_responses",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "bridge-key",
+		Tag:       "responses-primary",
+		Capabilities: config.OutboundCapabilities{
+			ResponsesToolResultStatusError: &falseValue,
+		},
+	}}
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	firstBody, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-5",
+		"tools": []map[string]any{{
+			"name":        "get_weather",
+			"description": "Get weather by city",
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"city": map[string]any{"type": "string"}},
+				"required":   []string{"city"},
+			},
+		}},
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "查询上海天气，必要时调用工具。",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	firstResp := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(firstResp, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", firstBody))
+	if firstResp.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200, body = %s", firstResp.Code, firstResp.Body.String())
+	}
+
+	secondBody, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-5",
+		"messages": []map[string]any{{
+			"role": "assistant",
+			"content": []map[string]any{{
+				"type":  "tool_use",
+				"id":    "call_123",
+				"name":  "get_weather",
+				"input": map[string]any{"city": "shanghai"},
+			}},
+		}, {
+			"role": "tool",
+			"content": []map[string]any{{
+				"type":        "tool_result",
+				"tool_use_id": "call_123",
+				"is_error":    true,
+				"content":     "lookup failed once",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	secondResp := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(secondResp, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", secondBody))
+	if secondResp.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want 200, body = %s", secondResp.Code, secondResp.Body.String())
+	}
+	if len(requests) != 2 {
+		t.Fatalf("len(requests) = %d, want 2 upstream calls", len(requests))
+	}
+	if requests[1].Input[1].Type != "function_call_output" || requests[1].Input[1].CallID != "call_123" {
+		t.Fatalf("requests[1].Input[1] = %#v, want function_call_output", requests[1].Input[1])
+	}
+	if got := requests[1].Input[1].Status; got != "" {
+		t.Fatalf("requests[1].Input[1].Status = %q, want omitted", got)
+	}
+	if got := requests[1].Input[1].Output; got != "lookup failed once" {
+		t.Fatalf("requests[1].Input[1].Output = %q, want lookup failed once", got)
+	}
+}
+
 func TestNewBridgesOpenAIChatInboundToAnthropicOutbound(t *testing.T) {
 	var requests []struct {
 		Model    string                     `json:"model"`
