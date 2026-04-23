@@ -26,6 +26,20 @@ func TestInboundRegistryGetReturnsRegisteredCodec(t *testing.T) {
 	}
 }
 
+func TestDefaultInboundRegistryRegistersCoreProtocols(t *testing.T) {
+	registry := DefaultInboundRegistry()
+	want := []string{"anthropic_messages", "openai_chat", "openai_responses"}
+	if got := registry.Protocols(); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("Protocols() = %#v, want %#v", got, want)
+	}
+	for _, protocol := range want {
+		codec, ok := registry.Get(protocol)
+		if !ok || codec == nil {
+			t.Fatalf("Get(%q) = (%v, %v), want registered codec", protocol, codec, ok)
+		}
+	}
+}
+
 func TestInboundRegistryRejectsDuplicateRegister(t *testing.T) {
 	registry := NewInboundRegistry()
 	if err := registry.Register("stub", stubInboundCodec{}); err != nil {

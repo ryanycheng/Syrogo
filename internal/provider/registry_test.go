@@ -23,6 +23,19 @@ func TestFactoryRegistryNewBuildsRegisteredProvider(t *testing.T) {
 	}
 }
 
+func TestDefaultFactoryRegistryRegistersCoreProtocols(t *testing.T) {
+	registry := DefaultFactoryRegistry()
+	want := []string{"anthropic_messages", "mock", "openai_chat", "openai_responses"}
+	if got := registry.Protocols(); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] || got[3] != want[3] {
+		t.Fatalf("Protocols() = %#v, want %#v", got, want)
+	}
+	for _, protocol := range want {
+		if !registry.Has(protocol) {
+			t.Fatalf("Has(%q) = false, want true", protocol)
+		}
+	}
+}
+
 func TestFactoryRegistryRejectsDuplicateRegister(t *testing.T) {
 	registry := NewFactoryRegistry()
 	factory := func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error) {
