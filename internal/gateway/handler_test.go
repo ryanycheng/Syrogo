@@ -3119,6 +3119,97 @@ func TestChatCompletionsFallsBackToBackupProvider(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsUsesReasoningContentOnlyUpstreamResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-reasoning-upstream",
+			"object": "chat.completion",
+			"model":  "z-ai/glm4.7",
+			"choices": []map[string]any{{
+				"message": map[string]string{
+					"role":              "assistant",
+					"reasoning_content": "reasoning only response",
+				},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]any{
+				"prompt_tokens":     10,
+				"completion_tokens": 16,
+				"total_tokens":      26,
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{"openai": provider.NewOpenAICompatible("openai", upstream.URL, []string{"test-key"}, upstream.Client())}, config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"openai-tag"}, Strategy: "failover"}}}, testInbounds(), []config.OutboundSpec{{Name: "openai", Protocol: "openai_chat", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "openai-tag"}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "z-ai/glm4.7", "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "reasoning only response") {
+		t.Fatalf("body = %q, want reasoning content response", w.Body.String())
+	}
+}
+
+func TestAnthropicMessagesBridgesReasoningContentOnlyOpenAIOutbound(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-reasoning-upstream",
+			"object": "chat.completion",
+			"model":  "z-ai/glm4.7",
+			"choices": []map[string]any{{
+				"message": map[string]string{
+					"role":              "assistant",
+					"reasoning_content": "reasoning only response",
+				},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	routingCfg := config.RoutingConfig{Rules: []config.RoutingRule{{
+		Name:     "office",
+		FromTags: []string{"office"},
+		ToTags:   []string{"openai-tag"},
+		Strategy: "failover",
+	}}}
+	outbounds := []config.OutboundSpec{{Name: "openai", Protocol: "openai_chat", Endpoint: upstream.URL, AuthToken: "test-key", Tag: "openai-tag"}}
+	h := newTestHandler(t, map[string]provider.Provider{"openai": provider.NewOpenAICompatible("openai", upstream.URL, []string{"test-key"}, upstream.Client())}, routingCfg, testDualProtocolInbounds(), outbounds)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{
+		"model":      "z-ai/glm4.7",
+		"max_tokens": 16,
+		"messages": []map[string]any{{
+			"role":    "user",
+			"content": []map[string]any{{"type": "text", "text": "hello"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/messages", "anthropic-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "reasoning only response") {
+		t.Fatalf("body = %q, want reasoning content bridged", w.Body.String())
+	}
+}
+
 func TestChatCompletionsReturnsBadGatewayForEmptyUpstreamResponse(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

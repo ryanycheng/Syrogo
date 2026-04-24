@@ -8,11 +8,12 @@ import (
 )
 
 type openAIChatMessage struct {
-	Role       string           `json:"role"`
-	Content    string           `json:"content,omitempty"`
-	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string           `json:"tool_call_id,omitempty"`
-	Status     string           `json:"status,omitempty"`
+	Role             string           `json:"role"`
+	Content          string           `json:"content,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string           `json:"tool_call_id,omitempty"`
+	Status           string           `json:"status,omitempty"`
 }
 
 type openAIChatRequest struct {
@@ -147,10 +148,14 @@ func decodeOpenAIChatResponse(resp openAIChatResponseEnvelope) (runtime.Response
 	}
 
 	message := runtime.Message{Role: runtime.MessageRole(resp.Choices[0].Message.Role)}
-	if resp.Choices[0].Message.Content != "" {
+	text := resp.Choices[0].Message.Content
+	if text == "" {
+		text = resp.Choices[0].Message.ReasoningContent
+	}
+	if text != "" {
 		message.Parts = []runtime.ContentPart{{
 			Type: runtime.ContentPartTypeText,
-			Text: resp.Choices[0].Message.Content,
+			Text: text,
 		}}
 	}
 	if len(resp.Choices[0].Message.ToolCalls) > 0 {

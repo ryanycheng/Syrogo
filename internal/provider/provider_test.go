@@ -1552,6 +1552,81 @@ func TestOpenAICompatibleChatCompletionSuccess(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleChatCompletionUsesReasoningContentWhenContentMissing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-reasoning-1",
+			"object": "chat.completion",
+			"model":  "z-ai/glm4.7",
+			"choices": []map[string]any{{
+				"message": map[string]string{
+					"role":              "assistant",
+					"reasoning_content": "reasoning only response",
+				},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]any{
+				"prompt_tokens":     10,
+				"completion_tokens": 16,
+				"total_tokens":      26,
+			},
+		})
+	}))
+	defer server.Close()
+
+	p := NewOpenAICompatible("openai", server.URL, []string{"test-key"}, server.Client())
+	resp, err := p.ChatCompletion(context.Background(), runtime.Request{
+		Model: "z-ai/glm4.7",
+		Messages: []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if len(resp.Message.Parts) != 1 || resp.Message.Parts[0].Text != "reasoning only response" {
+		t.Fatalf("resp.Message.Parts = %#v, want reasoning content text part", resp.Message.Parts)
+	}
+	if resp.Usage == nil || resp.Usage.Source != runtime.UsageSourceProvider || resp.Usage.TotalTokens != 26 {
+		t.Fatalf("resp.Usage = %#v, want provider usage preserved", resp.Usage)
+	}
+}
+
+func TestOpenAICompatibleChatCompletionPrefersContentOverReasoningContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-reasoning-2",
+			"object": "chat.completion",
+			"model":  "z-ai/glm4.7",
+			"choices": []map[string]any{{
+				"message": map[string]string{
+					"role":              "assistant",
+					"content":           "final answer",
+					"reasoning_content": "hidden reasoning",
+				},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewOpenAICompatible("openai", server.URL, []string{"test-key"}, server.Client())
+	resp, err := p.ChatCompletion(context.Background(), runtime.Request{
+		Model: "z-ai/glm4.7",
+		Messages: []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if len(resp.Message.Parts) != 1 || resp.Message.Parts[0].Text != "final answer" {
+		t.Fatalf("resp.Message.Parts = %#v, want final content preferred", resp.Message.Parts)
+	}
+}
+
 func TestOpenAICompatibleChatCompletionEstimatesUsageWhenMissing(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
