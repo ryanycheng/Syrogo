@@ -574,6 +574,69 @@ func TestNewBridgesAnthropicInboundToAnthropicOutbound(t *testing.T) {
 	}
 }
 
+func TestNewEstimatesUsageForOpenAIChatStreamingOutboundWhenProviderOmitsUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		if got := r.Header.Get("Accept"); got != "text/event-stream" {
+			t.Fatalf("Accept = %q, want text/event-stream", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, strings.Join([]string{
+			`data: {"id":"chatcmpl-est-stream-app-1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"delta":{"role":"assistant"}}]}`,
+			`data: {"id":"chatcmpl-est-stream-app-1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"delta":{"content":"pong"},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}, "\n\n"))
+	}))
+	defer upstream.Close()
+
+	cfg := baseConfig()
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "openai-stream-estimate",
+		Protocol:  "openai_chat",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "stream-key",
+		Tag:       "openai-tag",
+		Capabilities: config.OutboundCapabilities{
+			UsageEstimation:     true,
+			UsageEstimationMode: "heuristic",
+		},
+	}}
+	cfg.Routing.Rules[0].ToTags = []string{"openai-tag"}
+	cfg.Routing.Rules[0].TargetModel = "gpt-4o-mini"
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model":  "gpt-4",
+		"stream": true,
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "hello",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	app.Server.Listeners()[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("stream status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `"prompt_tokens":`) || !strings.Contains(got, `"completion_tokens":`) || !strings.Contains(got, `"total_tokens":`) {
+		t.Fatalf("body = %q, want estimated OpenAI usage field names", got)
+	}
+	if !strings.Contains(got, `"finish_reason":"stop"`) || !strings.Contains(got, "data: [DONE]\n\n") {
+		t.Fatalf("body = %q, want stop finish_reason and DONE frame", got)
+	}
+}
+
 func TestNewEstimatesUsageForOpenAIChatOutboundWhenProviderOmitsUsage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

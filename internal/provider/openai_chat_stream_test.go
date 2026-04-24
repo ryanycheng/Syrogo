@@ -15,7 +15,7 @@ func TestDecodeOpenAIChatStreamParsesToolCallsAndUsage(t *testing.T) {
 		`data: [DONE]`,
 	}, "\n\n"))
 
-	ch, err := decodeOpenAIChatStream(body)
+	ch, err := decodeOpenAIChatStream(body, runtime.Request{}, false)
 	if err != nil {
 		t.Fatalf("decodeOpenAIChatStream() error = %v", err)
 	}
@@ -44,6 +44,9 @@ func TestDecodeOpenAIChatStreamParsesToolCallsAndUsage(t *testing.T) {
 	if usageEvent == nil || usageEvent.Usage == nil || usageEvent.Usage.TotalTokens != 18 {
 		t.Fatalf("usageEvent = %#v, want total_tokens=18", usageEvent)
 	}
+	if usageEvent.Usage.Source != runtime.UsageSourceProvider {
+		t.Fatalf("usageEvent.Usage.Source = %q, want provider", usageEvent.Usage.Source)
+	}
 	if endEvent == nil || endEvent.FinishReason != runtime.FinishReasonToolUse {
 		t.Fatalf("endEvent = %#v, want finish_reason=tool_use", endEvent)
 	}
@@ -56,7 +59,7 @@ func TestDecodeOpenAIChatStreamAcceptsOpenAIUsageFieldNames(t *testing.T) {
 		`data: [DONE]`,
 	}, "\n\n"))
 
-	ch, err := decodeOpenAIChatStream(body)
+	ch, err := decodeOpenAIChatStream(body, runtime.Request{}, false)
 	if err != nil {
 		t.Fatalf("decodeOpenAIChatStream() error = %v", err)
 	}
@@ -78,8 +81,54 @@ func TestDecodeOpenAIChatStreamAcceptsOpenAIUsageFieldNames(t *testing.T) {
 	if usageEvent.Usage.InputTokens != 18 || usageEvent.Usage.OutputTokens != 13 || usageEvent.Usage.TotalTokens != 31 {
 		t.Fatalf("usageEvent.Usage = %#v, want prompt=18 completion=13 total=31", usageEvent.Usage)
 	}
+	if usageEvent.Usage.Source != runtime.UsageSourceProvider {
+		t.Fatalf("usageEvent.Usage.Source = %q, want provider", usageEvent.Usage.Source)
+	}
 	if endEvent == nil || endEvent.Usage == nil || endEvent.Usage.InputTokens != 18 || endEvent.Usage.OutputTokens != 13 || endEvent.Usage.TotalTokens != 31 {
 		t.Fatalf("endEvent = %#v, want final usage carried through", endEvent)
+	}
+}
+
+func TestDecodeOpenAIChatStreamEstimatesUsageWhenMissing(t *testing.T) {
+	body := strings.NewReader(strings.Join([]string{
+		`data: {"id":"chatcmpl-estimate-1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"delta":{"role":"assistant"},"finish_reason":""}]}`,
+		`data: {"id":"chatcmpl-estimate-1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"delta":{"content":"pong"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}, "\n\n"))
+
+	ch, err := decodeOpenAIChatStream(body, runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role: runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}},
+	}, true)
+	if err != nil {
+		t.Fatalf("decodeOpenAIChatStream() error = %v", err)
+	}
+
+	var usageEvent *runtime.StreamEvent
+	var endEvent *runtime.StreamEvent
+	for event := range ch {
+		e := event
+		if e.Type == runtime.StreamEventUsage {
+			usageEvent = &e
+		}
+		if e.Type == runtime.StreamEventMessageEnd {
+			endEvent = &e
+		}
+	}
+	if usageEvent == nil || usageEvent.Usage == nil {
+		t.Fatalf("usageEvent = %#v, want estimated usage event", usageEvent)
+	}
+	if usageEvent.Usage.Source != runtime.UsageSourceEstimated {
+		t.Fatalf("usageEvent.Usage.Source = %q, want estimated", usageEvent.Usage.Source)
+	}
+	if usageEvent.Usage.InputTokens <= 0 || usageEvent.Usage.OutputTokens <= 0 || usageEvent.Usage.TotalTokens != usageEvent.Usage.InputTokens+usageEvent.Usage.OutputTokens {
+		t.Fatalf("usageEvent.Usage = %#v, want positive heuristic usage", usageEvent.Usage)
+	}
+	if endEvent == nil || endEvent.Usage == nil || endEvent.Usage.Source != runtime.UsageSourceEstimated {
+		t.Fatalf("endEvent = %#v, want final estimated usage", endEvent)
 	}
 }
 
@@ -91,7 +140,7 @@ func TestDecodeOpenAIChatStreamDoesNotEmitEmptyToolArgumentsBeforeDelta(t *testi
 		`data: [DONE]`,
 	}, "\n\n"))
 
-	ch, err := decodeOpenAIChatStream(body)
+	ch, err := decodeOpenAIChatStream(body, runtime.Request{}, false)
 	if err != nil {
 		t.Fatalf("decodeOpenAIChatStream() error = %v", err)
 	}

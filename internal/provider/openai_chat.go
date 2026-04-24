@@ -87,7 +87,7 @@ func (p *OpenAICompatibleProvider) StreamCompletion(ctx context.Context, req run
 	lastErr := error(nil)
 	for offset := range p.apiKeys {
 		keyIx := (start + offset) % len(p.apiKeys)
-		events, err := p.streamWithAPIKey(ctx, streamPayload, p.apiKeys[keyIx])
+		events, err := p.streamWithAPIKey(ctx, req, streamPayload, p.apiKeys[keyIx])
 		if err == nil {
 			p.markNextAPIKeyAfter(keyIx)
 			return events, nil
@@ -122,7 +122,7 @@ func enableStreamOnPayload(payload []byte) ([]byte, error) {
 	return encoded, nil
 }
 
-func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, payload []byte, apiKey string) (<-chan runtime.StreamEvent, error) {
+func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, req runtime.Request, payload []byte, apiKey string) (<-chan runtime.StreamEvent, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+p.path, bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
@@ -206,7 +206,7 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, payload
 	if traceWriter != nil {
 		streamBody = io.TeeReader(httpResp.Body, traceWriter)
 	}
-	events, err := decodeOpenAIChatStream(streamBody)
+	events, err := decodeOpenAIChatStream(streamBody, req, p.usageEstimation.heuristicEnabled())
 	if err != nil {
 		if traceWriter != nil {
 			_ = traceWriter.Close()

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/ryanycheng/Syrogo/internal/runtime"
@@ -40,7 +41,7 @@ type openAIChatStreamChunk struct {
 	} `json:"usage,omitempty"`
 }
 
-func decodeOpenAIChatStream(body io.Reader) (<-chan runtime.StreamEvent, error) {
+func decodeOpenAIChatStream(body io.Reader, req runtime.Request, estimateUsage bool) (<-chan runtime.StreamEvent, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
 
@@ -60,6 +61,7 @@ func decodeOpenAIChatStream(body io.Reader) (<-chan runtime.StreamEvent, error) 
 		usage := (*runtime.Usage)(nil)
 		states := map[int]*toolState{}
 		started := false
+		var content strings.Builder
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" || strings.HasPrefix(line, ":") {
@@ -99,6 +101,7 @@ func decodeOpenAIChatStream(body io.Reader) (<-chan runtime.StreamEvent, error) 
 				ch <- runtime.StreamEvent{Type: runtime.StreamEventMessageStart, ResponseID: messageID, Model: model, MessageRole: role}
 			}
 			if choice.Delta.Content != "" {
+				content.WriteString(choice.Delta.Content)
 				part := runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: choice.Delta.Content}
 				ch <- runtime.StreamEvent{Type: runtime.StreamEventContentDelta, ResponseID: messageID, Model: model, MessageRole: role, Delta: &part}
 			}
@@ -146,6 +149,37 @@ func decodeOpenAIChatStream(body io.Reader) (<-chan runtime.StreamEvent, error) 
 		if !started {
 			ch <- runtime.StreamEvent{Type: runtime.StreamEventMessageStart, ResponseID: messageID, Model: model, MessageRole: role}
 		}
+		if usage == nil && estimateUsage && (content.Len() > 0 || len(states) > 0) {
+			resp := runtime.Response{
+				ID:           messageID,
+				Model:        model,
+				FinishReason: finishReason,
+				Message: runtime.Message{
+					Role: role,
+				},
+			}
+			if content.Len() > 0 {
+				resp.Message.Parts = append(resp.Message.Parts, runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: content.String()})
+			}
+			if len(states) > 0 {
+				indexes := make([]int, 0, len(states))
+				for index := range states {
+					indexes = append(indexes, index)
+				}
+				sort.Ints(indexes)
+				resp.Message.ToolCalls = make([]runtime.ToolCall, 0, len(indexes))
+				for _, index := range indexes {
+					state := states[index]
+					tool := runtime.ToolCall{ID: state.id, Name: state.name}
+					if state.arguments.Len() > 0 {
+						tool.Arguments = compactJSONString(state.arguments.String())
+					}
+					resp.Message.ToolCalls = append(resp.Message.ToolCalls, tool)
+				}
+			}
+			usage = estimateUsageHeuristically(req, resp)
+			ch <- runtime.StreamEvent{Type: runtime.StreamEventUsage, ResponseID: messageID, Model: model, MessageRole: role, Usage: usage}
+		}
 		ch <- runtime.StreamEvent{Type: runtime.StreamEventMessageEnd, ResponseID: messageID, Model: model, MessageRole: role, FinishReason: finishReason, Usage: usage}
 	}()
 	return ch, nil
@@ -167,6 +201,7 @@ func usageFromOpenAIChatStreamChunk(chunk openAIChatStreamChunk) *runtime.Usage 
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		TotalTokens:  chunk.Usage.TotalTokens,
+		Source:       runtime.UsageSourceProvider,
 	}
 }
 

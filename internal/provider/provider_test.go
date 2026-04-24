@@ -1627,6 +1627,61 @@ func TestOpenAICompatibleChatCompletionPrefersContentOverReasoningContent(t *tes
 	}
 }
 
+func TestOpenAICompatibleStreamCompletionEstimatesUsageWhenMissing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("path = %q, want /chat/completions", r.URL.Path)
+		}
+		if got := r.Header.Get("Accept"); got != "text/event-stream" {
+			t.Fatalf("Accept = %q, want text/event-stream", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, strings.Join([]string{
+			`data: {"id":"chatcmpl-stream-estimate","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"delta":{"role":"assistant"},"finish_reason":""}]}`,
+			`data: {"id":"chatcmpl-stream-estimate","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"delta":{"content":"pong"},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}, "\n\n"))
+	}))
+	defer server.Close()
+
+	p := newOpenAIProvider("openai", server.URL, []string{"test-key"}, config.OutboundCapabilities{UsageEstimation: true, UsageEstimationMode: "heuristic"}, server.Client(), "/chat/completions", openAIProtocolModeChat)
+	events, err := p.StreamCompletion(context.Background(), runtime.Request{
+		Model: "gpt-4o-mini",
+		Messages: []runtime.Message{{
+			Role: runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}},
+		Stream: true,
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+
+	var usageEvent *runtime.StreamEvent
+	var endEvent *runtime.StreamEvent
+	for event := range events {
+		e := event
+		if e.Type == runtime.StreamEventUsage {
+			usageEvent = &e
+		}
+		if e.Type == runtime.StreamEventMessageEnd {
+			endEvent = &e
+		}
+	}
+	if usageEvent == nil || usageEvent.Usage == nil {
+		t.Fatalf("usageEvent = %#v, want estimated usage", usageEvent)
+	}
+	if usageEvent.Usage.Source != runtime.UsageSourceEstimated {
+		t.Fatalf("usageEvent.Usage.Source = %q, want estimated", usageEvent.Usage.Source)
+	}
+	if usageEvent.Usage.TotalTokens != usageEvent.Usage.InputTokens+usageEvent.Usage.OutputTokens || usageEvent.Usage.TotalTokens <= 0 {
+		t.Fatalf("usageEvent.Usage = %#v, want positive heuristic totals", usageEvent.Usage)
+	}
+	if endEvent == nil || endEvent.Usage == nil || endEvent.Usage.Source != runtime.UsageSourceEstimated {
+		t.Fatalf("endEvent = %#v, want final estimated usage", endEvent)
+	}
+}
+
 func TestOpenAICompatibleChatCompletionEstimatesUsageWhenMissing(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
