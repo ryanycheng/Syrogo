@@ -31,16 +31,18 @@ type OpenAICompatibleProvider struct {
 	path            string
 	mode            openAIProtocolMode
 	responsesCompat openAIResponsesCompatibility
+	usageEstimation usageEstimationConfig
 
 	mu           sync.Mutex
 	nextAPIKeyIx int
 }
 
 type AnthropicMessagesProvider struct {
-	providerName string
-	baseURL      string
-	apiKeys      []string
-	httpClient   *http.Client
+	providerName    string
+	baseURL         string
+	apiKeys         []string
+	httpClient      *http.Client
+	usageEstimation usageEstimationConfig
 }
 
 type openAIProtocolMode string
@@ -57,6 +59,22 @@ type openAIResponsesCompatibility struct {
 	DropToolErrorStatus    bool
 	RejectPreviousResponse bool
 	RejectBuiltinTools     bool
+}
+
+type usageEstimationConfig struct {
+	Enabled bool
+	Mode    string
+}
+
+func usageEstimationFromCapabilities(capabilities config.OutboundCapabilities) usageEstimationConfig {
+	return usageEstimationConfig{
+		Enabled: capabilities.UsageEstimation,
+		Mode:    strings.TrimSpace(capabilities.UsageEstimationMode),
+	}
+}
+
+func (c usageEstimationConfig) heuristicEnabled() bool {
+	return c.Enabled && c.Mode == "heuristic"
 }
 
 func traceModeEnabled() bool {
@@ -190,6 +208,10 @@ func NewOpenAICompatible(name, baseURL string, apiKeys []string, httpClient *htt
 	return newOpenAIProvider(name, baseURL, apiKeys, config.OutboundCapabilities{}, httpClient, "/chat/completions", openAIProtocolModeChat)
 }
 
+func NewOpenAICompatibleWithCapabilities(name, baseURL string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) *OpenAICompatibleProvider {
+	return newOpenAIProvider(name, baseURL, apiKeys, capabilities, httpClient, "/chat/completions", openAIProtocolModeChat)
+}
+
 func NewOpenAIResponsesCompatible(name, baseURL string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) *OpenAICompatibleProvider {
 	return newOpenAIProvider(name, baseURL, apiKeys, capabilities, httpClient, "/responses", openAIProtocolModeResponses)
 }
@@ -206,6 +228,7 @@ func newOpenAIProvider(name, baseURL string, apiKeys []string, capabilities conf
 		path:            path,
 		mode:            mode,
 		responsesCompat: mergeOpenAIResponsesCompatibility(detectOpenAIResponsesCompatibility(baseURL), capabilities),
+		usageEstimation: usageEstimationFromCapabilities(capabilities),
 	}
 }
 
@@ -268,14 +291,23 @@ func validateOpenAIResponsesRequest(req runtime.Request, compat openAIResponsesC
 }
 
 func NewAnthropicMessagesCompatible(name, baseURL string, apiKeys []string, httpClient *http.Client) *AnthropicMessagesProvider {
+	return newAnthropicMessagesProvider(name, baseURL, apiKeys, config.OutboundCapabilities{}, httpClient)
+}
+
+func NewAnthropicMessagesCompatibleWithCapabilities(name, baseURL string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) *AnthropicMessagesProvider {
+	return newAnthropicMessagesProvider(name, baseURL, apiKeys, capabilities, httpClient)
+}
+
+func newAnthropicMessagesProvider(name, baseURL string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) *AnthropicMessagesProvider {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
 	return &AnthropicMessagesProvider{
-		providerName: name,
-		baseURL:      strings.TrimRight(baseURL, "/"),
-		apiKeys:      append([]string(nil), apiKeys...),
-		httpClient:   httpClient,
+		providerName:    name,
+		baseURL:         strings.TrimRight(baseURL, "/"),
+		apiKeys:         append([]string(nil), apiKeys...),
+		httpClient:      httpClient,
+		usageEstimation: usageEstimationFromCapabilities(capabilities),
 	}
 }
 

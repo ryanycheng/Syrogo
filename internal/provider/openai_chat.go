@@ -40,7 +40,7 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req runti
 	lastErr := error(nil)
 	for offset := range p.apiKeys {
 		keyIx := (start + offset) % len(p.apiKeys)
-		resp, err := p.completionWithAPIKey(ctx, encodedPayload, p.apiKeys[keyIx])
+		resp, err := p.completionWithAPIKey(ctx, req, encodedPayload, p.apiKeys[keyIx])
 		if err == nil {
 			p.markNextAPIKeyAfter(keyIx)
 			return resp, nil
@@ -232,7 +232,7 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, payload
 	return out, nil
 }
 
-func (p *OpenAICompatibleProvider) completionWithAPIKey(ctx context.Context, payload []byte, apiKey string) (runtime.Response, error) {
+func (p *OpenAICompatibleProvider) completionWithAPIKey(ctx context.Context, req runtime.Request, payload []byte, apiKey string) (runtime.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+p.path, bytes.NewReader(payload))
 	if err != nil {
 		return runtime.Response{}, fmt.Errorf("build request: %w", err)
@@ -301,6 +301,13 @@ func (p *OpenAICompatibleProvider) completionWithAPIKey(ctx context.Context, pay
 		if err := json.Unmarshal(responseBody, &resp); err != nil {
 			return runtime.Response{}, NewRetryableError(fmt.Errorf("decode response: %w", err))
 		}
-		return decodeOpenAIChatResponse(resp)
+		decoded, err := decodeOpenAIChatResponse(resp)
+		if err != nil {
+			return runtime.Response{}, err
+		}
+		if decoded.Usage == nil && p.usageEstimation.heuristicEnabled() {
+			decoded.Usage = estimateUsageHeuristically(req, decoded)
+		}
+		return decoded, nil
 	}
 }

@@ -61,10 +61,12 @@ type OutboundSpec struct {
 }
 
 type OutboundCapabilities struct {
-	ResponsesPreviousResponseID     *bool `yaml:"responses_previous_response_id"`
-	ResponsesBuiltinTools           *bool `yaml:"responses_builtin_tools"`
-	ResponsesToolResultStatusError  *bool `yaml:"responses_tool_result_status_error"`
-	ResponsesAssistantHistoryNative *bool `yaml:"responses_assistant_history_native"`
+	ResponsesPreviousResponseID     *bool  `yaml:"responses_previous_response_id"`
+	ResponsesBuiltinTools           *bool  `yaml:"responses_builtin_tools"`
+	ResponsesToolResultStatusError  *bool  `yaml:"responses_tool_result_status_error"`
+	ResponsesAssistantHistoryNative *bool  `yaml:"responses_assistant_history_native"`
+	UsageEstimation                 bool   `yaml:"usage_estimation"`
+	UsageEstimationMode             string `yaml:"usage_estimation_mode"`
 }
 
 func Load(path string) (Config, error) {
@@ -176,9 +178,27 @@ func (c Config) Validate() error {
 		}
 		switch outbound.Protocol {
 		case "openai_responses":
-		case "mock", "openai_chat", "anthropic_messages":
+		case "openai_chat", "anthropic_messages":
+			if outbound.Capabilities.ResponsesPreviousResponseID != nil || outbound.Capabilities.ResponsesBuiltinTools != nil || outbound.Capabilities.ResponsesToolResultStatusError != nil || outbound.Capabilities.ResponsesAssistantHistoryNative != nil {
+				return fmt.Errorf("outbounds.%s.responses capabilities are only supported for openai_responses", outbound.Name)
+			}
+		case "mock":
 			if outbound.Capabilities != (OutboundCapabilities{}) {
-				return fmt.Errorf("outbounds.%s.capabilities is only supported for openai_responses", outbound.Name)
+				return fmt.Errorf("outbounds.%s.capabilities is unsupported for mock", outbound.Name)
+			}
+		}
+		if outbound.Capabilities.UsageEstimationMode != "" && !outbound.Capabilities.UsageEstimation {
+			return fmt.Errorf("outbounds.%s.usage_estimation_mode requires usage_estimation=true", outbound.Name)
+		}
+		if outbound.Capabilities.UsageEstimation {
+			if outbound.Protocol != "openai_chat" && outbound.Protocol != "anthropic_messages" {
+				return fmt.Errorf("outbounds.%s.usage_estimation is only supported for openai_chat and anthropic_messages", outbound.Name)
+			}
+			if outbound.Capabilities.UsageEstimationMode == "" {
+				return fmt.Errorf("outbounds.%s.usage_estimation_mode is required when usage_estimation is enabled", outbound.Name)
+			}
+			if outbound.Capabilities.UsageEstimationMode != "heuristic" {
+				return fmt.Errorf("outbounds.%s.usage_estimation_mode %q is unsupported", outbound.Name, outbound.Capabilities.UsageEstimationMode)
 			}
 		}
 		outboundNames[outbound.Name] = struct{}{}

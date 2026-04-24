@@ -179,6 +179,7 @@ func decodeAnthropicMessagesResponse(resp anthropicMessagesEnvelope) (runtime.Re
 			InputTokens:  resp.Usage.InputTokens,
 			OutputTokens: resp.Usage.OutputTokens,
 			TotalTokens:  resp.Usage.InputTokens + resp.Usage.OutputTokens,
+			Source:       runtime.UsageSourceProvider,
 		}
 	}
 	return response, nil

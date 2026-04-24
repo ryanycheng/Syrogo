@@ -244,7 +244,30 @@ outbounds:
       responses_assistant_history_native: true
 ```
 
-### 8. 本地调试
+### 8. 声明 usage estimation 回补
+
+如果某个 `openai_chat` 或 `anthropic_messages` 上游没有返回 `usage`，可以在 outbound 上开启平台侧启发式补算：
+
+```yaml
+outbounds:
+  - name: "openai-primary"
+    protocol: "openai_chat"
+    endpoint: "https://api.openai.com/v1"
+    auth_token: "${OPENAI_API_KEY_PRIMARY}"
+    tag: "openai-primary"
+    capabilities:
+      usage_estimation: true
+      usage_estimation_mode: "heuristic"
+```
+
+当前范围：
+
+- 只作用于非流式响应
+- 目前仅支持 `openai_chat` 与 `anthropic_messages` outbound
+- 只在上游缺失 `usage` 时触发
+- 返回的是平台侧近似值，不是 provider 账单真值
+
+### 9. 本地调试
 
 本地开发时可使用：
 

@@ -74,6 +74,11 @@ outbounds:
     endpoint: "https://api.openai.com/v1"
     auth_token: "${OPENAI_API_KEY_PRIMARY}"
     tag: "openai-primary"
+    # Optional platform-side usage fallback when the upstream omits usage.
+    # This is a heuristic estimate, not the provider billing truth.
+    # capabilities:
+    #   usage_estimation: true
+    #   usage_estimation_mode: "heuristic"
 
   - name: "openai-backup"
     protocol: "openai_chat"
@@ -100,3 +105,8 @@ outbounds:
     endpoint: "https://example-anthropic-compatible.local/v1"
     auth_token: "${ANTHROPIC_API_KEY_PRIMARY}"
     tag: "anthropic-primary"
+    # Optional platform-side usage fallback when the upstream omits usage.
+    # This is a heuristic estimate, not the provider billing truth.
+    # capabilities:
+    #   usage_estimation: true
+    #   usage_estimation_mode: "heuristic"

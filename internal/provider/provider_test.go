@@ -1552,6 +1552,76 @@ func TestOpenAICompatibleChatCompletionSuccess(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleChatCompletionEstimatesUsageWhenMissing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-est-1",
+			"object": "chat.completion",
+			"model":  "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant", "content": "hello from upstream"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	p := newOpenAIProvider("openai", server.URL, []string{"test-key"}, config.OutboundCapabilities{UsageEstimation: true, UsageEstimationMode: "heuristic"}, server.Client(), "/chat/completions", openAIProtocolModeChat)
+	resp, err := p.ChatCompletion(context.Background(), runtime.Request{
+		Model:  "gpt-4o-mini",
+		System: "be concise",
+		Messages: []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if resp.Usage == nil || resp.Usage.Source != runtime.UsageSourceEstimated {
+		t.Fatalf("resp.Usage = %#v, want estimated usage", resp.Usage)
+	}
+	if resp.Usage.InputTokens <= 0 || resp.Usage.OutputTokens <= 0 || resp.Usage.TotalTokens != resp.Usage.InputTokens+resp.Usage.OutputTokens {
+		t.Fatalf("resp.Usage = %#v, want positive estimated totals", resp.Usage)
+	}
+}
+
+func TestAnthropicMessagesCompatibleChatCompletionEstimatesUsageWhenMissing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_est_1",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       "claude-sonnet-4-5",
+			"stop_reason": "end_turn",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "hello from upstream",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewAnthropicMessagesCompatibleWithCapabilities("anthropic", server.URL, []string{"test-key"}, config.OutboundCapabilities{UsageEstimation: true, UsageEstimationMode: "heuristic"}, server.Client())
+	resp, err := p.ChatCompletion(context.Background(), runtime.Request{
+		Model:     "claude-sonnet-4-5",
+		System:    "be concise",
+		MaxTokens: 256,
+		Messages: []runtime.Message{{
+			Role:  runtime.MessageRoleUser,
+			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if resp.Usage == nil || resp.Usage.Source != runtime.UsageSourceEstimated {
+		t.Fatalf("resp.Usage = %#v, want estimated usage", resp.Usage)
+	}
+	if resp.Usage.InputTokens <= 0 || resp.Usage.OutputTokens <= 0 || resp.Usage.TotalTokens != resp.Usage.InputTokens+resp.Usage.OutputTokens {
+		t.Fatalf("resp.Usage = %#v, want positive estimated totals", resp.Usage)
+	}
+}
+
 func TestOpenAICompatibleChatCompletionWritesTraceWhenEnabled(t *testing.T) {
 	tmpDir := t.TempDir()
 	wd, err := os.Getwd()

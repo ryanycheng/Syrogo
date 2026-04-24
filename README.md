@@ -244,7 +244,30 @@ outbounds:
       responses_assistant_history_native: true
 ```
 
-### 8. Local debugging
+### 8. Declare usage estimation fallback
+
+If an `openai_chat` or `anthropic_messages` upstream omits `usage`, you can let Syrogo fill a heuristic estimate on the outbound:
+
+```yaml
+outbounds:
+  - name: "openai-primary"
+    protocol: "openai_chat"
+    endpoint: "https://api.openai.com/v1"
+    auth_token: "${OPENAI_API_KEY_PRIMARY}"
+    tag: "openai-primary"
+    capabilities:
+      usage_estimation: true
+      usage_estimation_mode: "heuristic"
+```
+
+Current scope:
+
+- only applies to non-stream responses
+- only supports `openai_chat` and `anthropic_messages` outbounds
+- only runs when the upstream response omits `usage`
+- returns a platform-side estimate, not provider billing truth
+
+### 9. Local debugging
 
 For local development, you can use:
 

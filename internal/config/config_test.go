@@ -227,7 +227,7 @@ func TestConfigValidateRejectsCapabilitiesOnNonResponsesOutbound(t *testing.T) {
 	cfg.Routing.Rules[0].ToTags = []string{"openai-tag"}
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "outbounds.openai.capabilities is only supported for openai_responses" {
+	if err == nil || err.Error() != "outbounds.openai.responses capabilities are only supported for openai_responses" {
 		t.Fatalf("Validate() error = %v, want unsupported capabilities error", err)
 	}
 }
@@ -375,6 +375,88 @@ func TestConfigValidateRequiresRoutingRule(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil || err.Error() != "at least one routing rule is required" {
 		t.Fatalf("Validate() error = %v, want at least one routing rule is required", err)
+	}
+}
+
+func TestConfigValidateSupportsUsageEstimationForOpenAIChat(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0] = OutboundSpec{
+		Name:      "openai",
+		Protocol:  "openai_chat",
+		Tag:       "openai-tag",
+		Endpoint:  "https://example.com/v1",
+		AuthToken: "key-1",
+		Capabilities: OutboundCapabilities{
+			UsageEstimation:     true,
+			UsageEstimationMode: "heuristic",
+		},
+	}
+	cfg.Routing.Rules[0].ToTags = []string{"openai-tag"}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigValidateRejectsUsageEstimationModeWithoutEnable(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0] = OutboundSpec{
+		Name:      "openai",
+		Protocol:  "openai_chat",
+		Tag:       "openai-tag",
+		Endpoint:  "https://example.com/v1",
+		AuthToken: "key-1",
+		Capabilities: OutboundCapabilities{
+			UsageEstimationMode: "heuristic",
+		},
+	}
+	cfg.Routing.Rules[0].ToTags = []string{"openai-tag"}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "outbounds.openai.usage_estimation_mode requires usage_estimation=true" {
+		t.Fatalf("Validate() error = %v, want usage estimation enable error", err)
+	}
+}
+
+func TestConfigValidateRejectsUsageEstimationForUnsupportedProtocol(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0] = OutboundSpec{
+		Name:      "responses",
+		Protocol:  "openai_responses",
+		Tag:       "responses-tag",
+		Endpoint:  "https://example.com/v1",
+		AuthToken: "key-1",
+		Capabilities: OutboundCapabilities{
+			UsageEstimation:     true,
+			UsageEstimationMode: "heuristic",
+		},
+	}
+	cfg.Routing.Rules[0].ToTags = []string{"responses-tag"}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "outbounds.responses.usage_estimation is only supported for openai_chat and anthropic_messages" {
+		t.Fatalf("Validate() error = %v, want usage estimation protocol error", err)
+	}
+}
+
+func TestConfigValidateRejectsUnsupportedUsageEstimationMode(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0] = OutboundSpec{
+		Name:      "anthropic",
+		Protocol:  "anthropic_messages",
+		Tag:       "anthropic-tag",
+		Endpoint:  "https://example.com/v1",
+		AuthToken: "key-1",
+		Capabilities: OutboundCapabilities{
+			UsageEstimation:     true,
+			UsageEstimationMode: "exact",
+		},
+	}
+	cfg.Routing.Rules[0].ToTags = []string{"anthropic-tag"}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "outbounds.anthropic.usage_estimation_mode \"exact\" is unsupported" {
+		t.Fatalf("Validate() error = %v, want unsupported mode error", err)
 	}
 }
 

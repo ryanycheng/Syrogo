@@ -200,5 +200,6 @@ func usageFromOpenAIChatEnvelope(resp openAIChatResponseEnvelope) *runtime.Usage
 		InputTokens:  resp.Usage.PromptTokens,
 		OutputTokens: resp.Usage.CompletionTokens,
 		TotalTokens:  resp.Usage.TotalTokens,
+		Source:       runtime.UsageSourceProvider,
 	}
 }

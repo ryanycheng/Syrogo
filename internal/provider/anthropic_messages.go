@@ -26,7 +26,7 @@ func (p *AnthropicMessagesProvider) ChatCompletion(ctx context.Context, req runt
 		return runtime.Response{}, fmt.Errorf("marshal request: %w", err)
 	}
 
-	return p.completionWithAPIKey(ctx, encodedPayload, p.apiKeys[0])
+	return p.completionWithAPIKey(ctx, req, encodedPayload, p.apiKeys[0])
 }
 
 func (p *AnthropicMessagesProvider) StreamCompletion(ctx context.Context, req runtime.Request) (<-chan runtime.StreamEvent, error) {
@@ -39,7 +39,7 @@ func (p *AnthropicMessagesProvider) StreamCompletion(ctx context.Context, req ru
 	return streamResponse(resp), nil
 }
 
-func (p *AnthropicMessagesProvider) completionWithAPIKey(ctx context.Context, payload []byte, apiKey string) (runtime.Response, error) {
+func (p *AnthropicMessagesProvider) completionWithAPIKey(ctx context.Context, req runtime.Request, payload []byte, apiKey string) (runtime.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/messages", bytes.NewReader(payload))
 	if err != nil {
 		return runtime.Response{}, fmt.Errorf("build request: %w", err)
@@ -98,5 +98,12 @@ func (p *AnthropicMessagesProvider) completionWithAPIKey(ctx context.Context, pa
 	if err := json.Unmarshal(responseBody, &resp); err != nil {
 		return runtime.Response{}, NewRetryableError(fmt.Errorf("decode response: %w", err))
 	}
-	return decodeAnthropicMessagesResponse(resp)
+	decoded, err := decodeAnthropicMessagesResponse(resp)
+	if err != nil {
+		return runtime.Response{}, err
+	}
+	if decoded.Usage == nil && p.usageEstimation.heuristicEnabled() {
+		decoded.Usage = estimateUsageHeuristically(req, decoded)
+	}
+	return decoded, nil
 }

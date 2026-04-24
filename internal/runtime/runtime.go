@@ -19,6 +19,8 @@ type StreamEventType string
 
 type RoutingStrategy string
 
+type UsageSource string
+
 type contextKey string
 
 const (
@@ -50,6 +52,10 @@ const (
 
 	RoutingStrategyFailover   RoutingStrategy = "failover"
 	RoutingStrategyRoundRobin RoutingStrategy = "round_robin"
+
+	UsageSourceProvider    UsageSource = "provider"
+	UsageSourceProviderAPI UsageSource = "provider_count_api"
+	UsageSourceEstimated   UsageSource = "estimated"
 
 	ContextKeyRequestID contextKey = "request_id"
 )
@@ -105,6 +111,7 @@ type Usage struct {
 	InputTokens  int
 	OutputTokens int
 	TotalTokens  int
+	Source       UsageSource
 }
 
 type Response struct {

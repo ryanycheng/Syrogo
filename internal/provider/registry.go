@@ -89,14 +89,14 @@ func newDefaultFactoryRegistry() *FactoryRegistry {
 	registry.MustRegister("mock", func(name, _ string, _ []string, _ config.OutboundCapabilities) (Provider, error) {
 		return NewMock(name), nil
 	})
-	registry.MustRegister("openai_chat", func(name, endpoint string, apiKeys []string, _ config.OutboundCapabilities) (Provider, error) {
-		return NewOpenAICompatible(name, endpoint, apiKeys, nil), nil
+	registry.MustRegister("openai_chat", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error) {
+		return NewOpenAICompatibleWithCapabilities(name, endpoint, apiKeys, capabilities, nil), nil
 	})
 	registry.MustRegister("openai_responses", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error) {
 		return NewOpenAIResponsesCompatible(name, endpoint, apiKeys, capabilities, nil), nil
 	})
-	registry.MustRegister("anthropic_messages", func(name, endpoint string, apiKeys []string, _ config.OutboundCapabilities) (Provider, error) {
-		return NewAnthropicMessagesCompatible(name, endpoint, apiKeys, nil), nil
+	registry.MustRegister("anthropic_messages", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error) {
+		return NewAnthropicMessagesCompatibleWithCapabilities(name, endpoint, apiKeys, capabilities, nil), nil
 	})
 	return registry
 }
