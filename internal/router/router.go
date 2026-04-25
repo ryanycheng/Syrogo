@@ -79,6 +79,7 @@ func (r *Router) Plan(ctx runtime.RouteContext) (runtime.ExecutionPlan, error) {
 		}
 
 		return runtime.ExecutionPlan{
+			ClientName:     ctx.ClientName,
 			MatchedRule:    rule.name,
 			Strategy:       rule.strategy,
 			ResolvedToTags: append([]string(nil), rule.toTags...),

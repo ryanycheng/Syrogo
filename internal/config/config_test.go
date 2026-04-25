@@ -13,7 +13,7 @@ func validConfig() Config {
 			Name:     "openai-entry",
 			Protocol: "openai_chat",
 			Path:     "/v1/chat/completions",
-			Clients:  []ClientSpec{{Token: "client-token", Tag: "office"}},
+			Clients:  []ClientSpec{{Name: "office-key", Token: "client-token", Tag: "office"}},
 		}},
 		Routing: RoutingConfig{Rules: []RoutingRule{{
 			Name:     "office-route",
@@ -52,7 +52,7 @@ func TestConfigInboundByNameReturnsMatchedInbound(t *testing.T) {
 			Name:     "office-entry",
 			Protocol: "openai_chat",
 			Path:     "/v1/chat/completions",
-			Clients:  []ClientSpec{{Token: "token", Tag: "office"}},
+			Clients:  []ClientSpec{{Name: "office-key", Token: "token", Tag: "office"}},
 		}},
 	}
 
@@ -68,8 +68,8 @@ func TestConfigInboundByNameReturnsMatchedInbound(t *testing.T) {
 func TestConfigListenerInboundsReturnsAllMatchedInbounds(t *testing.T) {
 	cfg := Config{
 		Inbounds: []InboundSpec{
-			{Name: "openai-entry", Protocol: "openai_chat", Path: "/v1/chat/completions", Clients: []ClientSpec{{Token: "a", Tag: "office"}}},
-			{Name: "anthropic-entry", Protocol: "anthropic_messages", Path: "/v1/messages", Clients: []ClientSpec{{Token: "b", Tag: "thinking"}}},
+			{Name: "openai-entry", Protocol: "openai_chat", Path: "/v1/chat/completions", Clients: []ClientSpec{{Name: "office-key", Token: "a", Tag: "office"}}},
+			{Name: "anthropic-entry", Protocol: "anthropic_messages", Path: "/v1/messages", Clients: []ClientSpec{{Name: "thinking-key", Token: "b", Tag: "thinking"}}},
 		},
 	}
 
@@ -118,12 +118,22 @@ func TestConfigValidateSupportsAnthropicInboundProtocol(t *testing.T) {
 		Name:     "anthropic-entry",
 		Protocol: "anthropic_messages",
 		Path:     "/v1/messages",
-		Clients:  []ClientSpec{{Token: "anthropic-token", Tag: "office"}},
+		Clients:  []ClientSpec{{Name: "anthropic-key", Token: "anthropic-token", Tag: "office"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "anthropic-entry")
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigValidateRequiresClientName(t *testing.T) {
+	cfg := validConfig()
+	cfg.Inbounds[0].Clients[0].Name = ""
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "inbounds.openai-entry.clients[0].name is required" {
+		t.Fatalf("Validate() error = %v, want missing client name error", err)
 	}
 }
 
@@ -147,13 +157,29 @@ func TestConfigValidateRequiresClientTag(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRejectsDuplicateClientName(t *testing.T) {
+	cfg := validConfig()
+	cfg.Inbounds = append(cfg.Inbounds, InboundSpec{
+		Name:     "other-entry",
+		Protocol: "openai_chat",
+		Path:     "/other",
+		Clients:  []ClientSpec{{Name: "office-key", Token: "other-token", Tag: "other"}},
+	})
+	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "other-entry")
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "inbounds.other-entry.clients[0].name duplicates client name used by openai-entry" {
+		t.Fatalf("Validate() error = %v, want duplicate client name error", err)
+	}
+}
+
 func TestConfigValidateRejectsDuplicateClientToken(t *testing.T) {
 	cfg := validConfig()
 	cfg.Inbounds = append(cfg.Inbounds, InboundSpec{
 		Name:     "other-entry",
 		Protocol: "openai_chat",
 		Path:     "/other",
-		Clients:  []ClientSpec{{Token: "client-token", Tag: "other"}},
+		Clients:  []ClientSpec{{Name: "other-key", Token: "client-token", Tag: "other"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "other-entry")
 
@@ -245,7 +271,8 @@ inbounds:
     protocol: "openai_chat"
     path: "/v1/chat/completions"
     clients:
-      - token: "client-token"
+      - name: "office-key"
+        token: "client-token"
         tag: "office"
 routing:
   rules:
@@ -463,7 +490,7 @@ func TestConfigValidateRejectsUnsupportedUsageEstimationMode(t *testing.T) {
 func TestLoadSuccess(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	content := []byte("listeners:\n  - name: \"public\"\n    listen: \":8080\"\n    inbounds:\n      - \"openai-entry\"\ninbounds:\n  - name: \"openai-entry\"\n    protocol: \"openai_chat\"\n    path: \"/v1/chat/completions\"\n    clients:\n      - token: \"client-token\"\n        tag: \"office\"\nrouting:\n  rules:\n    - name: \"office-route\"\n      from_tags:\n        - \"office\"\n      to_tags:\n        - \"mock-tag\"\n      strategy: \"failover\"\noutbounds:\n  - name: \"mock\"\n    protocol: \"mock\"\n    tag: \"mock-tag\"\n")
+	content := []byte("listeners:\n  - name: \"public\"\n    listen: \":8080\"\n    inbounds:\n      - \"openai-entry\"\ninbounds:\n  - name: \"openai-entry\"\n    protocol: \"openai_chat\"\n    path: \"/v1/chat/completions\"\n    clients:\n      - name: \"office-key\"\n        token: \"client-token\"\n        tag: \"office\"\nrouting:\n  rules:\n    - name: \"office-route\"\n      from_tags:\n        - \"office\"\n      to_tags:\n        - \"mock-tag\"\n      strategy: \"failover\"\noutbounds:\n  - name: \"mock\"\n    protocol: \"mock\"\n    tag: \"mock-tag\"\n")
 	if err := os.WriteFile(path, content, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}

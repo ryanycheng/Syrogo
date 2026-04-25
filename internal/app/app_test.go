@@ -19,7 +19,7 @@ func baseConfig() config.Config {
 			Name:     "openai-entry",
 			Protocol: "openai_chat",
 			Path:     "/v1/chat/completions",
-			Clients:  []config.ClientSpec{{Token: "client-token", Tag: "office"}},
+			Clients:  []config.ClientSpec{{Name: "office-key", Token: "client-token", Tag: "office"}},
 		}},
 		Routing: config.RoutingConfig{Rules: []config.RoutingRule{{
 			Name:     "office-route",
@@ -37,7 +37,7 @@ func baseDualProtocolConfig() config.Config {
 		Name:     "anthropic-entry",
 		Protocol: "anthropic_messages",
 		Path:     "/v1/messages",
-		Clients:  []config.ClientSpec{{Token: "anthropic-token", Tag: "office"}},
+		Clients:  []config.ClientSpec{{Name: "anthropic-key", Token: "anthropic-token", Tag: "office"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "anthropic-entry")
 	return cfg
@@ -309,7 +309,7 @@ func TestNewStreamsResponsesJSONContentPartFromResponsesOutbound(t *testing.T) {
 		Name:     "responses-entry",
 		Protocol: "openai_responses",
 		Path:     "/v1/responses",
-		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-office"}},
+		Clients:  []config.ClientSpec{{Name: "responses-key", Token: "responses-token", Tag: "responses-office"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
 	cfg.Routing.Rules = []config.RoutingRule{{
@@ -386,7 +386,7 @@ func TestNewStreamsResponsesFunctionToolCallUsageFromResponsesOutbound(t *testin
 		Name:     "responses-entry",
 		Protocol: "openai_responses",
 		Path:     "/v1/responses",
-		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-office"}},
+		Clients:  []config.ClientSpec{{Name: "responses-key", Token: "responses-token", Tag: "responses-office"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
 	cfg.Routing.Rules = []config.RoutingRule{{
@@ -2413,7 +2413,7 @@ func TestNewRejectsResponsesBuiltinToolsWhenCapabilityDisabled(t *testing.T) {
 		Name:     "responses-entry",
 		Protocol: "openai_responses",
 		Path:     "/v1/responses",
-		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-to-responses"}},
+		Clients:  []config.ClientSpec{{Name: "responses-to-responses-key", Token: "responses-token", Tag: "responses-to-responses"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
 	cfg.Routing.Rules = []config.RoutingRule{{
@@ -2502,7 +2502,7 @@ func TestNewBridgesResponsesInboundToOpenAIChatOutbound(t *testing.T) {
 		Name:     "responses-entry",
 		Protocol: "openai_responses",
 		Path:     "/v1/responses",
-		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-to-chat"}},
+		Clients:  []config.ClientSpec{{Name: "responses-to-chat-key", Token: "responses-token", Tag: "responses-to-chat"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
 	cfg.Routing.Rules = []config.RoutingRule{{
@@ -2602,7 +2602,7 @@ func TestNewBridgesResponsesInboundToOpenAIResponsesOutbound(t *testing.T) {
 		Name:     "responses-entry",
 		Protocol: "openai_responses",
 		Path:     "/v1/responses",
-		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-to-responses"}},
+		Clients:  []config.ClientSpec{{Name: "responses-to-responses-key", Token: "responses-token", Tag: "responses-to-responses"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
 	cfg.Routing.Rules = []config.RoutingRule{{
@@ -2698,7 +2698,7 @@ func TestNewRewritesResponsesAssistantHistoryWhenCapabilityDisabled(t *testing.T
 		Name:     "responses-entry",
 		Protocol: "openai_responses",
 		Path:     "/v1/responses",
-		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-to-responses"}},
+		Clients:  []config.ClientSpec{{Name: "responses-to-responses-key", Token: "responses-token", Tag: "responses-to-responses"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
 	falseValue := false
@@ -3157,7 +3157,7 @@ func TestNewBridgesResponsesInboundToAnthropicOutbound(t *testing.T) {
 		Name:     "responses-entry",
 		Protocol: "openai_responses",
 		Path:     "/v1/responses",
-		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-to-anthropic"}},
+		Clients:  []config.ClientSpec{{Name: "responses-to-anthropic-key", Token: "responses-token", Tag: "responses-to-anthropic"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
 	cfg.Routing.Rules = []config.RoutingRule{{
@@ -3257,7 +3257,7 @@ func TestNewBridgesResponsesFunctionCallOutputMixedContentToAnthropicOutbound(t 
 		Name:     "responses-entry",
 		Protocol: "openai_responses",
 		Path:     "/v1/responses",
-		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "responses-to-anthropic"}},
+		Clients:  []config.ClientSpec{{Name: "responses-to-anthropic-key", Token: "responses-token", Tag: "responses-to-anthropic"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
 	cfg.Inbounds[0].Clients[0].Tag = "office"
@@ -3438,13 +3438,99 @@ func TestNewBridgesAnthropicLeadingSystemReminderToOpenAIResponsesWithoutInstruc
 	}
 }
 
+func TestNewKeyStatsAggregatesUsageByStableClientName(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-key-stats",
+			"object": "chat.completion",
+			"model":  "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"index": 0,
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": "pong",
+				},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]any{"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := baseConfig()
+	cfg.Inbounds[0].Clients = []config.ClientSpec{{Name: "office-key", Token: "token-a", Tag: "office"}, {Name: "office-key-2", Token: "token-b", Tag: "office"}}
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "openai",
+		Protocol:  "openai_chat",
+		Endpoint:  upstream.URL + "/v1",
+		AuthToken: "key-1",
+		Tag:       "openai-tag",
+	}}
+	cfg.Routing.Rules[0].ToTags = []string{"openai-tag"}
+	cfg.Routing.Rules[0].TargetModel = "gpt-4o-mini"
+
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-4",
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "hello",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	for _, token := range []string{"token-a", "token-b", "token-a"} {
+		w := httptest.NewRecorder()
+		listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", token, body))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+		}
+	}
+
+	stats := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(stats, httptest.NewRequest(http.MethodGet, "/stats/keys", nil))
+	if stats.Code != http.StatusOK {
+		t.Fatalf("stats status = %d, want 200, body = %s", stats.Code, stats.Body.String())
+	}
+
+	var resp struct {
+		Items []struct {
+			Name         string `json:"name"`
+			RequestCount int    `json:"request_count"`
+			TotalTokens  int    `json:"total_tokens"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(stats.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("len(items) = %d, want 2, body = %s", len(resp.Items), stats.Body.String())
+	}
+	if resp.Items[0].Name != "office-key" || resp.Items[0].RequestCount != 2 || resp.Items[0].TotalTokens != 36 {
+		t.Fatalf("items[0] = %#v, want office-key aggregated twice", resp.Items[0])
+	}
+	if resp.Items[1].Name != "office-key-2" || resp.Items[1].RequestCount != 1 || resp.Items[1].TotalTokens != 18 {
+		t.Fatalf("items[1] = %#v, want office-key-2 aggregated once", resp.Items[1])
+	}
+}
+
 func TestNewBindsAllCoreInboundsForMinimalSmoke(t *testing.T) {
 	cfg := baseDualProtocolConfig()
 	cfg.Inbounds = append(cfg.Inbounds, config.InboundSpec{
 		Name:     "responses-entry",
 		Protocol: "openai_responses",
 		Path:     "/v1/responses",
-		Clients:  []config.ClientSpec{{Token: "responses-token", Tag: "office"}},
+		Clients:  []config.ClientSpec{{Name: "office-key", Token: "responses-token", Tag: "office"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "responses-entry")
 

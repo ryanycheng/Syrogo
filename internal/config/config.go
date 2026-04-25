@@ -28,6 +28,7 @@ type ListenerSpec struct {
 }
 
 type ClientSpec struct {
+	Name  string `yaml:"name"`
 	Token string `yaml:"token"`
 	Tag   string `yaml:"tag"`
 }
@@ -98,8 +99,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("at least one routing rule is required")
 	}
 
-	inboundNames := make(map[string]struct{}, len(c.Inbounds))
+	inputNames := make(map[string]struct{}, len(c.Inbounds))
 	tokens := make(map[string]string)
+	clientNames := make(map[string]string)
 	for _, inbound := range c.Inbounds {
 		if inbound.Name == "" {
 			return fmt.Errorf("inbounds.name is required")
@@ -117,6 +119,9 @@ func (c Config) Validate() error {
 			return fmt.Errorf("inbounds.%s.clients is required", inbound.Name)
 		}
 		for i, client := range inbound.Clients {
+			if client.Name == "" {
+				return fmt.Errorf("inbounds.%s.clients[%d].name is required", inbound.Name, i)
+			}
 			if client.Token == "" {
 				return fmt.Errorf("inbounds.%s.clients[%d].token is required", inbound.Name, i)
 			}
@@ -126,9 +131,13 @@ func (c Config) Validate() error {
 			if owner, ok := tokens[client.Token]; ok {
 				return fmt.Errorf("inbounds.%s.clients[%d].token duplicates token used by %s", inbound.Name, i, owner)
 			}
+			if owner, ok := clientNames[client.Name]; ok {
+				return fmt.Errorf("inbounds.%s.clients[%d].name duplicates client name used by %s", inbound.Name, i, owner)
+			}
 			tokens[client.Token] = inbound.Name
+			clientNames[client.Name] = inbound.Name
 		}
-		inboundNames[inbound.Name] = struct{}{}
+		inputNames[inbound.Name] = struct{}{}
 	}
 
 	if len(c.Listeners) > 0 && len(c.Inbounds) == 0 {
@@ -145,7 +154,7 @@ func (c Config) Validate() error {
 			return fmt.Errorf("listeners.%s.inbounds is required", listener.Name)
 		}
 		for _, inboundName := range listener.Inbounds {
-			if _, ok := inboundNames[inboundName]; !ok {
+			if _, ok := inputNames[inboundName]; !ok {
 				return fmt.Errorf("listeners.%s.inbound %q not found in inbounds", listener.Name, inboundName)
 			}
 		}

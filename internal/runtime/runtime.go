@@ -144,6 +144,7 @@ type CompletionProvider interface {
 
 type RouteContext struct {
 	Request         Request
+	ClientName      string
 	InboundName     string
 	InboundProtocol string
 	ActiveTag       string
@@ -158,6 +159,7 @@ type ExecutionStep struct {
 }
 
 type ExecutionPlan struct {
+	ClientName     string
 	MatchedRule    string
 	Strategy       RoutingStrategy
 	ResolvedToTags []string

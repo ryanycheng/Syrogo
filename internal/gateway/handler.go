@@ -58,11 +58,20 @@ func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.I
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/healthz", h.handleHealthz)
+	mux.HandleFunc("/stats/keys", h.handleKeyStats)
 	mux.HandleFunc("/", h.handleRequest)
 }
 
 func (h *Handler) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleKeyStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": h.dispatcher.Snapshot()})
 }
 
 func (h *Handler) handleByCodec(w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) bool {
@@ -79,6 +88,10 @@ func (h *Handler) handleByCodec(w http.ResponseWriter, r *http.Request, inbound 
 func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/healthz" {
 		h.handleHealthz(w, r)
+		return
+	}
+	if r.URL.Path == "/stats/keys" {
+		h.handleKeyStats(w, r)
 		return
 	}
 
@@ -111,6 +124,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		slog.String("path", r.URL.Path),
 		slog.String("inbound", inbound.Name),
 		slog.String("protocol", inbound.Protocol),
+		slog.String("client_name", client.Name),
 		slog.String("active_tag", client.Tag),
 		slog.String("remote", r.RemoteAddr),
 	)
@@ -152,6 +166,7 @@ func bearerToken(header string) string {
 func (h *Handler) planRequest(req runtime.Request, inbound config.InboundSpec, client config.ClientSpec) (runtime.ExecutionPlan, error) {
 	return h.router.Plan(runtime.RouteContext{
 		Request:         req,
+		ClientName:      client.Name,
 		InboundName:     inbound.Name,
 		InboundProtocol: inbound.Protocol,
 		ActiveTag:       client.Tag,

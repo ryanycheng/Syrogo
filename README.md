@@ -143,6 +143,8 @@ cp configs/config.example.yaml configs/config.yaml
 
 Then replace the token, endpoint, and auth_token fields in `configs/config.yaml` with real values available in your environment.
 
+Each `inbounds[].clients[]` entry now also requires a stable `name`. This is the usage-accounting identity for that key. You can rotate `token`, but keep `name` unchanged if you want usage to continue accumulating under the same key identity.
+
 Note: the current implementation does not automatically read `.env` and does not expand `${VAR}`. If placeholder strings remain in the config file, they will be read as-is.
 
 ### 2. Choose listeners and inbounds
@@ -267,7 +269,36 @@ Current scope:
 - only runs when the upstream response omits `usage`
 - returns a platform-side estimate, not provider billing truth
 
-### 9. Local debugging
+### 9. Read key usage stats
+
+Syrogo now exposes a minimal read-only endpoint for per-key usage accounting:
+
+```bash
+curl http://127.0.0.1:23234/stats/keys
+```
+
+Response shape:
+
+```json
+{
+  "items": [
+    {
+      "name": "office-key",
+      "request_count": 12,
+      "input_tokens": 1234,
+      "output_tokens": 567,
+      "total_tokens": 1801,
+      "provider_usage_count": 12,
+      "estimated_usage_count": 0,
+      "last_seen_at": "2026-04-25T09:00:00Z"
+    }
+  ]
+}
+```
+
+`name` is the stable accounting identity. If you rotate the underlying bearer token, keep the same `name` to preserve a continuous usage ledger.
+
+### 10. Local debugging
 
 For local development, you can use:
 

@@ -143,6 +143,8 @@ cp configs/config.example.yaml configs/config.yaml
 
 然后把 `configs/config.yaml` 中的 token、endpoint、auth_token 改成你本地可用的真实值。
 
+现在每个 `inbounds[].clients[]` 还需要一个稳定的 `name`。这个名字是该 key 的 usage 统计身份；后续可以轮换 `token`，但如果希望统计连续，就应该保持 `name` 不变。
+
 注意：当前实现不会自动读取 `.env`，也不会自动展开 `${VAR}`。如果配置文件里保留占位符字符串，它会被原样读入。
 
 ### 2. 选择监听与入口
@@ -267,7 +269,36 @@ outbounds:
 - 只在上游缺失 `usage` 时触发
 - 返回的是平台侧近似值，不是 provider 账单真值
 
-### 9. 本地调试
+### 9. 查看 key usage 统计
+
+Syrogo 现在提供一个最小只读端点，用于查看按 key 统计的 usage：
+
+```bash
+curl http://127.0.0.1:23234/stats/keys
+```
+
+返回结构示例：
+
+```json
+{
+  "items": [
+    {
+      "name": "office-key",
+      "request_count": 12,
+      "input_tokens": 1234,
+      "output_tokens": 567,
+      "total_tokens": 1801,
+      "provider_usage_count": 12,
+      "estimated_usage_count": 0,
+      "last_seen_at": "2026-04-25T09:00:00Z"
+    }
+  ]
+}
+```
+
+其中 `name` 是稳定统计身份。底层 bearer token 可以轮换，但如果你想保留连续账本，就应保持同一个 `name`。
+
+### 10. 本地调试
 
 本地开发时可使用：
 

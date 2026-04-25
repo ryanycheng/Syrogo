@@ -52,15 +52,15 @@ func testInbounds() []config.InboundSpec {
 		Name:     "openai-entry",
 		Protocol: "openai_chat",
 		Path:     "/v1/chat/completions",
-		Clients:  []config.ClientSpec{{Token: "client-token", Tag: "office"}},
+		Clients:  []config.ClientSpec{{Name: "office-key", Token: "client-token", Tag: "office"}},
 	}}
 }
 
 func testDualProtocolInbounds() []config.InboundSpec {
 	return []config.InboundSpec{
-		{Name: "openai-entry", Protocol: "openai_chat", Path: "/v1/chat/completions", Clients: []config.ClientSpec{{Token: "client-token", Tag: "office"}}},
-		{Name: "responses-entry", Protocol: "openai_responses", Path: "/v1/responses", Clients: []config.ClientSpec{{Token: "responses-token", Tag: "office"}}},
-		{Name: "anthropic-entry", Protocol: "anthropic_messages", Path: "/v1/messages", Clients: []config.ClientSpec{{Token: "anthropic-token", Tag: "office"}}},
+		{Name: "openai-entry", Protocol: "openai_chat", Path: "/v1/chat/completions", Clients: []config.ClientSpec{{Name: "office-key", Token: "client-token", Tag: "office"}}},
+		{Name: "responses-entry", Protocol: "openai_responses", Path: "/v1/responses", Clients: []config.ClientSpec{{Name: "responses-key", Token: "responses-token", Tag: "office"}}},
+		{Name: "anthropic-entry", Protocol: "anthropic_messages", Path: "/v1/messages", Clients: []config.ClientSpec{{Name: "anthropic-key", Token: "anthropic-token", Tag: "office"}}},
 	}
 }
 
@@ -97,6 +97,29 @@ func TestHealthzReturnsOK(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestKeyStatsReturnsEmptyListByDefault(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/stats/keys", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp struct {
+		Items []execution.KeyUsageStats `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(resp.Items) != 0 {
+		t.Fatalf("items = %#v, want empty list", resp.Items)
 	}
 }
 
