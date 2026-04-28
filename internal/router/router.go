@@ -70,20 +70,25 @@ func (r *Router) Plan(ctx runtime.RouteContext) (runtime.ExecutionPlan, error) {
 		for _, outboundName := range ordered {
 			target := r.providers[outboundName]
 			steps = append(steps, runtime.ExecutionStep{
-				Type:           runtime.StepTypeOutbound,
-				OutboundName:   outboundName,
-				OutboundTarget: target,
-				Model:          model,
-				OnError:        runtime.FallbackOnRetryable,
+				Type:             runtime.StepTypeOutbound,
+				OutboundName:     outboundName,
+				OutboundProtocol: providerProtocol(target),
+				OutboundTarget:   target,
+				Model:            model,
+				OnError:          runtime.FallbackOnRetryable,
 			})
 		}
 
 		return runtime.ExecutionPlan{
-			ClientName:     ctx.ClientName,
-			MatchedRule:    rule.name,
-			Strategy:       rule.strategy,
-			ResolvedToTags: append([]string(nil), rule.toTags...),
-			Steps:          steps,
+			ClientName:      ctx.ClientName,
+			InboundName:     ctx.InboundName,
+			InboundProtocol: ctx.InboundProtocol,
+			ActiveTag:       ctx.ActiveTag,
+			RequestedModel:  ctx.Request.Model,
+			MatchedRule:     rule.name,
+			Strategy:        rule.strategy,
+			ResolvedToTags:  append([]string(nil), rule.toTags...),
+			Steps:           steps,
 		}, nil
 	}
 
@@ -147,4 +152,17 @@ func (r *Router) nextRoundRobinIndex(key string, size int) int {
 	index := r.roundRobin[key] % size
 	r.roundRobin[key] = (index + 1) % size
 	return index
+}
+
+func providerProtocol(target provider.Provider) string {
+	switch target.(type) {
+	case *provider.MockProvider:
+		return "mock"
+	case *provider.OpenAICompatibleProvider:
+		return "openai"
+	case *provider.AnthropicMessagesProvider:
+		return "anthropic_messages"
+	default:
+		return "unknown"
+	}
 }

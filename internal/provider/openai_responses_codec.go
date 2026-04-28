@@ -274,7 +274,7 @@ func decodeOpenAIResponsesResponse(resp openAIResponsesEnvelope) (runtime.Respon
 		Message:      message,
 	}
 	if resp.Usage != nil {
-		response.Usage = &runtime.Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens, TotalTokens: resp.Usage.TotalTokens}
+		response.Usage = &runtime.Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens, TotalTokens: resp.Usage.TotalTokens, Source: runtime.UsageSourceProvider}
 	}
 	return response, nil
 }

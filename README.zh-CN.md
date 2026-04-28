@@ -269,13 +269,28 @@ outbounds:
 - 只在上游缺失 `usage` 时触发
 - 返回的是平台侧近似值，不是 provider 账单真值
 
-### 9. 查看 key usage 统计
+### 9. 查看 usage 聚合统计
 
-Syrogo 现在提供一个最小只读端点，用于查看按 key 统计的 usage：
+Syrogo 现在提供一个独立的 accounting 只读端点，用于查看 usage 聚合结果。
+
+它不复用业务 inbound token，而是使用单独的 admin token：
 
 ```bash
-curl http://127.0.0.1:23234/stats/keys
+curl http://127.0.0.1:23234/stats/usage?group_by=key \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+
+curl http://127.0.0.1:23234/stats/usage?group_by=provider \
+  -H 'Authorization: Bearer <accounting-admin-token>'
 ```
+
+当前支持的 `group_by`：
+
+- `key`
+- `provider`
+- `model`
+- `inbound`
+- `source`
+- `outbound`
 
 返回结构示例：
 
@@ -283,10 +298,15 @@ curl http://127.0.0.1:23234/stats/keys
 {
   "items": [
     {
-      "name": "office-key",
+      "value": "office-key",
       "request_count": 12,
+      "success_count": 12,
+      "error_count": 0,
+      "fallback_count": 0,
       "input_tokens": 1234,
       "output_tokens": 567,
+      "cached_input_read_tokens": 0,
+      "cached_input_write_tokens": 0,
       "total_tokens": 1801,
       "provider_usage_count": 12,
       "estimated_usage_count": 0,
@@ -296,7 +316,22 @@ curl http://127.0.0.1:23234/stats/keys
 }
 ```
 
-其中 `name` 是稳定统计身份。底层 bearer token 可以轮换，但如果你想保留连续账本，就应保持同一个 `name`。
+其中：
+
+- `clients[].name` 仍是稳定统计身份
+- `value` 的含义由 `group_by` 决定
+- 当前 backend 仅支持进程内 `memory`
+- 当前统计用于实时聚合视图，不是持久化账本
+
+对应配置示例：
+
+```yaml
+accounting:
+  enabled: true
+  backend: "memory"
+  expose_http: true
+  admin_token: "${SYROGO_ACCOUNTING_ADMIN_TOKEN}"
+```
 
 ### 10. 本地调试
 

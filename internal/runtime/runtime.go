@@ -21,6 +21,8 @@ type RoutingStrategy string
 
 type UsageSource string
 
+type UsageStatus string
+
 type contextKey string
 
 const (
@@ -56,6 +58,9 @@ const (
 	UsageSourceProvider    UsageSource = "provider"
 	UsageSourceProviderAPI UsageSource = "provider_count_api"
 	UsageSourceEstimated   UsageSource = "estimated"
+
+	UsageStatusSuccess UsageStatus = "success"
+	UsageStatusError   UsageStatus = "error"
 
 	ContextKeyRequestID contextKey = "request_id"
 )
@@ -114,6 +119,38 @@ type Usage struct {
 	Source       UsageSource
 }
 
+type UsageBreakdown struct {
+	RequestCount           int
+	InputTokens            int
+	OutputTokens           int
+	CachedInputReadTokens  int
+	CachedInputWriteTokens int
+	TotalTokens            int
+	ToolUnits              map[string]float64
+}
+
+type UsageRecord struct {
+	RequestID        string
+	ClientName       string
+	InboundName      string
+	InboundProtocol  string
+	ActiveTag        string
+	MatchedRule      string
+	Strategy         RoutingStrategy
+	OutboundName     string
+	OutboundProtocol string
+	ProviderName     string
+	RequestedModel   string
+	ExecutedModel    string
+	UsageSource      UsageSource
+	Status           UsageStatus
+	Breakdown        UsageBreakdown
+	StartedAt        string
+	FinishedAt       string
+	LatencyMs        int64
+	FallbackCount    int
+}
+
 type Response struct {
 	ID           string
 	Object       string
@@ -151,17 +188,22 @@ type RouteContext struct {
 }
 
 type ExecutionStep struct {
-	Type           StepType
-	OutboundName   string
-	OutboundTarget CompletionProvider
-	Model          string
-	OnError        FallbackCondition
+	Type             StepType
+	OutboundName     string
+	OutboundProtocol string
+	OutboundTarget   CompletionProvider
+	Model            string
+	OnError          FallbackCondition
 }
 
 type ExecutionPlan struct {
-	ClientName     string
-	MatchedRule    string
-	Strategy       RoutingStrategy
-	ResolvedToTags []string
-	Steps          []ExecutionStep
+	ClientName      string
+	InboundName     string
+	InboundProtocol string
+	ActiveTag       string
+	RequestedModel  string
+	MatchedRule     string
+	Strategy        RoutingStrategy
+	ResolvedToTags  []string
+	Steps           []ExecutionStep
 }

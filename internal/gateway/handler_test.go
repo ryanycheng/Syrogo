@@ -76,7 +76,7 @@ func newTestHandler(t *testing.T, providers map[string]provider.Provider, routin
 		t.Fatalf("router.New() error = %v", err)
 	}
 
-	return New(r, execution.NewDispatcher(), inbounds, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	return New(r, execution.NewDispatcher(), inbounds, config.AccountingConfig{}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 }
 
 func authorizedRequest(method, path, token string, body []byte) *http.Request {
@@ -100,20 +100,38 @@ func TestHealthzReturnsOK(t *testing.T) {
 	}
 }
 
-func TestKeyStatsReturnsEmptyListByDefault(t *testing.T) {
+func TestUsageStatsRequiresAdminToken(t *testing.T) {
 	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
 
 	mux := http.NewServeMux()
 	h.Register(mux)
 
 	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/stats/keys", nil))
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/stats/usage", nil))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestUsageStatsReturnsEmptyListWithAdminToken(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/stats/usage?group_by=key", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	var resp struct {
-		Items []execution.KeyUsageStats `json:"items"`
+		Items []execution.UsageStatsItem `json:"items"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
@@ -158,7 +176,7 @@ func TestChatCompletionsLogsDecodeFailure(t *testing.T) {
 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
-	h := New(r, execution.NewDispatcher(), testInbounds(), logger)
+	h := New(r, execution.NewDispatcher(), testInbounds(), config.AccountingConfig{}, logger)
 	mux := http.NewServeMux()
 	h.Register(mux)
 

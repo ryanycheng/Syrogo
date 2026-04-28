@@ -269,13 +269,28 @@ Current scope:
 - only runs when the upstream response omits `usage`
 - returns a platform-side estimate, not provider billing truth
 
-### 9. Read key usage stats
+### 9. Read usage aggregates
 
-Syrogo now exposes a minimal read-only endpoint for per-key usage accounting:
+Syrogo now exposes a dedicated accounting read-only endpoint for usage aggregates.
+
+It does not reuse business inbound tokens. Use a separate admin token instead:
 
 ```bash
-curl http://127.0.0.1:23234/stats/keys
+curl http://127.0.0.1:23234/stats/usage?group_by=key \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+
+curl http://127.0.0.1:23234/stats/usage?group_by=provider \
+  -H 'Authorization: Bearer <accounting-admin-token>'
 ```
+
+Current `group_by` values:
+
+- `key`
+- `provider`
+- `model`
+- `inbound`
+- `source`
+- `outbound`
 
 Response shape:
 
@@ -283,10 +298,15 @@ Response shape:
 {
   "items": [
     {
-      "name": "office-key",
+      "value": "office-key",
       "request_count": 12,
+      "success_count": 12,
+      "error_count": 0,
+      "fallback_count": 0,
       "input_tokens": 1234,
       "output_tokens": 567,
+      "cached_input_read_tokens": 0,
+      "cached_input_write_tokens": 0,
       "total_tokens": 1801,
       "provider_usage_count": 12,
       "estimated_usage_count": 0,
@@ -296,7 +316,22 @@ Response shape:
 }
 ```
 
-`name` is the stable accounting identity. If you rotate the underlying bearer token, keep the same `name` to preserve a continuous usage ledger.
+Notes:
+
+- `clients[].name` remains the stable accounting identity
+- `value` depends on the selected `group_by`
+- the current backend only supports in-process `memory`
+- this is a real-time aggregate view, not a persistent ledger
+
+Config example:
+
+```yaml
+accounting:
+  enabled: true
+  backend: "memory"
+  expose_http: true
+  admin_token: "${SYROGO_ACCOUNTING_ADMIN_TOKEN}"
+```
 
 ### 10. Local debugging
 

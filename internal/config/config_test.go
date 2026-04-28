@@ -487,6 +487,35 @@ func TestConfigValidateRejectsUnsupportedUsageEstimationMode(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRequiresAccountingAdminTokenWhenExposeHTTPEnabled(t *testing.T) {
+	cfg := validConfig()
+	cfg.Accounting = AccountingConfig{Enabled: true, Backend: "memory", ExposeHTTP: true}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "accounting.admin_token is required when accounting.expose_http is enabled" {
+		t.Fatalf("Validate() error = %v, want missing accounting admin token error", err)
+	}
+}
+
+func TestConfigValidateRejectsUnsupportedAccountingBackend(t *testing.T) {
+	cfg := validConfig()
+	cfg.Accounting = AccountingConfig{Enabled: true, Backend: "redis"}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "accounting.backend \"redis\" is unsupported" {
+		t.Fatalf("Validate() error = %v, want unsupported accounting backend error", err)
+	}
+}
+
+func TestConfigValidateSupportsMemoryAccounting(t *testing.T) {
+	cfg := validConfig()
+	cfg.Accounting = AccountingConfig{Enabled: true, Backend: "memory", ExposeHTTP: true, AdminToken: "admin-token"}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestLoadSuccess(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

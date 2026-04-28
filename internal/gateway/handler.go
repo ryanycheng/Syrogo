@@ -21,6 +21,7 @@ type Handler struct {
 	inbounds   []config.InboundSpec
 	registry   *InboundRegistry
 	logger     *slog.Logger
+	accounting config.AccountingConfig
 }
 
 type loggingResponseWriter struct {
@@ -43,7 +44,7 @@ func withRequestID(ctx context.Context, requestID string) context.Context {
 	return context.WithValue(ctx, runtime.ContextKeyRequestID, requestID)
 }
 
-func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, logger *slog.Logger) *Handler {
+func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, accounting config.AccountingConfig, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -53,12 +54,13 @@ func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.I
 		inbounds:   append([]config.InboundSpec(nil), inbounds...),
 		registry:   DefaultInboundRegistry(),
 		logger:     logger,
+		accounting: accounting,
 	}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/healthz", h.handleHealthz)
-	mux.HandleFunc("/stats/keys", h.handleKeyStats)
+	mux.HandleFunc("/stats/usage", h.handleUsageStats)
 	mux.HandleFunc("/", h.handleRequest)
 }
 
@@ -66,12 +68,25 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h *Handler) handleKeyStats(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleUsageStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": h.dispatcher.Snapshot()})
+	if !h.authorizeAccounting(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	groupBy := strings.TrimSpace(r.URL.Query().Get("group_by"))
+	if groupBy == "" {
+		groupBy = "key"
+	}
+	items, err := h.dispatcher.QueryUsage(groupBy)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (h *Handler) handleByCodec(w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) bool {
@@ -90,8 +105,8 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		h.handleHealthz(w, r)
 		return
 	}
-	if r.URL.Path == "/stats/keys" {
-		h.handleKeyStats(w, r)
+	if r.URL.Path == "/stats/usage" {
+		h.handleUsageStats(w, r)
 		return
 	}
 
@@ -161,6 +176,13 @@ func bearerToken(header string) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.TrimPrefix(header, prefix))
+}
+
+func (h *Handler) authorizeAccounting(r *http.Request) bool {
+	if !h.accounting.Enabled || !h.accounting.ExposeHTTP || h.accounting.AdminToken == "" {
+		return false
+	}
+	return bearerToken(r.Header.Get("Authorization")) == h.accounting.AdminToken
 }
 
 func (h *Handler) planRequest(req runtime.Request, inbound config.InboundSpec, client config.ClientSpec) (runtime.ExecutionPlan, error) {

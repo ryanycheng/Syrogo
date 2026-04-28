@@ -114,3 +114,9 @@ outbounds:
     # capabilities:
     #   usage_estimation: true
     #   usage_estimation_mode: "heuristic"
+
+accounting:
+  enabled: true
+  backend: "memory"
+  expose_http: true
+  admin_token: "${SYROGO_ACCOUNTING_ADMIN_TOKEN}"

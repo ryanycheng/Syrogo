@@ -44,7 +44,7 @@ func buildListeners(r *router.Router, dispatcher *execution.Dispatcher, cfg conf
 	listeners := make([]server.Listener, 0, len(cfg.Listeners))
 	for _, listener := range cfg.Listeners {
 		mux := http.NewServeMux()
-		gateway.New(r, dispatcher, cfg.ListenerInbounds(listener), logger).Register(mux)
+		gateway.New(r, dispatcher, cfg.ListenerInbounds(listener), cfg.Accounting, logger).Register(mux)
 		listeners = append(listeners, server.Listener{
 			Addr:    listener.Listen,
 			Handler: mux,

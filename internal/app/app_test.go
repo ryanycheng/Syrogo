@@ -27,7 +27,8 @@ func baseConfig() config.Config {
 			ToTags:   []string{"mock-tag"},
 			Strategy: "failover",
 		}}},
-		Outbounds: []config.OutboundSpec{{Name: "mock", Protocol: "mock", Tag: "mock-tag"}},
+		Outbounds:  []config.OutboundSpec{{Name: "mock", Protocol: "mock", Tag: "mock-tag"}},
+		Accounting: config.AccountingConfig{Enabled: true, Backend: "memory", ExposeHTTP: true, AdminToken: "admin-token"},
 	}
 }
 
@@ -3438,13 +3439,13 @@ func TestNewBridgesAnthropicLeadingSystemReminderToOpenAIResponsesWithoutInstruc
 	}
 }
 
-func TestNewKeyStatsAggregatesUsageByStableClientName(t *testing.T) {
+func TestNewUsageStatsAggregatesByKeyAndProvider(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":     "chatcmpl-key-stats",
+			"id":     "chatcmpl-usage-stats",
 			"object": "chat.completion",
 			"model":  "gpt-4o-mini",
 			"choices": []map[string]any{{
@@ -3497,30 +3498,57 @@ func TestNewKeyStatsAggregatesUsageByStableClientName(t *testing.T) {
 		}
 	}
 
-	stats := httptest.NewRecorder()
-	listeners[0].Handler.ServeHTTP(stats, httptest.NewRequest(http.MethodGet, "/stats/keys", nil))
-	if stats.Code != http.StatusOK {
-		t.Fatalf("stats status = %d, want 200, body = %s", stats.Code, stats.Body.String())
+	keyStatsReq := httptest.NewRequest(http.MethodGet, "/stats/usage?group_by=key", nil)
+	keyStatsReq.Header.Set("Authorization", "Bearer admin-token")
+	keyStats := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(keyStats, keyStatsReq)
+	if keyStats.Code != http.StatusOK {
+		t.Fatalf("key stats status = %d, want 200, body = %s", keyStats.Code, keyStats.Body.String())
 	}
 
-	var resp struct {
+	var keyResp struct {
 		Items []struct {
-			Name         string `json:"name"`
+			Value        string `json:"value"`
 			RequestCount int    `json:"request_count"`
 			TotalTokens  int    `json:"total_tokens"`
 		} `json:"items"`
 	}
-	if err := json.Unmarshal(stats.Body.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(keyStats.Body.Bytes(), &keyResp); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if len(resp.Items) != 2 {
-		t.Fatalf("len(items) = %d, want 2, body = %s", len(resp.Items), stats.Body.String())
+	if len(keyResp.Items) != 2 {
+		t.Fatalf("len(items) = %d, want 2, body = %s", len(keyResp.Items), keyStats.Body.String())
 	}
-	if resp.Items[0].Name != "office-key" || resp.Items[0].RequestCount != 2 || resp.Items[0].TotalTokens != 36 {
-		t.Fatalf("items[0] = %#v, want office-key aggregated twice", resp.Items[0])
+	if keyResp.Items[0].Value != "office-key" || keyResp.Items[0].RequestCount != 2 || keyResp.Items[0].TotalTokens != 36 {
+		t.Fatalf("items[0] = %#v, want office-key aggregated twice", keyResp.Items[0])
 	}
-	if resp.Items[1].Name != "office-key-2" || resp.Items[1].RequestCount != 1 || resp.Items[1].TotalTokens != 18 {
-		t.Fatalf("items[1] = %#v, want office-key-2 aggregated once", resp.Items[1])
+	if keyResp.Items[1].Value != "office-key-2" || keyResp.Items[1].RequestCount != 1 || keyResp.Items[1].TotalTokens != 18 {
+		t.Fatalf("items[1] = %#v, want office-key-2 aggregated once", keyResp.Items[1])
+	}
+
+	providerStatsReq := httptest.NewRequest(http.MethodGet, "/stats/usage?group_by=provider", nil)
+	providerStatsReq.Header.Set("Authorization", "Bearer admin-token")
+	providerStats := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(providerStats, providerStatsReq)
+	if providerStats.Code != http.StatusOK {
+		t.Fatalf("provider stats status = %d, want 200, body = %s", providerStats.Code, providerStats.Body.String())
+	}
+
+	var providerResp struct {
+		Items []struct {
+			Value        string `json:"value"`
+			RequestCount int    `json:"request_count"`
+			TotalTokens  int    `json:"total_tokens"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(providerStats.Body.Bytes(), &providerResp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(providerResp.Items) != 1 {
+		t.Fatalf("len(items) = %d, want 1, body = %s", len(providerResp.Items), providerStats.Body.String())
+	}
+	if providerResp.Items[0].Value != "openai" || providerResp.Items[0].RequestCount != 3 || providerResp.Items[0].TotalTokens != 54 {
+		t.Fatalf("provider items[0] = %#v, want openai aggregated three times", providerResp.Items[0])
 	}
 }
 

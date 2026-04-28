@@ -10,11 +10,12 @@ import (
 )
 
 type Config struct {
-	Server    ServerConfig   `yaml:"server"`
-	Listeners []ListenerSpec `yaml:"listeners"`
-	Inbounds  []InboundSpec  `yaml:"inbounds"`
-	Routing   RoutingConfig  `yaml:"routing"`
-	Outbounds []OutboundSpec `yaml:"outbounds"`
+	Server     ServerConfig     `yaml:"server"`
+	Listeners  []ListenerSpec   `yaml:"listeners"`
+	Inbounds   []InboundSpec    `yaml:"inbounds"`
+	Routing    RoutingConfig    `yaml:"routing"`
+	Outbounds  []OutboundSpec   `yaml:"outbounds"`
+	Accounting AccountingConfig `yaml:"accounting"`
 }
 
 type ServerConfig struct {
@@ -68,6 +69,13 @@ type OutboundCapabilities struct {
 	ResponsesAssistantHistoryNative *bool  `yaml:"responses_assistant_history_native"`
 	UsageEstimation                 bool   `yaml:"usage_estimation"`
 	UsageEstimationMode             string `yaml:"usage_estimation_mode"`
+}
+
+type AccountingConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	Backend    string `yaml:"backend"`
+	ExposeHTTP bool   `yaml:"expose_http"`
+	AdminToken string `yaml:"admin_token"`
 }
 
 func Load(path string) (Config, error) {
@@ -157,6 +165,18 @@ func (c Config) Validate() error {
 			if _, ok := inputNames[inboundName]; !ok {
 				return fmt.Errorf("listeners.%s.inbound %q not found in inbounds", listener.Name, inboundName)
 			}
+		}
+	}
+
+	if c.Accounting.Enabled {
+		if c.Accounting.Backend == "" {
+			c.Accounting.Backend = "memory"
+		}
+		if c.Accounting.Backend != "memory" {
+			return fmt.Errorf("accounting.backend %q is unsupported", c.Accounting.Backend)
+		}
+		if c.Accounting.ExposeHTTP && c.Accounting.AdminToken == "" {
+			return fmt.Errorf("accounting.admin_token is required when accounting.expose_http is enabled")
 		}
 	}
 
