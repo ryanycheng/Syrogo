@@ -281,6 +281,12 @@ curl http://127.0.0.1:23234/stats/usage?group_by=key \
 
 curl http://127.0.0.1:23234/stats/usage?group_by=provider \
   -H 'Authorization: Bearer <accounting-admin-token>'
+
+curl 'http://127.0.0.1:23234/stats/usage?group_by=key&window=day&bucket=2026-04-27' \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+
+curl 'http://127.0.0.1:23234/stats/usage?group_by=provider&window=month&bucket=2026-04' \
+  -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
 当前支持的 `group_by`：
@@ -291,6 +297,20 @@ curl http://127.0.0.1:23234/stats/usage?group_by=provider \
 - `inbound`
 - `source`
 - `outbound`
+
+当前支持的 `window`：
+
+- `total`
+- `day`
+- `week`
+- `month`
+
+说明：
+
+- `window=total` 时可省略 `bucket`
+- `window=day` 时，`bucket` 形如 `2026-04-27`
+- `window=week` 时，`bucket` 形如 `2026-W18`
+- `window=month` 时，`bucket` 形如 `2026-04`
 
 返回结构示例：
 
@@ -320,20 +340,26 @@ curl http://127.0.0.1:23234/stats/usage?group_by=provider \
 
 - `clients[].name` 仍是稳定统计身份
 - `value` 的含义由 `group_by` 决定
-- 当前 backend 仅支持进程内 `memory`
-- 当前统计用于实时聚合视图，不是持久化账本
+- 查询始终读取内存聚合视图，不会在请求时扫盘
+- `local_file` backend 会把原始记录按天切分为 JSONL，并定期写 snapshot 用于重启恢复
 
 对应配置示例：
 
 ```yaml
 accounting:
   enabled: true
-  backend: "memory"
+  backend: "local_file"
   expose_http: true
   admin_token: "${SYROGO_ACCOUNTING_ADMIN_TOKEN}"
+  local_file:
+    dir: "./tmp/accounting"
+    rotate_max_size_mb: 64
+    retention_days: 30
+    snapshot_retention_days: 30
+    write_buffer_records: 128
+    flush_interval: "2s"
+    queue_size: 4096
 ```
-
-### 10. 本地调试
 
 本地开发时可使用：
 

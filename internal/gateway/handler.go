@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanycheng/Syrogo/internal/accounting"
 	"github.com/ryanycheng/Syrogo/internal/config"
 	"github.com/ryanycheng/Syrogo/internal/execution"
 	"github.com/ryanycheng/Syrogo/internal/provider"
@@ -44,7 +45,7 @@ func withRequestID(ctx context.Context, requestID string) context.Context {
 	return context.WithValue(ctx, runtime.ContextKeyRequestID, requestID)
 }
 
-func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, accounting config.AccountingConfig, logger *slog.Logger) *Handler {
+func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -54,7 +55,7 @@ func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.I
 		inbounds:   append([]config.InboundSpec(nil), inbounds...),
 		registry:   DefaultInboundRegistry(),
 		logger:     logger,
-		accounting: accounting,
+		accounting: accountingCfg,
 	}
 }
 
@@ -81,7 +82,15 @@ func (h *Handler) handleUsageStats(w http.ResponseWriter, r *http.Request) {
 	if groupBy == "" {
 		groupBy = "key"
 	}
-	items, err := h.dispatcher.QueryUsage(groupBy)
+	window := accounting.Window(strings.TrimSpace(r.URL.Query().Get("window")))
+	if window == "" {
+		window = accounting.WindowTotal
+	}
+	items, err := h.dispatcher.QueryUsageBy(accounting.Query{
+		GroupBy: groupBy,
+		Window:  window,
+		Bucket:  strings.TrimSpace(r.URL.Query().Get("bucket")),
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

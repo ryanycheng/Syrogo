@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/protocol"
 
@@ -71,11 +72,36 @@ type OutboundCapabilities struct {
 	UsageEstimationMode             string `yaml:"usage_estimation_mode"`
 }
 
+type DurationValue string
+
+func (d DurationValue) Duration() time.Duration {
+	if d == "" {
+		return 0
+	}
+	parsed, err := time.ParseDuration(string(d))
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
 type AccountingConfig struct {
-	Enabled    bool   `yaml:"enabled"`
-	Backend    string `yaml:"backend"`
-	ExposeHTTP bool   `yaml:"expose_http"`
-	AdminToken string `yaml:"admin_token"`
+	Enabled    bool                      `yaml:"enabled"`
+	Backend    string                    `yaml:"backend"`
+	ExposeHTTP bool                      `yaml:"expose_http"`
+	AdminToken string                    `yaml:"admin_token"`
+	LocalFile  AccountingLocalFileConfig `yaml:"local_file"`
+}
+
+type AccountingLocalFileConfig struct {
+	Dir                   string        `yaml:"dir"`
+	RotateMaxSizeMB       int           `yaml:"rotate_max_size_mb"`
+	RetentionDays         int           `yaml:"retention_days"`
+	SnapshotInterval      DurationValue `yaml:"snapshot_interval"`
+	SnapshotRetentionDays int           `yaml:"snapshot_retention_days"`
+	WriteBufferRecords    int           `yaml:"write_buffer_records"`
+	FlushInterval         DurationValue `yaml:"flush_interval"`
+	QueueSize             int           `yaml:"queue_size"`
 }
 
 func Load(path string) (Config, error) {
@@ -172,7 +198,13 @@ func (c Config) Validate() error {
 		if c.Accounting.Backend == "" {
 			c.Accounting.Backend = "memory"
 		}
-		if c.Accounting.Backend != "memory" {
+		switch c.Accounting.Backend {
+		case "memory":
+		case "local_file":
+			if err := validateAccountingLocalFile(c.Accounting.LocalFile); err != nil {
+				return err
+			}
+		default:
 			return fmt.Errorf("accounting.backend %q is unsupported", c.Accounting.Backend)
 		}
 		if c.Accounting.ExposeHTTP && c.Accounting.AdminToken == "" {
@@ -255,6 +287,34 @@ func (c Config) Validate() error {
 	}
 
 	_ = outboundNames
+	return nil
+}
+
+func validateAccountingLocalFile(cfg AccountingLocalFileConfig) error {
+	if cfg.Dir == "" {
+		return fmt.Errorf("accounting.local_file.dir is required when accounting.backend=local_file")
+	}
+	if cfg.RotateMaxSizeMB <= 0 {
+		return fmt.Errorf("accounting.local_file.rotate_max_size_mb must be greater than 0")
+	}
+	if cfg.RetentionDays < 0 {
+		return fmt.Errorf("accounting.local_file.retention_days must be greater than or equal to 0")
+	}
+	if cfg.SnapshotRetentionDays < 0 {
+		return fmt.Errorf("accounting.local_file.snapshot_retention_days must be greater than or equal to 0")
+	}
+	if cfg.WriteBufferRecords <= 0 {
+		return fmt.Errorf("accounting.local_file.write_buffer_records must be greater than 0")
+	}
+	if cfg.QueueSize <= 0 {
+		return fmt.Errorf("accounting.local_file.queue_size must be greater than 0")
+	}
+	if cfg.FlushInterval.Duration() <= 0 {
+		return fmt.Errorf("accounting.local_file.flush_interval must be a positive duration")
+	}
+	if cfg.SnapshotInterval != "" && cfg.SnapshotInterval.Duration() <= 0 {
+		return fmt.Errorf("accounting.local_file.snapshot_interval must be a positive duration")
+	}
 	return nil
 }
 

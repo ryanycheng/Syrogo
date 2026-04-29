@@ -405,6 +405,67 @@ func TestConfigValidateRequiresRoutingRule(t *testing.T) {
 	}
 }
 
+func TestConfigValidateSupportsAccountingLocalFile(t *testing.T) {
+	cfg := validConfig()
+	cfg.Accounting = AccountingConfig{
+		Enabled:    true,
+		Backend:    "local_file",
+		ExposeHTTP: true,
+		AdminToken: "admin-token",
+		LocalFile: AccountingLocalFileConfig{
+			Dir:                   t.TempDir(),
+			RotateMaxSizeMB:       16,
+			RetentionDays:         7,
+			SnapshotRetentionDays: 7,
+			WriteBufferRecords:    64,
+			FlushInterval:         DurationValue("1s"),
+			QueueSize:             1024,
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigValidateRequiresAccountingLocalFileDir(t *testing.T) {
+	cfg := validConfig()
+	cfg.Accounting = AccountingConfig{
+		Enabled: true,
+		Backend: "local_file",
+		LocalFile: AccountingLocalFileConfig{
+			RotateMaxSizeMB:    16,
+			WriteBufferRecords: 64,
+			FlushInterval:      DurationValue("1s"),
+			QueueSize:          1024,
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "accounting.local_file.dir is required when accounting.backend=local_file" {
+		t.Fatalf("Validate() error = %v, want missing local_file dir error", err)
+	}
+}
+
+func TestConfigValidateRequiresPositiveAccountingLocalFileFlushInterval(t *testing.T) {
+	cfg := validConfig()
+	cfg.Accounting = AccountingConfig{
+		Enabled: true,
+		Backend: "local_file",
+		LocalFile: AccountingLocalFileConfig{
+			Dir:                t.TempDir(),
+			RotateMaxSizeMB:    16,
+			WriteBufferRecords: 64,
+			FlushInterval:      DurationValue("0s"),
+			QueueSize:          1024,
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "accounting.local_file.flush_interval must be a positive duration" {
+		t.Fatalf("Validate() error = %v, want invalid flush_interval error", err)
+	}
+}
 func TestConfigValidateSupportsUsageEstimationForOpenAIChat(t *testing.T) {
 	cfg := validConfig()
 	cfg.Outbounds[0] = OutboundSpec{

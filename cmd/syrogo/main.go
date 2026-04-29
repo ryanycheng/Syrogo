@@ -100,6 +100,9 @@ func run(configPath string, devLogEnabled bool) error {
 	if err := application.Server.Shutdown(ctx); err != nil {
 		return err
 	}
+	if err := application.Close(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 

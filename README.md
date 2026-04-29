@@ -281,6 +281,12 @@ curl http://127.0.0.1:23234/stats/usage?group_by=key \
 
 curl http://127.0.0.1:23234/stats/usage?group_by=provider \
   -H 'Authorization: Bearer <accounting-admin-token>'
+
+curl 'http://127.0.0.1:23234/stats/usage?group_by=key&window=day&bucket=2026-04-27' \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+
+curl 'http://127.0.0.1:23234/stats/usage?group_by=provider&window=month&bucket=2026-04' \
+  -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
 Current `group_by` values:
@@ -291,6 +297,20 @@ Current `group_by` values:
 - `inbound`
 - `source`
 - `outbound`
+
+Current `window` values:
+
+- `total`
+- `day`
+- `week`
+- `month`
+
+Notes:
+
+- `bucket` is optional when `window=total`
+- `window=day` uses buckets like `2026-04-27`
+- `window=week` uses ISO week buckets like `2026-W18`
+- `window=month` uses buckets like `2026-04`
 
 Response shape:
 
@@ -320,17 +340,25 @@ Notes:
 
 - `clients[].name` remains the stable accounting identity
 - `value` depends on the selected `group_by`
-- the current backend only supports in-process `memory`
-- this is a real-time aggregate view, not a persistent ledger
+- queries always read the in-memory aggregate view instead of scanning disk on request
+- `local_file` persists append-only records as day-partitioned JSONL files and periodically writes snapshots for restart recovery
 
 Config example:
 
 ```yaml
 accounting:
   enabled: true
-  backend: "memory"
+  backend: "local_file"
   expose_http: true
   admin_token: "${SYROGO_ACCOUNTING_ADMIN_TOKEN}"
+  local_file:
+    dir: "./tmp/accounting"
+    rotate_max_size_mb: 64
+    retention_days: 30
+    snapshot_retention_days: 30
+    write_buffer_records: 128
+    flush_interval: "2s"
+    queue_size: 4096
 ```
 
 ### 10. Local debugging

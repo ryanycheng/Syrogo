@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanycheng/Syrogo/internal/accounting"
 	"github.com/ryanycheng/Syrogo/internal/config"
 	"github.com/ryanycheng/Syrogo/internal/execution"
 	"github.com/ryanycheng/Syrogo/internal/provider"
@@ -131,7 +132,7 @@ func TestUsageStatsReturnsEmptyListWithAdminToken(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	var resp struct {
-		Items []execution.UsageStatsItem `json:"items"`
+		Items []accounting.StatsItem `json:"items"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)

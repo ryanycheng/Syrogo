@@ -117,6 +117,14 @@ outbounds:
 
 accounting:
   enabled: true
-  backend: "memory"
+  backend: "local_file"
   expose_http: true
   admin_token: "${SYROGO_ACCOUNTING_ADMIN_TOKEN}"
+  local_file:
+    dir: "./tmp/accounting"
+    rotate_max_size_mb: 64
+    retention_days: 30
+    snapshot_retention_days: 30
+    write_buffer_records: 128
+    flush_interval: "2s"
+    queue_size: 4096
