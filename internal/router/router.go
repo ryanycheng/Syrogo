@@ -10,12 +10,13 @@ import (
 )
 
 type compiledRule struct {
-	name        string
-	fromTags    []string
-	toTags      []string
-	strategy    runtime.RoutingStrategy
-	targetModel string
-	resolvedSet []string
+	name             string
+	fromTags         []string
+	toTags           []string
+	strategy         runtime.RoutingStrategy
+	targetModel      string
+	resolvedSet      []string
+	weightedResolved []string
 }
 
 type Router struct {
@@ -58,8 +59,12 @@ func (r *Router) Plan(ctx runtime.RouteContext) (runtime.ExecutionPlan, error) {
 		}
 
 		ordered := append([]string(nil), rule.resolvedSet...)
-		if rule.strategy == runtime.RoutingStrategyRoundRobin {
+		switch rule.strategy {
+		case runtime.RoutingStrategyRoundRobin:
 			ordered = rotate(ordered, r.nextRoundRobinIndex(rule.name, len(ordered)))
+		case runtime.RoutingStrategyWeightedRoundRobin:
+			rotated := rotate(rule.weightedResolved, r.nextRoundRobinIndex(rule.name, len(rule.weightedResolved)))
+			ordered = dedupePreserveOrder(rotated)
 		}
 
 		steps := make([]runtime.ExecutionStep, 0, len(ordered))
@@ -117,16 +122,49 @@ func compileRules(rules []config.RoutingRule, outboundByTag map[string][]string)
 			resolved = append(resolved, outboundByTag[tag]...)
 		}
 
+		weightedResolved := resolved
+		if rule.Strategy == string(runtime.RoutingStrategyWeightedRoundRobin) {
+			weightedResolved = expandWeightedResolved(rule, outboundByTag)
+		}
+
 		compiled = append(compiled, compiledRule{
-			name:        name,
-			fromTags:    append([]string(nil), rule.FromTags...),
-			toTags:      append([]string(nil), rule.ToTags...),
-			strategy:    runtime.RoutingStrategy(rule.Strategy),
-			targetModel: rule.TargetModel,
-			resolvedSet: resolved,
+			name:             name,
+			fromTags:         append([]string(nil), rule.FromTags...),
+			toTags:           append([]string(nil), rule.ToTags...),
+			strategy:         runtime.RoutingStrategy(rule.Strategy),
+			targetModel:      rule.TargetModel,
+			resolvedSet:      resolved,
+			weightedResolved: weightedResolved,
 		})
 	}
 	return compiled
+}
+
+func expandWeightedResolved(rule config.RoutingRule, outboundByTag map[string][]string) []string {
+	weighted := make([]string, 0)
+	for _, tag := range rule.ToTags {
+		outbounds := outboundByTag[tag]
+		for i := 0; i < rule.Weights[tag]; i++ {
+			weighted = append(weighted, outbounds...)
+		}
+	}
+	return weighted
+}
+
+func dedupePreserveOrder(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	ordered := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		ordered = append(ordered, value)
+	}
+	return ordered
 }
 
 func rotate(values []string, index int) []string {

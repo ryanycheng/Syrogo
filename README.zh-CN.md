@@ -79,6 +79,7 @@ Syrogo 想解决的不是“再包一层 HTTP”，而是把这些变化收敛�
 - 单条规则内支持：
   - `failover`
   - `round_robin`
+  - `weighted_round_robin`
 - 支持按路由指定目标模型
 - 多类出站协议
   - `mock`

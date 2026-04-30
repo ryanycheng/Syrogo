@@ -374,6 +374,74 @@ func TestConfigValidateRejectsUnknownToTag(t *testing.T) {
 	}
 }
 
+func TestConfigValidateSupportsWeightedRoundRobin(t *testing.T) {
+	cfg := validConfig()
+	cfg.Routing.Rules[0].Strategy = "weighted_round_robin"
+	cfg.Routing.Rules[0].ToTags = []string{"mock-tag"}
+	cfg.Routing.Rules[0].Weights = map[string]int{"mock-tag": 2}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigValidateWeightedRoundRobinRequiresWeights(t *testing.T) {
+	cfg := validConfig()
+	cfg.Routing.Rules[0].Strategy = "weighted_round_robin"
+	cfg.Routing.Rules[0].Weights = nil
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "routing.rules[0].weights is required when strategy=weighted_round_robin" {
+		t.Fatalf("Validate() error = %v, want missing weights error", err)
+	}
+}
+
+func TestConfigValidateWeightedRoundRobinRequiresWeightForEachToTag(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds = append(cfg.Outbounds, OutboundSpec{Name: "mock-2", Protocol: "mock", Tag: "mock-tag-2"})
+	cfg.Routing.Rules[0].Strategy = "weighted_round_robin"
+	cfg.Routing.Rules[0].ToTags = []string{"mock-tag", "mock-tag-2"}
+	cfg.Routing.Rules[0].Weights = map[string]int{"mock-tag": 2}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "routing.rules[0].weights.mock-tag-2 is required" {
+		t.Fatalf("Validate() error = %v, want missing per-tag weight error", err)
+	}
+}
+
+func TestConfigValidateWeightedRoundRobinRejectsUnknownWeightTag(t *testing.T) {
+	cfg := validConfig()
+	cfg.Routing.Rules[0].Strategy = "weighted_round_robin"
+	cfg.Routing.Rules[0].Weights = map[string]int{"mock-tag": 2, "other-tag": 1}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "routing.rules[0].weights.other-tag does not match any to_tags entry" {
+		t.Fatalf("Validate() error = %v, want unknown weight tag error", err)
+	}
+}
+
+func TestConfigValidateWeightedRoundRobinRejectsNonPositiveWeight(t *testing.T) {
+	cfg := validConfig()
+	cfg.Routing.Rules[0].Strategy = "weighted_round_robin"
+	cfg.Routing.Rules[0].Weights = map[string]int{"mock-tag": 0}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "routing.rules[0].weights.mock-tag must be greater than 0" {
+		t.Fatalf("Validate() error = %v, want invalid weight error", err)
+	}
+}
+
+func TestConfigValidateRejectsWeightsOnNonWeightedRoundRobin(t *testing.T) {
+	cfg := validConfig()
+	cfg.Routing.Rules[0].Strategy = "failover"
+	cfg.Routing.Rules[0].Weights = map[string]int{"mock-tag": 1}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "routing.rules[0].weights is only supported when strategy=weighted_round_robin" {
+		t.Fatalf("Validate() error = %v, want unexpected weights error", err)
+	}
+}
+
 func TestConfigValidateMissingListen(t *testing.T) {
 	cfg := validConfig()
 	cfg.Listeners = nil

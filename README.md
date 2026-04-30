@@ -79,6 +79,7 @@ The current version supports:
 - per-rule support for:
   - `failover`
   - `round_robin`
+  - `weighted_round_robin`
 - route-level target model selection
 - multiple outbound protocols
   - `mock`

@@ -52,8 +52,9 @@ const (
 	StreamEventUsage        StreamEventType = "usage"
 	StreamEventError        StreamEventType = "error"
 
-	RoutingStrategyFailover   RoutingStrategy = "failover"
-	RoutingStrategyRoundRobin RoutingStrategy = "round_robin"
+	RoutingStrategyFailover           RoutingStrategy = "failover"
+	RoutingStrategyRoundRobin         RoutingStrategy = "round_robin"
+	RoutingStrategyWeightedRoundRobin RoutingStrategy = "weighted_round_robin"
 
 	UsageSourceProvider    UsageSource = "provider"
 	UsageSourceProviderAPI UsageSource = "provider_count_api"

@@ -51,7 +51,10 @@ routing:
       to_tags:
         - "openai-primary"
         - "openai-backup"
-      strategy: "round_robin"
+      strategy: "weighted_round_robin"
+      weights:
+        openai-primary: 3
+        openai-backup: 1
 
     - name: "responses-route"
       from_tags:

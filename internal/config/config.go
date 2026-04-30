@@ -43,11 +43,12 @@ type InboundSpec struct {
 }
 
 type RoutingRule struct {
-	Name        string   `yaml:"name"`
-	FromTags    []string `yaml:"from_tags"`
-	ToTags      []string `yaml:"to_tags"`
-	Strategy    string   `yaml:"strategy"`
-	TargetModel string   `yaml:"target_model"`
+	Name        string         `yaml:"name"`
+	FromTags    []string       `yaml:"from_tags"`
+	ToTags      []string       `yaml:"to_tags"`
+	Strategy    string         `yaml:"strategy"`
+	Weights     map[string]int `yaml:"weights"`
+	TargetModel string         `yaml:"target_model"`
 }
 
 type RoutingConfig struct {
@@ -276,13 +277,36 @@ func (c Config) Validate() error {
 		if rule.Strategy == "" {
 			return fmt.Errorf("routing.rules[%d].strategy is required", i)
 		}
-		if rule.Strategy != "failover" && rule.Strategy != "round_robin" {
+		if rule.Strategy != "failover" && rule.Strategy != "round_robin" && rule.Strategy != "weighted_round_robin" {
 			return fmt.Errorf("routing.rules[%d].strategy %q is unsupported", i, rule.Strategy)
 		}
 		for _, tag := range rule.ToTags {
 			if _, ok := outboundTags[tag]; !ok {
 				return fmt.Errorf("routing.rules[%d].to_tags %q not found in outbounds", i, tag)
 			}
+		}
+		if rule.Strategy == "weighted_round_robin" {
+			if len(rule.Weights) == 0 {
+				return fmt.Errorf("routing.rules[%d].weights is required when strategy=weighted_round_robin", i)
+			}
+			declared := make(map[string]struct{}, len(rule.ToTags))
+			for _, tag := range rule.ToTags {
+				declared[tag] = struct{}{}
+				weight, ok := rule.Weights[tag]
+				if !ok {
+					return fmt.Errorf("routing.rules[%d].weights.%s is required", i, tag)
+				}
+				if weight <= 0 {
+					return fmt.Errorf("routing.rules[%d].weights.%s must be greater than 0", i, tag)
+				}
+			}
+			for tag := range rule.Weights {
+				if _, ok := declared[tag]; !ok {
+					return fmt.Errorf("routing.rules[%d].weights.%s does not match any to_tags entry", i, tag)
+				}
+			}
+		} else if len(rule.Weights) > 0 {
+			return fmt.Errorf("routing.rules[%d].weights is only supported when strategy=weighted_round_robin", i)
 		}
 	}
 
