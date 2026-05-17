@@ -99,7 +99,7 @@ func TestDecodeOpenAIChatStreamEstimatesUsageWhenMissing(t *testing.T) {
 	ch, err := decodeOpenAIChatStream(body, runtime.Request{
 		Model: "gpt-4o-mini",
 		Messages: []runtime.Message{{
-			Role: runtime.MessageRoleUser,
+			Role:  runtime.MessageRoleUser,
 			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
 		}},
 	}, true)

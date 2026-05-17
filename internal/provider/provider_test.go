@@ -1648,7 +1648,7 @@ func TestOpenAICompatibleStreamCompletionEstimatesUsageWhenMissing(t *testing.T)
 	events, err := p.StreamCompletion(context.Background(), runtime.Request{
 		Model: "gpt-4o-mini",
 		Messages: []runtime.Message{{
-			Role: runtime.MessageRoleUser,
+			Role:  runtime.MessageRoleUser,
 			Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "hello"}},
 		}},
 		Stream: true,

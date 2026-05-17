@@ -281,12 +281,16 @@ func (s *LocalFileStore) replayRecords() error {
 	return nil
 }
 
-func (s *LocalFileStore) replayFile(path string) error {
+func (s *LocalFileStore) replayFile(path string) (err error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
 	scanner := bufio.NewScanner(file)
 	line := int64(0)
 	for scanner.Scan() {
