@@ -15,3 +15,6 @@ fmt:
 
 test:
 	go test ./...
+
+smoke:
+	./scripts/smoke.sh

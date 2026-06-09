@@ -223,10 +223,21 @@ curl http://127.0.0.1:23234/v1/responses \
   -d '{"model":"gpt-4o-mini","input":"hello"}'
 
 curl http://127.0.0.1:23234/v1/messages \
-  -H 'x-api-key: <anthropic-token>' \
+  -H 'Authorization: Bearer <anthropic-token>' \
   -H 'anthropic-version: 2023-06-01' \
   -H 'Content-Type: application/json' \
   -d '{"model":"claude-sonnet-4-5","max_tokens":128,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}'
+```
+
+You can also run the smoke script against a running gateway. It checks health, configured protocol entrypoints, stream responses, and usage stats when the corresponding tokens are provided:
+
+```bash
+SYROGO_SMOKE_BASE_URL=http://127.0.0.1:23234 \
+SYROGO_OPENAI_CLIENT_TOKEN=<chat-token> \
+SYROGO_RESPONSES_CLIENT_TOKEN=<responses-token> \
+SYROGO_ANTHROPIC_CLIENT_TOKEN=<anthropic-token> \
+SYROGO_ACCOUNTING_ADMIN_TOKEN=<accounting-admin-token> \
+make smoke
 ```
 
 ### 7. Declare Responses compatibility

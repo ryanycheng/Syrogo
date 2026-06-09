@@ -223,10 +223,21 @@ curl http://127.0.0.1:23234/v1/responses \
   -d '{"model":"gpt-4o-mini","input":"hello"}'
 
 curl http://127.0.0.1:23234/v1/messages \
-  -H 'x-api-key: <anthropic-token>' \
+  -H 'Authorization: Bearer <anthropic-token>' \
   -H 'anthropic-version: 2023-06-01' \
   -H 'Content-Type: application/json' \
   -d '{"model":"claude-sonnet-4-5","max_tokens":128,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}'
+```
+
+也可以对一个正在运行的 gateway 执行 smoke 脚本。脚本会在提供对应 token 时检查健康状态、协议入口、流式响应与 usage 统计：
+
+```bash
+SYROGO_SMOKE_BASE_URL=http://127.0.0.1:23234 \
+SYROGO_OPENAI_CLIENT_TOKEN=<chat-token> \
+SYROGO_RESPONSES_CLIENT_TOKEN=<responses-token> \
+SYROGO_ANTHROPIC_CLIENT_TOKEN=<anthropic-token> \
+SYROGO_ACCOUNTING_ADMIN_TOKEN=<accounting-admin-token> \
+make smoke
 ```
 
 ### 7. 声明 Responses 兼容能力

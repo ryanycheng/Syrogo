@@ -32,6 +32,7 @@
 
 ## Verification
 - 提交前必须完成与本次改动对应的测试验证，目标是尽早发现功能回退。
+- 涉及真实上游、Claude Code / Codex 接入、多轮对话、工具调用、stream、usage 或 accounting 的改动时，必须按 `.claude/rules/e2e.md` 做真实端到端验收；只返回一次成功响应不算完整通过。
 - 优先使用：
   - `make fmt`
   - `make test`

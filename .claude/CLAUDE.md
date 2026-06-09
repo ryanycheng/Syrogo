@@ -62,3 +62,4 @@ Syrogo 是一个多模型 AI Gateway / Semantic Router。
 - 工程实践与开发约束：`.claude/rules/engineering.md`
 - Git 协作与提交策略：`.claude/rules/git.md`
 - 发布流程约束：`.claude/rules/release.md`
+- 真实端到端验收：`.claude/rules/e2e.md`
