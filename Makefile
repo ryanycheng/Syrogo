@@ -18,3 +18,6 @@ test:
 
 smoke:
 	./scripts/smoke.sh
+
+e2e:
+	./scripts/e2e.py

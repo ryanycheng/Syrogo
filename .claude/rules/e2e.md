@@ -38,7 +38,7 @@ go run ./cmd/syrogo -config ./configs/config.yaml -dev-log
 curl http://127.0.0.1:23234/healthz
 ```
 
-然后对正在运行的 gateway 执行 smoke：
+然后对正在运行的 gateway 执行基础 smoke：
 
 ```bash
 SYROGO_SMOKE_BASE_URL=http://127.0.0.1:23234 \
@@ -55,6 +55,24 @@ make smoke
 - 已配置的协议入口返回 `2xx`
 - stream 检查返回 SSE 帧
 - accounting HTTP 启用时，usage stats 返回 `2xx`
+
+完整真实 E2E 优先使用自动化入口：
+
+```bash
+SYROGO_E2E_BASE_URL=http://127.0.0.1:23234 \
+SYROGO_E2E_CONFIG=configs/config.yaml \
+make e2e
+```
+
+如果要同时验证 Claude Code / Codex 工具级工作流：
+
+```bash
+SYROGO_E2E_BASE_URL=http://127.0.0.1:23234 \
+SYROGO_E2E_CONFIG=configs/config.yaml \
+SYROGO_E2E_CLAUDE=1 \
+SYROGO_E2E_CODEX=1 \
+make e2e
+```
 
 ## 2. 协议路由矩阵
 
