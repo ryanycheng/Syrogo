@@ -122,6 +122,8 @@ accounting:
   enabled: true
   backend: "local_file"
   expose_http: true
+  # Use /stats/usage with group_by=key, provider, model, inbound, source, outbound, or error_kind.
+  # error_kind helps distinguish quota, timeout, upstream 5xx, auth, and capability failures.
   admin_token: "${SYROGO_ACCOUNTING_ADMIN_TOKEN}"
   local_file:
     dir: "./tmp/accounting"

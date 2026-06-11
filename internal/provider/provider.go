@@ -282,10 +282,10 @@ func hasBuiltinResponsesTools(tools []runtime.ToolDefinition) bool {
 
 func validateOpenAIResponsesRequest(req runtime.Request, compat openAIResponsesCompatibility) error {
 	if compat.RejectPreviousResponse && req.PreviousResponseID != "" {
-		return NewFatalError(fmt.Errorf("outbound does not support responses previous_response_id continuation"))
+		return NewCapabilityUnsupportedError(fmt.Errorf("outbound does not support responses previous_response_id continuation"))
 	}
 	if compat.RejectBuiltinTools && hasBuiltinResponsesTools(req.Tools) {
-		return NewFatalError(fmt.Errorf("outbound does not support responses builtin tools"))
+		return NewCapabilityUnsupportedError(fmt.Errorf("outbound does not support responses builtin tools"))
 	}
 	return nil
 }

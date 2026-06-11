@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
@@ -13,6 +14,7 @@ func dispatchOrWriteError(h *Handler, w http.ResponseWriter, r *http.Request, re
 		status, message := gatewayError(err)
 		logger.Error("request dispatch failed",
 			slog.String("model", plannedModel(plan)),
+			slog.String("error_kind", string(provider.NormalizeError(err))),
 			slog.Int("status", status),
 			slog.Any("error", err),
 		)

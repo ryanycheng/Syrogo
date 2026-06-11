@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/ryanycheng/Syrogo/internal/accounting"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
@@ -132,6 +133,90 @@ func TestDispatchDoesNotFallbackWhenErrorIsFatal(t *testing.T) {
 	}
 }
 
+func TestDispatchAlwaysDoesNotFallbackWhenErrorIsFatal(t *testing.T) {
+	dispatcher := NewDispatcher()
+	primary := &stubProvider{name: "primary", err: provider.NewFatalError(errors.New("bad request"))}
+	fallback := &stubProvider{name: "fallback"}
+
+	_, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{
+		Steps: []runtime.ExecutionStep{
+			{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackAlways},
+			{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackAlways},
+		},
+	})
+	if err == nil || err.Error() != "bad request" {
+		t.Fatalf("Dispatch() error = %v, want bad request", err)
+	}
+	if fallback.req.Model != "" {
+		t.Fatalf("fallback should not be called, got req.Model = %q", fallback.req.Model)
+	}
+}
+
+func TestDispatchDoesNotFallbackWhenErrorIsAuthFailed(t *testing.T) {
+	dispatcher := NewDispatcher()
+	primary := &stubProvider{name: "primary", err: provider.NewAuthFailedError(errors.New("unauthorized"))}
+	fallback := &stubProvider{name: "fallback"}
+
+	_, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{
+		Steps: []runtime.ExecutionStep{
+			{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackAlways},
+			{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackAlways},
+		},
+	})
+	if err == nil || err.Error() != "unauthorized" {
+		t.Fatalf("Dispatch() error = %v, want unauthorized", err)
+	}
+	if fallback.req.Model != "" {
+		t.Fatalf("fallback should not be called, got req.Model = %q", fallback.req.Model)
+	}
+}
+
+func TestDispatchDoesNotFallbackWhenCapabilityUnsupported(t *testing.T) {
+	dispatcher := NewDispatcher()
+	primary := &stubProvider{name: "primary", err: provider.NewCapabilityUnsupportedError(errors.New("unsupported builtin tools"))}
+	fallback := &stubProvider{name: "fallback"}
+
+	_, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{
+		Steps: []runtime.ExecutionStep{
+			{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackAlways},
+			{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackAlways},
+		},
+	})
+	if err == nil || err.Error() != "unsupported builtin tools" {
+		t.Fatalf("Dispatch() error = %v, want unsupported builtin tools", err)
+	}
+	if fallback.req.Model != "" {
+		t.Fatalf("fallback should not be called, got req.Model = %q", fallback.req.Model)
+	}
+}
+
+func TestDispatchRecordsErrorKind(t *testing.T) {
+	store := accounting.NewMemoryStore()
+	dispatcher := NewDispatcherWithStore(store)
+	primary := &stubProvider{name: "primary", err: provider.NewAuthFailedError(errors.New("unauthorized"))}
+
+	_, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{
+		Steps: []runtime.ExecutionStep{{
+			Type:           runtime.StepTypeOutbound,
+			OutboundName:   "primary",
+			OutboundTarget: primary,
+			Model:          "gpt-4",
+			OnError:        runtime.FallbackAlways,
+		}},
+	})
+	if err == nil {
+		t.Fatal("Dispatch() error = nil, want error")
+	}
+
+	items, err := store.Query(accounting.Query{GroupBy: "error_kind", Window: accounting.WindowTotal})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Value != "auth_failed" || items[0].ErrorCount != 1 {
+		t.Fatalf("items = %#v, want auth_failed error_count=1", items)
+	}
+}
+
 func TestDispatchStreamReturnsFirstOutboundEvents(t *testing.T) {
 	dispatcher := NewDispatcher()
 	p := &stubProvider{name: "primary", streamEvents: []runtime.StreamEvent{{Type: runtime.StreamEventMessageStart, ResponseID: "chatcmpl-1", Model: "gpt-4"}}}
@@ -179,6 +264,29 @@ func TestDispatchStreamUsesFallbackWhenErrorIsRetryable(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ResponseID != "chatcmpl-2" {
 		t.Fatalf("events = %#v, want fallback stream", got)
+	}
+}
+
+func TestDispatchStreamRecordsEventErrorKind(t *testing.T) {
+	store := accounting.NewMemoryStore()
+	dispatcher := NewDispatcherWithStore(store)
+	p := &stubProvider{name: "primary", streamEvents: []runtime.StreamEvent{{Type: runtime.StreamEventError, Err: provider.NewUpstreamServerError(errors.New("bad gateway"))}}}
+
+	events, err := dispatcher.DispatchStream(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{
+		Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: p, Model: "gpt-4", OnError: runtime.FallbackAlways}},
+	})
+	if err != nil {
+		t.Fatalf("DispatchStream() error = %v", err)
+	}
+	for range events {
+	}
+
+	items, err := store.Query(accounting.Query{GroupBy: "error_kind", Window: accounting.WindowTotal})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Value != "upstream_server_error" || items[0].ErrorCount != 1 {
+		t.Fatalf("items = %#v, want upstream_server_error error_count=1", items)
 	}
 }
 

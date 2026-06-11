@@ -79,9 +79,10 @@ func (s *MemoryStore) applyRecord(record runtime.UsageRecord) {
 	s.applyToGroup(s.ensureTotalGroup(record, "inbound"), usageGroupValue(record, "inbound"), record)
 	s.applyToGroup(s.ensureTotalGroup(record, "source"), usageGroupValue(record, "source"), record)
 	s.applyToGroup(s.ensureTotalGroup(record, "outbound"), usageGroupValue(record, "outbound"), record)
+	s.applyToGroup(s.ensureTotalGroup(record, "error_kind"), usageGroupValue(record, "error_kind"), record)
 
 	day, week, month := timeBuckets(record)
-	for _, groupBy := range []string{"key", "provider", "model", "inbound", "source", "outbound"} {
+	for _, groupBy := range []string{"key", "provider", "model", "inbound", "source", "outbound", "error_kind"} {
 		value := usageGroupValue(record, groupBy)
 		s.applyToGroup(s.ensureWindowGroup(WindowDay, day, groupBy), value, record)
 		s.applyToGroup(s.ensureWindowGroup(WindowWeek, week, groupBy), value, record)
@@ -159,7 +160,7 @@ func (s *MemoryStore) applyToGroup(group map[string]StatsItem, value string, rec
 
 func supportedGroupBy(groupBy string) bool {
 	switch groupBy {
-	case "key", "provider", "model", "inbound", "source", "outbound":
+	case "key", "provider", "model", "inbound", "source", "outbound", "error_kind":
 		return true
 	default:
 		return false
@@ -189,6 +190,8 @@ func usageGroupValue(record runtime.UsageRecord, groupBy string) string {
 		return nonEmpty(string(record.UsageSource), "unknown")
 	case "outbound":
 		return nonEmpty(record.OutboundName, "unknown")
+	case "error_kind":
+		return nonEmpty(record.ErrorKind, "none")
 	default:
 		return "unknown"
 	}

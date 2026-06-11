@@ -208,9 +208,9 @@ func gatewayError(err error) (int, string) {
 	switch provider.NormalizeError(err) {
 	case provider.ErrorKindQuotaExceeded:
 		return http.StatusBadGateway, "upstream quota exceeded"
-	case provider.ErrorKindRetryable:
+	case provider.ErrorKindRetryable, provider.ErrorKindTimeout, provider.ErrorKindUpstreamServerError:
 		return http.StatusBadGateway, "upstream temporarily unavailable"
-	case provider.ErrorKindFatal:
+	case provider.ErrorKindAuthFailed, provider.ErrorKindCapabilityUnsupported, provider.ErrorKindFatal:
 		return http.StatusBadGateway, err.Error()
 	default:
 		return http.StatusInternalServerError, err.Error()

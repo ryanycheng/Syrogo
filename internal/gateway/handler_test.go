@@ -123,22 +123,24 @@ func TestUsageStatsReturnsEmptyListWithAdminToken(t *testing.T) {
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	req := httptest.NewRequest(http.MethodGet, "/stats/usage?group_by=key", nil)
-	req.Header.Set("Authorization", "Bearer admin-token")
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
+	for _, groupBy := range []string{"key", "error_kind"} {
+		req := httptest.NewRequest(http.MethodGet, "/stats/usage?group_by="+groupBy, nil)
+		req.Header.Set("Authorization", "Bearer admin-token")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	var resp struct {
-		Items []accounting.StatsItem `json:"items"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if len(resp.Items) != 0 {
-		t.Fatalf("items = %#v, want empty list", resp.Items)
+		if w.Code != http.StatusOK {
+			t.Fatalf("group_by=%s status = %d, want 200", groupBy, w.Code)
+		}
+		var resp struct {
+			Items []accounting.StatsItem `json:"items"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("group_by=%s json.Unmarshal() error = %v", groupBy, err)
+		}
+		if len(resp.Items) != 0 {
+			t.Fatalf("group_by=%s items = %#v, want empty list", groupBy, resp.Items)
+		}
 	}
 }
 
@@ -189,6 +191,37 @@ func TestChatCompletionsLogsDecodeFailure(t *testing.T) {
 	got := logBuf.String()
 	if !strings.Contains(got, "request decode failed") || !strings.Contains(got, "path=/v1/chat/completions") {
 		t.Fatalf("logs = %q, want decode failure log with path", got)
+	}
+}
+
+func TestChatCompletionsLogsDispatchErrorKind(t *testing.T) {
+	routing := config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"primary-tag"}, Strategy: "failover"}}}
+	outbounds := []config.OutboundSpec{{Name: "primary", Protocol: "mock", Tag: "primary-tag"}}
+	providers := map[string]provider.Provider{"primary": &failingProvider{name: "primary", err: provider.NewAuthFailedError(errors.New("unauthorized"))}}
+	r, err := router.New(routing, providers, outbounds)
+	if err != nil {
+		t.Fatalf("router.New() error = %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	h := New(r, execution.NewDispatcher(), testInbounds(), config.AccountingConfig{}, logger)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body = %s", w.Code, w.Body.String())
+	}
+	got := logBuf.String()
+	if !strings.Contains(got, "request dispatch failed") || !strings.Contains(got, "error_kind=auth_failed") {
+		t.Fatalf("logs = %q, want dispatch failure log with error_kind", got)
 	}
 }
 
@@ -3158,6 +3191,74 @@ func TestChatCompletionsFallsBackToBackupProvider(t *testing.T) {
 	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestChatCompletionsDoesNotFallbackOnAuthFailed(t *testing.T) {
+	h := newNonRetryableFallbackTestHandler(t, provider.NewAuthFailedError(errors.New("unauthorized")))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body = %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "syrogo mock response") {
+		t.Fatalf("body = %q, fallback should not be used", w.Body.String())
+	}
+	assertUsageErrorKind(t, mux, "auth_failed")
+}
+
+func TestChatCompletionsDoesNotFallbackOnCapabilityUnsupported(t *testing.T) {
+	h := newNonRetryableFallbackTestHandler(t, provider.NewCapabilityUnsupportedError(errors.New("unsupported builtin tools")))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, err := json.Marshal(map[string]any{"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body = %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "syrogo mock response") {
+		t.Fatalf("body = %q, fallback should not be used", w.Body.String())
+	}
+	assertUsageErrorKind(t, mux, "capability_unsupported")
+}
+
+func newNonRetryableFallbackTestHandler(t *testing.T, err error) *Handler {
+	t.Helper()
+	routing := config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"primary-tag", "fallback-tag"}, Strategy: "failover"}}}
+	outbounds := []config.OutboundSpec{{Name: "primary", Protocol: "mock", Tag: "primary-tag"}, {Name: "fallback", Protocol: "mock", Tag: "fallback-tag"}}
+	h := newTestHandler(t, map[string]provider.Provider{
+		"primary":  &failingProvider{name: "primary", err: err},
+		"fallback": provider.NewMock("fallback"),
+	}, routing, testInbounds(), outbounds)
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+	return h
+}
+
+func assertUsageErrorKind(t *testing.T, mux *http.ServeMux, want string) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/stats/usage?group_by=error_kind", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("stats status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"value":"`+want+`"`) || !strings.Contains(w.Body.String(), `"error_count":1`) {
+		t.Fatalf("stats body = %q, want error_kind %q error_count=1", w.Body.String(), want)
 	}
 }
 

@@ -299,6 +299,9 @@ curl 'http://127.0.0.1:23234/stats/usage?group_by=key&window=day&bucket=2026-04-
 
 curl 'http://127.0.0.1:23234/stats/usage?group_by=provider&window=month&bucket=2026-04' \
   -H 'Authorization: Bearer <accounting-admin-token>'
+
+curl http://127.0.0.1:23234/stats/usage?group_by=error_kind \
+  -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
 当前支持的 `group_by`：
@@ -309,6 +312,7 @@ curl 'http://127.0.0.1:23234/stats/usage?group_by=provider&window=month&bucket=2
 - `inbound`
 - `source`
 - `outbound`
+- `error_kind`
 
 当前支持的 `window`：
 
@@ -352,6 +356,8 @@ curl 'http://127.0.0.1:23234/stats/usage?group_by=provider&window=month&bucket=2
 
 - `clients[].name` 仍是稳定统计身份
 - `value` 的含义由 `group_by` 决定
+- `group_by=error_kind` 会把成功请求归到 `none`，失败请求归到 `quota_exceeded`、`timeout`、`upstream_server_error`、`auth_failed`、`capability_unsupported` 等分类
+- fallback 只会在 quota、timeout、临时错误或上游 5xx 等可恢复错误上继续切换；鉴权、capability 与请求结构错误会直接暴露
 - 查询始终读取内存聚合视图，不会在请求时扫盘
 - `local_file` backend 会把原始记录按天切分为 JSONL，并定期写 snapshot 用于重启恢复
 

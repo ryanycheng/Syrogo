@@ -299,6 +299,9 @@ curl 'http://127.0.0.1:23234/stats/usage?group_by=key&window=day&bucket=2026-04-
 
 curl 'http://127.0.0.1:23234/stats/usage?group_by=provider&window=month&bucket=2026-04' \
   -H 'Authorization: Bearer <accounting-admin-token>'
+
+curl http://127.0.0.1:23234/stats/usage?group_by=error_kind \
+  -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
 Current `group_by` values:
@@ -309,6 +312,7 @@ Current `group_by` values:
 - `inbound`
 - `source`
 - `outbound`
+- `error_kind`
 
 Current `window` values:
 
@@ -352,6 +356,8 @@ Notes:
 
 - `clients[].name` remains the stable accounting identity
 - `value` depends on the selected `group_by`
+- `group_by=error_kind` uses `none` for successful requests and values such as `quota_exceeded`, `timeout`, `upstream_server_error`, `auth_failed`, or `capability_unsupported` for failures
+- failover only continues on recoverable errors such as quota, timeout, transient, or upstream 5xx failures; auth, capability, and request-shape failures are surfaced directly
 - queries always read the in-memory aggregate view instead of scanning disk on request
 - `local_file` persists append-only records as day-partitioned JSONL files and periodically writes snapshots for restart recovery
 

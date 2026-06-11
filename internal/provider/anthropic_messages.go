@@ -67,7 +67,7 @@ func (p *AnthropicMessagesProvider) completionWithAPIKey(ctx context.Context, re
 	if err != nil {
 		trace.Error = err.Error()
 		appendProviderTraceSnapshot(trace)
-		return runtime.Response{}, NewRetryableError(fmt.Errorf("send request: %w", err))
+		return runtime.Response{}, NewTransientError(fmt.Errorf("send request: %w", err))
 	}
 	defer func() {
 		_ = httpResp.Body.Close()
@@ -78,7 +78,7 @@ func (p *AnthropicMessagesProvider) completionWithAPIKey(ctx context.Context, re
 		trace.Status = httpResp.StatusCode
 		trace.Error = err.Error()
 		appendProviderTraceSnapshot(trace)
-		return runtime.Response{}, NewRetryableError(fmt.Errorf("read response body: %w", err))
+		return runtime.Response{}, NewTransientError(fmt.Errorf("read response body: %w", err))
 	}
 	trace.Status = httpResp.StatusCode
 	trace.Response = append(json.RawMessage(nil), responseBody...)
@@ -88,7 +88,10 @@ func (p *AnthropicMessagesProvider) completionWithAPIKey(ctx context.Context, re
 		return runtime.Response{}, NewQuotaExceededError(fmt.Errorf("upstream quota exceeded: %s", previewResponseBody(responseBody)))
 	}
 	if httpResp.StatusCode >= http.StatusInternalServerError {
-		return runtime.Response{}, NewRetryableError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+		return runtime.Response{}, NewUpstreamServerError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+	}
+	if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
+		return runtime.Response{}, NewAuthFailedError(fmt.Errorf("upstream auth failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
 	}
 	if httpResp.StatusCode >= http.StatusBadRequest {
 		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream request failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
@@ -96,7 +99,7 @@ func (p *AnthropicMessagesProvider) completionWithAPIKey(ctx context.Context, re
 
 	var resp anthropicMessagesEnvelope
 	if err := json.Unmarshal(responseBody, &resp); err != nil {
-		return runtime.Response{}, NewRetryableError(fmt.Errorf("decode response: %w", err))
+		return runtime.Response{}, NewTransientError(fmt.Errorf("decode response: %w", err))
 	}
 	decoded, err := decodeAnthropicMessagesResponse(resp)
 	if err != nil {

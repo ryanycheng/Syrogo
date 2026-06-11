@@ -145,6 +145,7 @@ type UsageRecord struct {
 	ExecutedModel    string
 	UsageSource      UsageSource
 	Status           UsageStatus
+	ErrorKind        string
 	Breakdown        UsageBreakdown
 	StartedAt        string
 	FinishedAt       string

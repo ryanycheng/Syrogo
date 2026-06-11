@@ -47,20 +47,21 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan run
 
 		resp, err := step.OutboundTarget.ChatCompletion(ctx, stepReq)
 		if err == nil {
-			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, resp.Model, resp.Usage, runtime.UsageStatusSuccess, startedAt, time.Now(), i))
+			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, resp.Model, resp.Usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), i))
 			return resp, nil
 		}
 
 		lastErr = err
-		if !provider.FallbackAllowed(string(step.OnError), provider.NormalizeError(err), i == len(plan.Steps)-1) {
-			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, startedAt, time.Now(), i))
+		errorKind := provider.NormalizeError(err)
+		if !provider.FallbackAllowed(string(step.OnError), errorKind, i == len(plan.Steps)-1) {
+			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), i))
 			return runtime.Response{}, err
 		}
 	}
 
 	if len(plan.Steps) > 0 {
 		last := plan.Steps[len(plan.Steps)-1]
-		d.record(finalizeUsageRecord(ctx, plan, last, req.Model, req.Model, nil, runtime.UsageStatusError, startedAt, time.Now(), len(plan.Steps)-1))
+		d.record(finalizeUsageRecord(ctx, plan, last, req.Model, req.Model, nil, runtime.UsageStatusError, string(provider.NormalizeError(lastErr)), startedAt, time.Now(), len(plan.Steps)-1))
 	}
 	return runtime.Response{}, lastErr
 }
@@ -92,15 +93,16 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 		}
 
 		lastErr = err
-		if !provider.FallbackAllowed(string(step.OnError), provider.NormalizeError(err), i == len(plan.Steps)-1) {
-			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, startedAt, time.Now(), i))
+		errorKind := provider.NormalizeError(err)
+		if !provider.FallbackAllowed(string(step.OnError), errorKind, i == len(plan.Steps)-1) {
+			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), i))
 			return nil, err
 		}
 	}
 
 	if len(plan.Steps) > 0 {
 		last := plan.Steps[len(plan.Steps)-1]
-		d.record(finalizeUsageRecord(ctx, plan, last, req.Model, req.Model, nil, runtime.UsageStatusError, startedAt, time.Now(), len(plan.Steps)-1))
+		d.record(finalizeUsageRecord(ctx, plan, last, req.Model, req.Model, nil, runtime.UsageStatusError, string(provider.NormalizeError(lastErr)), startedAt, time.Now(), len(plan.Steps)-1))
 	}
 	return nil, lastErr
 }
@@ -133,13 +135,13 @@ func (d *Dispatcher) wrapStream(ctx context.Context, plan runtime.ExecutionPlan,
 				usage = &copied
 			}
 			if event.Type == runtime.StreamEventError && event.Err != nil && !recorded {
-				d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusError, startedAt, time.Now(), fallbackCount))
+				d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusError, string(provider.NormalizeError(event.Err)), startedAt, time.Now(), fallbackCount))
 				recorded = true
 			}
 			out <- event
 		}
 		if !recorded {
-			d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusSuccess, startedAt, time.Now(), fallbackCount))
+			d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), fallbackCount))
 		}
 	}()
 	return out
@@ -149,7 +151,7 @@ func (d *Dispatcher) record(record runtime.UsageRecord) {
 	d.store.Record(record)
 }
 
-func finalizeUsageRecord(ctx context.Context, plan runtime.ExecutionPlan, step runtime.ExecutionStep, requestedModel, executedModel string, usage *runtime.Usage, status runtime.UsageStatus, startedAt, finishedAt time.Time, fallbackCount int) runtime.UsageRecord {
+func finalizeUsageRecord(ctx context.Context, plan runtime.ExecutionPlan, step runtime.ExecutionStep, requestedModel, executedModel string, usage *runtime.Usage, status runtime.UsageStatus, errorKind string, startedAt, finishedAt time.Time, fallbackCount int) runtime.UsageRecord {
 	breakdown := runtime.UsageBreakdown{RequestCount: 1}
 	usageSource := runtime.UsageSource("")
 	if usage != nil {
@@ -181,6 +183,7 @@ func finalizeUsageRecord(ctx context.Context, plan runtime.ExecutionPlan, step r
 		ExecutedModel:    executedModel,
 		UsageSource:      usageSource,
 		Status:           status,
+		ErrorKind:        errorKind,
 		Breakdown:        breakdown,
 		StartedAt:        startedAt.UTC().Format(time.RFC3339Nano),
 		FinishedAt:       finishedAt.UTC().Format(time.RFC3339Nano),

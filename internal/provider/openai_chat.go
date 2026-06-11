@@ -150,7 +150,7 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, req run
 	if err != nil {
 		trace.Error = err.Error()
 		appendProviderTraceSnapshot(trace)
-		return nil, NewRetryableError(fmt.Errorf("send stream request: %w", err))
+		return nil, NewTransientError(fmt.Errorf("send stream request: %w", err))
 	}
 
 	if httpResp.StatusCode == http.StatusTooManyRequests {
@@ -172,7 +172,10 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, req run
 		trace.Response = append(json.RawMessage(nil), responseBody...)
 		appendProviderTraceSnapshot(trace)
 		if httpResp.StatusCode >= http.StatusInternalServerError {
-			return nil, NewRetryableError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+			return nil, NewUpstreamServerError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+		}
+		if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
+			return nil, NewAuthFailedError(fmt.Errorf("upstream auth failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
 		}
 		return nil, NewFatalError(fmt.Errorf("upstream request failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
 	}
@@ -186,13 +189,13 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, req run
 		}()
 		responseBody, err := io.ReadAll(httpResp.Body)
 		if err != nil {
-			return nil, NewRetryableError(fmt.Errorf("read fallback response body: %w", err))
+			return nil, NewTransientError(fmt.Errorf("read fallback response body: %w", err))
 		}
 		trace.Response = append(json.RawMessage(nil), responseBody...)
 		appendProviderTraceSnapshot(trace)
 		var resp openAIChatResponseEnvelope
 		if err := json.Unmarshal(responseBody, &resp); err != nil {
-			return nil, NewRetryableError(fmt.Errorf("decode fallback response: %w", err))
+			return nil, NewTransientError(fmt.Errorf("decode fallback response: %w", err))
 		}
 		decoded, err := decodeOpenAIChatResponse(resp)
 		if err != nil {
@@ -212,7 +215,7 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, req run
 			_ = traceWriter.Close()
 		}
 		_ = httpResp.Body.Close()
-		return nil, NewRetryableError(err)
+		return nil, NewTransientError(err)
 	}
 	out := make(chan runtime.StreamEvent)
 	go func() {
@@ -262,7 +265,7 @@ func (p *OpenAICompatibleProvider) completionWithAPIKey(ctx context.Context, req
 	if err != nil {
 		trace.Error = err.Error()
 		appendProviderTraceSnapshot(trace)
-		return runtime.Response{}, NewRetryableError(fmt.Errorf("send request: %w", err))
+		return runtime.Response{}, NewTransientError(fmt.Errorf("send request: %w", err))
 	}
 	defer func() {
 		_ = httpResp.Body.Close()
@@ -273,7 +276,7 @@ func (p *OpenAICompatibleProvider) completionWithAPIKey(ctx context.Context, req
 		trace.Status = httpResp.StatusCode
 		trace.Error = err.Error()
 		appendProviderTraceSnapshot(trace)
-		return runtime.Response{}, NewRetryableError(fmt.Errorf("read response body: %w", err))
+		return runtime.Response{}, NewTransientError(fmt.Errorf("read response body: %w", err))
 	}
 	trace.Status = httpResp.StatusCode
 	trace.Response = append(json.RawMessage(nil), responseBody...)
@@ -283,7 +286,10 @@ func (p *OpenAICompatibleProvider) completionWithAPIKey(ctx context.Context, req
 		return runtime.Response{}, NewQuotaExceededError(fmt.Errorf("upstream quota exceeded: %s", previewResponseBody(responseBody)))
 	}
 	if httpResp.StatusCode >= http.StatusInternalServerError {
-		return runtime.Response{}, NewRetryableError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+		return runtime.Response{}, NewUpstreamServerError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+	}
+	if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
+		return runtime.Response{}, NewAuthFailedError(fmt.Errorf("upstream auth failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
 	}
 	if httpResp.StatusCode >= http.StatusBadRequest {
 		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream request failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
@@ -293,13 +299,13 @@ func (p *OpenAICompatibleProvider) completionWithAPIKey(ctx context.Context, req
 	case openAIProtocolModeResponses:
 		var resp openAIResponsesEnvelope
 		if err := json.Unmarshal(responseBody, &resp); err != nil {
-			return runtime.Response{}, NewRetryableError(fmt.Errorf("decode response: %w", err))
+			return runtime.Response{}, NewTransientError(fmt.Errorf("decode response: %w", err))
 		}
 		return decodeOpenAIResponsesResponse(resp)
 	default:
 		var resp openAIChatResponseEnvelope
 		if err := json.Unmarshal(responseBody, &resp); err != nil {
-			return runtime.Response{}, NewRetryableError(fmt.Errorf("decode response: %w", err))
+			return runtime.Response{}, NewTransientError(fmt.Errorf("decode response: %w", err))
 		}
 		decoded, err := decodeOpenAIChatResponse(resp)
 		if err != nil {

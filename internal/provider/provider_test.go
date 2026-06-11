@@ -740,8 +740,8 @@ func TestOpenAIResponsesRejectsPreviousResponseWhenCapabilityDisabled(t *testing
 		ResponsesPreviousResponseID: boolPtr(false),
 	}, nil)
 	_, err := p.ChatCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini", PreviousResponseID: "resp_123"})
-	if err == nil || NormalizeError(err) != ErrorKindFatal {
-		t.Fatalf("err = %v, want fatal unsupported previous_response_id", err)
+	if err == nil || NormalizeError(err) != ErrorKindCapabilityUnsupported {
+		t.Fatalf("err = %v, want capability_unsupported previous_response_id", err)
 	}
 	if got := err.Error(); got != "outbound does not support responses previous_response_id continuation" {
 		t.Fatalf("err.Error() = %q, want previous_response_id capability error", got)
@@ -753,8 +753,8 @@ func TestOpenAIResponsesRejectsBuiltinToolsWhenCapabilityDisabled(t *testing.T) 
 		ResponsesBuiltinTools: boolPtr(false),
 	}, nil)
 	_, err := p.ChatCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini", Tools: []runtime.ToolDefinition{{Type: "web_search"}}})
-	if err == nil || NormalizeError(err) != ErrorKindFatal {
-		t.Fatalf("err = %v, want fatal unsupported builtin tool error", err)
+	if err == nil || NormalizeError(err) != ErrorKindCapabilityUnsupported {
+		t.Fatalf("err = %v, want capability_unsupported builtin tool error", err)
 	}
 	if got := err.Error(); got != "outbound does not support responses builtin tools" {
 		t.Fatalf("err.Error() = %q, want builtin tools capability error", got)
@@ -1958,8 +1958,25 @@ func TestOpenAICompatibleChatCompletionRetryableOnServerError(t *testing.T) {
 	if err == nil {
 		t.Fatal("ChatCompletion() error = nil, want error")
 	}
-	if NormalizeError(err) != ErrorKindRetryable {
-		t.Fatalf("NormalizeError() = %q, want retryable", NormalizeError(err))
+	if NormalizeError(err) != ErrorKindUpstreamServerError {
+		t.Fatalf("NormalizeError() = %q, want upstream_server_error", NormalizeError(err))
+	}
+}
+
+func TestOpenAICompatibleChatCompletionAuthFailed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid api key"}`))
+	}))
+	defer server.Close()
+
+	p := NewOpenAICompatible("openai", server.URL, []string{"test-key"}, server.Client())
+	_, err := p.ChatCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini"})
+	if err == nil {
+		t.Fatal("ChatCompletion() error = nil, want error")
+	}
+	if NormalizeError(err) != ErrorKindAuthFailed {
+		t.Fatalf("NormalizeError() = %q, want auth_failed", NormalizeError(err))
 	}
 }
 
@@ -1980,6 +1997,30 @@ func TestOpenAICompatibleChatCompletionFatalOnBadRequest(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `tool_choice is required`) {
 		t.Fatalf("err = %q, want upstream response body", err)
+	}
+}
+
+func TestTransientErrorClassifiesDeadlineExceededAsTimeout(t *testing.T) {
+	err := NewTransientError(context.DeadlineExceeded)
+	if NormalizeError(err) != ErrorKindTimeout {
+		t.Fatalf("NormalizeError() = %q, want timeout", NormalizeError(err))
+	}
+}
+
+func TestOpenAICompatibleResponsesBuiltinToolsCapabilityUnsupported(t *testing.T) {
+	unsupported := false
+	p := NewOpenAIResponsesCompatible("openai", "https://example.invalid", []string{"test-key"}, config.OutboundCapabilities{ResponsesBuiltinTools: &unsupported}, nil)
+	_, err := p.ChatCompletion(context.Background(), runtime.Request{
+		Model: "gpt-4o-mini",
+		Tools: []runtime.ToolDefinition{{
+			Type: "web_search_preview",
+		}},
+	})
+	if err == nil {
+		t.Fatal("ChatCompletion() error = nil, want error")
+	}
+	if NormalizeError(err) != ErrorKindCapabilityUnsupported {
+		t.Fatalf("NormalizeError() = %q, want capability_unsupported", NormalizeError(err))
 	}
 }
 

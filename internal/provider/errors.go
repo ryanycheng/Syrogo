@@ -1,14 +1,23 @@
 package provider
 
-import "fmt"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+)
 
 type ErrorKind string
 
 const (
-	ErrorKindUnknown       ErrorKind = "unknown"
-	ErrorKindRetryable     ErrorKind = "retryable"
-	ErrorKindQuotaExceeded ErrorKind = "quota_exceeded"
-	ErrorKindFatal         ErrorKind = "fatal"
+	ErrorKindUnknown               ErrorKind = "unknown"
+	ErrorKindRetryable             ErrorKind = "retryable"
+	ErrorKindTimeout               ErrorKind = "timeout"
+	ErrorKindQuotaExceeded         ErrorKind = "quota_exceeded"
+	ErrorKindUpstreamServerError   ErrorKind = "upstream_server_error"
+	ErrorKindAuthFailed            ErrorKind = "auth_failed"
+	ErrorKindCapabilityUnsupported ErrorKind = "capability_unsupported"
+	ErrorKindFatal                 ErrorKind = "fatal"
 )
 
 type ProviderError struct {
@@ -34,12 +43,42 @@ func NewRetryableError(err error) error {
 	return &ProviderError{Kind: ErrorKindRetryable, Err: err}
 }
 
+func NewTimeoutError(err error) error {
+	return &ProviderError{Kind: ErrorKindTimeout, Err: err}
+}
+
 func NewQuotaExceededError(err error) error {
 	return &ProviderError{Kind: ErrorKindQuotaExceeded, Err: err}
 }
 
+func NewUpstreamServerError(err error) error {
+	return &ProviderError{Kind: ErrorKindUpstreamServerError, Err: err}
+}
+
+func NewAuthFailedError(err error) error {
+	return &ProviderError{Kind: ErrorKindAuthFailed, Err: err}
+}
+
+func NewCapabilityUnsupportedError(err error) error {
+	return &ProviderError{Kind: ErrorKindCapabilityUnsupported, Err: err}
+}
+
 func NewFatalError(err error) error {
 	return &ProviderError{Kind: ErrorKindFatal, Err: err}
+}
+
+func NewTransientError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return NewTimeoutError(err)
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return NewTimeoutError(err)
+	}
+	return NewRetryableError(err)
 }
 
 func NormalizeError(err error) ErrorKind {
@@ -81,12 +120,21 @@ func FallbackAllowed(condition string, kind ErrorKind, isLast bool) bool {
 
 	switch condition {
 	case "", "always":
-		return true
+		return isRecoverable(kind)
 	case "retryable":
-		return kind == ErrorKindRetryable || kind == ErrorKindQuotaExceeded
+		return isRecoverable(kind)
 	case "quota_exceeded":
 		return kind == ErrorKindQuotaExceeded
 	default:
 		panic(fmt.Sprintf("unsupported fallback condition %q", condition))
+	}
+}
+
+func isRecoverable(kind ErrorKind) bool {
+	switch kind {
+	case ErrorKindRetryable, ErrorKindTimeout, ErrorKindQuotaExceeded, ErrorKindUpstreamServerError:
+		return true
+	default:
+		return false
 	}
 }
