@@ -7,11 +7,13 @@ import (
 
 	"github.com/ryanycheng/Syrogo/internal/accounting"
 	"github.com/ryanycheng/Syrogo/internal/provider"
+	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 type Dispatcher struct {
-	store accounting.Store
+	store        accounting.Store
+	quotaTracker *quota.Tracker
 }
 
 func NewDispatcher() *Dispatcher {
@@ -19,10 +21,14 @@ func NewDispatcher() *Dispatcher {
 }
 
 func NewDispatcherWithStore(store accounting.Store) *Dispatcher {
+	return NewDispatcherWithStoreAndQuota(store, nil)
+}
+
+func NewDispatcherWithStoreAndQuota(store accounting.Store, quotaTracker *quota.Tracker) *Dispatcher {
 	if store == nil {
 		store = accounting.NewMemoryStore()
 	}
-	return &Dispatcher{store: store}
+	return &Dispatcher{store: store, quotaTracker: quotaTracker}
 }
 
 func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan runtime.ExecutionPlan) (runtime.Response, error) {
@@ -45,14 +51,22 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan run
 			stepReq.Model = step.Model
 		}
 
+		decision := d.beforeAttempt(step.OutboundName)
+		if !decision.Allowed {
+			lastErr = provider.NewQuotaExceededError(fmt.Errorf("outbound %q quota %s", step.OutboundName, decision.Reason))
+			continue
+		}
+
 		resp, err := step.OutboundTarget.ChatCompletion(ctx, stepReq)
 		if err == nil {
+			d.recordSuccess(step.OutboundName)
 			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, resp.Model, resp.Usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), i))
 			return resp, nil
 		}
 
 		lastErr = err
 		errorKind := provider.NormalizeError(err)
+		d.recordProviderError(step.OutboundName, errorKind)
 		if !provider.FallbackAllowed(string(step.OnError), errorKind, i == len(plan.Steps)-1) {
 			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), i))
 			return runtime.Response{}, err
@@ -87,6 +101,12 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 			stepReq.Model = step.Model
 		}
 
+		decision := d.beforeAttempt(step.OutboundName)
+		if !decision.Allowed {
+			lastErr = provider.NewQuotaExceededError(fmt.Errorf("outbound %q quota %s", step.OutboundName, decision.Reason))
+			continue
+		}
+
 		events, err := step.OutboundTarget.StreamCompletion(ctx, stepReq)
 		if err == nil {
 			return d.wrapStream(ctx, plan, step, stepReq.Model, i, startedAt, events), nil
@@ -94,6 +114,7 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 
 		lastErr = err
 		errorKind := provider.NormalizeError(err)
+		d.recordProviderError(step.OutboundName, errorKind)
 		if !provider.FallbackAllowed(string(step.OnError), errorKind, i == len(plan.Steps)-1) {
 			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), i))
 			return nil, err
@@ -113,6 +134,13 @@ func (d *Dispatcher) QueryUsage(groupBy string) ([]accounting.StatsItem, error) 
 
 func (d *Dispatcher) QueryUsageBy(query accounting.Query) ([]accounting.StatsItem, error) {
 	return d.store.Query(query)
+}
+
+func (d *Dispatcher) QueryQuota() []quota.SnapshotItem {
+	if d.quotaTracker == nil {
+		return nil
+	}
+	return d.quotaTracker.Snapshot()
 }
 
 func (d *Dispatcher) Close(ctx context.Context) error {
@@ -135,7 +163,9 @@ func (d *Dispatcher) wrapStream(ctx context.Context, plan runtime.ExecutionPlan,
 				usage = &copied
 			}
 			if event.Type == runtime.StreamEventError && event.Err != nil && !recorded {
-				d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusError, string(provider.NormalizeError(event.Err)), startedAt, time.Now(), fallbackCount))
+				errorKind := provider.NormalizeError(event.Err)
+				d.recordProviderError(step.OutboundName, errorKind)
+				d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), fallbackCount))
 				recorded = true
 			}
 			out <- event
@@ -145,6 +175,25 @@ func (d *Dispatcher) wrapStream(ctx context.Context, plan runtime.ExecutionPlan,
 		}
 	}()
 	return out
+}
+
+func (d *Dispatcher) beforeAttempt(outbound string) quota.Decision {
+	if d.quotaTracker == nil {
+		return quota.Decision{Allowed: true}
+	}
+	return d.quotaTracker.BeforeAttempt(outbound)
+}
+
+func (d *Dispatcher) recordSuccess(outbound string) {
+	if d.quotaTracker != nil {
+		d.quotaTracker.RecordSuccess(outbound)
+	}
+}
+
+func (d *Dispatcher) recordProviderError(outbound string, kind provider.ErrorKind) {
+	if d.quotaTracker != nil && kind == provider.ErrorKindQuotaExceeded {
+		d.quotaTracker.RecordQuotaExceeded(outbound)
+	}
 }
 
 func (d *Dispatcher) record(record runtime.UsageRecord) {

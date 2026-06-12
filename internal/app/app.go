@@ -11,6 +11,7 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/execution"
 	"github.com/ryanycheng/Syrogo/internal/gateway"
 	"github.com/ryanycheng/Syrogo/internal/provider"
+	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/router"
 	"github.com/ryanycheng/Syrogo/internal/server"
 )
@@ -41,7 +42,8 @@ func New(cfg config.Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	dispatcher := execution.NewDispatcherWithStore(store)
+	quotaTracker := quota.NewTrackerFromOutbounds(cfg.Outbounds)
+	dispatcher := execution.NewDispatcherWithStoreAndQuota(store, quotaTracker)
 	listeners := buildListeners(r, dispatcher, cfg, slog.Default())
 
 	return &App{

@@ -281,7 +281,45 @@ outbounds:
 - 只在上游缺失 `usage` 时触发
 - 返回的是平台侧近似值，不是 provider 账单真值
 
-### 9. 查看 usage 聚合统计
+### 9. 跟踪 outbound 配额窗口
+
+对于存在多个重叠请求限制的上游订阅，可以在 outbound 上启用 outbound-only quota tracker：
+
+```yaml
+outbounds:
+  - name: "openai-primary"
+    protocol: "openai_chat"
+    endpoint: "https://api.openai.com/v1"
+    auth_token: "${OPENAI_API_KEY_PRIMARY}"
+    tag: "openai-primary"
+    quota:
+      enabled: true
+      cooldown: "10m"
+      probe_interval: "1m"
+      windows:
+        - name: "five-hour"
+          duration: "5h"
+          max_requests: 1000
+        - name: "weekly"
+          duration: "168h"
+          max_requests: 10000
+```
+
+当前范围：
+
+- 只作用于 outbound provider，不做 inbound/client 侧限流
+- 多个窗口会同时生效；任一窗口耗尽都会跳过该 outbound
+- 上游真实返回 429 后会进入 cooldown，并在 `probe_interval` 后通过真实流量探测恢复
+- 第一版只跟踪请求次数，不跟踪 token 或账单额度
+
+使用 accounting admin token 查看当前 quota 状态：
+
+```bash
+curl http://127.0.0.1:23234/stats/quota \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+```
+
+### 10. 查看 usage 聚合统计
 
 Syrogo 现在提供一个独立的 accounting 只读端点，用于查看 usage 聚合结果。
 

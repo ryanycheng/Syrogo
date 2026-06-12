@@ -144,6 +144,46 @@ func TestUsageStatsReturnsEmptyListWithAdminToken(t *testing.T) {
 	}
 }
 
+func TestQuotaStatsRequiresAdminToken(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/stats/quota", nil))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestQuotaStatsReturnsEmptyListWithAdminToken(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/stats/quota", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp struct {
+		Items []any `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(resp.Items) != 0 {
+		t.Fatalf("items = %#v, want empty list", resp.Items)
+	}
+}
 func TestChatCompletionsRejectsMissingToken(t *testing.T) {
 	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
 	mux := http.NewServeMux()

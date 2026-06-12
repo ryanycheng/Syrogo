@@ -534,6 +534,132 @@ func TestConfigValidateRequiresPositiveAccountingLocalFileFlushInterval(t *testi
 		t.Fatalf("Validate() error = %v, want invalid flush_interval error", err)
 	}
 }
+func TestConfigValidateSupportsOutboundQuotaWindows(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0].Quota = OutboundQuotaConfig{
+		Enabled:       true,
+		Cooldown:      DurationValue("10m"),
+		ProbeInterval: DurationValue("1m"),
+		Windows: []OutboundQuotaWindowConfig{
+			{Name: "five-hour", Duration: DurationValue("5h"), MaxRequests: 100},
+			{Name: "weekly", Duration: DurationValue("168h"), MaxRequests: 1000},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigValidateRequiresOutboundQuotaWindows(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0].Quota = OutboundQuotaConfig{Enabled: true, Cooldown: DurationValue("10m"), ProbeInterval: DurationValue("1m")}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "outbounds.mock.quota.windows is required when quota is enabled" {
+		t.Fatalf("Validate() error = %v, want missing quota windows error", err)
+	}
+}
+
+func TestConfigValidateRejectsDuplicateOutboundQuotaWindowName(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0].Quota = OutboundQuotaConfig{
+		Enabled:       true,
+		Cooldown:      DurationValue("10m"),
+		ProbeInterval: DurationValue("1m"),
+		Windows: []OutboundQuotaWindowConfig{
+			{Name: "daily", Duration: DurationValue("24h"), MaxRequests: 100},
+			{Name: "daily", Duration: DurationValue("168h"), MaxRequests: 500},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "outbounds.mock.quota.windows[1].name duplicates \"daily\"" {
+		t.Fatalf("Validate() error = %v, want duplicate quota window name error", err)
+	}
+}
+
+func TestConfigValidateRequiresPositiveOutboundQuotaDuration(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0].Quota = OutboundQuotaConfig{
+		Enabled:       true,
+		Cooldown:      DurationValue("10m"),
+		ProbeInterval: DurationValue("1m"),
+		Windows:       []OutboundQuotaWindowConfig{{Name: "daily", Duration: DurationValue("0s"), MaxRequests: 100}},
+	}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "outbounds.mock.quota.windows[0].duration must be a positive duration" {
+		t.Fatalf("Validate() error = %v, want invalid quota duration error", err)
+	}
+}
+
+func TestConfigValidateRequiresPositiveOutboundQuotaLimit(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0].Quota = OutboundQuotaConfig{
+		Enabled:       true,
+		Cooldown:      DurationValue("10m"),
+		ProbeInterval: DurationValue("1m"),
+		Windows:       []OutboundQuotaWindowConfig{{Name: "daily", Duration: DurationValue("24h"), MaxRequests: 0}},
+	}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "outbounds.mock.quota.windows[0].max_requests must be greater than 0" {
+		t.Fatalf("Validate() error = %v, want invalid quota limit error", err)
+	}
+}
+
+func TestConfigValidateRequiresPositiveOutboundQuotaCooldown(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0].Quota = OutboundQuotaConfig{
+		Enabled:       true,
+		Cooldown:      DurationValue("0s"),
+		ProbeInterval: DurationValue("1m"),
+		Windows:       []OutboundQuotaWindowConfig{{Name: "daily", Duration: DurationValue("24h"), MaxRequests: 100}},
+	}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "outbounds.mock.quota.cooldown must be a positive duration" {
+		t.Fatalf("Validate() error = %v, want invalid quota cooldown error", err)
+	}
+}
+
+func TestConfigValidateRequiresPositiveOutboundQuotaProbeInterval(t *testing.T) {
+	cfg := validConfig()
+	cfg.Outbounds[0].Quota = OutboundQuotaConfig{
+		Enabled:       true,
+		Cooldown:      DurationValue("10m"),
+		ProbeInterval: DurationValue("0s"),
+		Windows:       []OutboundQuotaWindowConfig{{Name: "daily", Duration: DurationValue("24h"), MaxRequests: 100}},
+	}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "outbounds.mock.quota.probe_interval must be a positive duration" {
+		t.Fatalf("Validate() error = %v, want invalid quota probe interval error", err)
+	}
+}
+
+func TestLoadParsesOutboundQuotaWindows(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte("listeners:\n  - name: \"public\"\n    listen: \":8080\"\n    inbounds:\n      - \"openai-entry\"\ninbounds:\n  - name: \"openai-entry\"\n    protocol: \"openai_chat\"\n    path: \"/v1/chat/completions\"\n    clients:\n      - name: \"office-key\"\n        token: \"client-token\"\n        tag: \"office\"\nrouting:\n  rules:\n    - name: \"office-route\"\n      from_tags:\n        - \"office\"\n      to_tags:\n        - \"mock-tag\"\n      strategy: \"failover\"\noutbounds:\n  - name: \"mock\"\n    protocol: \"mock\"\n    tag: \"mock-tag\"\n    quota:\n      enabled: true\n      cooldown: \"10m\"\n      probe_interval: \"1m\"\n      windows:\n        - name: \"five-hour\"\n          duration: \"5h\"\n          max_requests: 100\n        - name: \"weekly\"\n          duration: \"168h\"\n          max_requests: 1000\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	quota := cfg.Outbounds[0].Quota
+	if !quota.Enabled || quota.Cooldown != "10m" || quota.ProbeInterval != "1m" {
+		t.Fatalf("quota = %#v, want enabled cooldown/probe", quota)
+	}
+	if len(quota.Windows) != 2 || quota.Windows[0].Name != "five-hour" || quota.Windows[1].MaxRequests != 1000 {
+		t.Fatalf("quota.Windows = %#v, want parsed windows", quota.Windows)
+	}
+}
+
 func TestConfigValidateSupportsUsageEstimationForOpenAIChat(t *testing.T) {
 	cfg := validConfig()
 	cfg.Outbounds[0] = OutboundSpec{

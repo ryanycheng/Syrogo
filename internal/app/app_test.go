@@ -100,6 +100,31 @@ func TestNewSucceedsWithAnthropicMessagesProvider(t *testing.T) {
 	}
 }
 
+func TestNewExposesConfiguredQuotaStats(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Outbounds[0].Quota = config.OutboundQuotaConfig{
+		Enabled:       true,
+		Cooldown:      config.DurationValue("10m"),
+		ProbeInterval: config.DurationValue("1m"),
+		Windows:       []config.OutboundQuotaWindowConfig{{Name: "daily", Duration: config.DurationValue("24h"), MaxRequests: 100}},
+	}
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	req := httptest.NewRequest(http.MethodGet, "/stats/quota", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"outbound":"mock"`) || !strings.Contains(w.Body.String(), `"name":"daily"`) {
+		t.Fatalf("body = %s, want quota state for mock daily", w.Body.String())
+	}
+}
 func TestNewBindsEachListenerToItsInbounds(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Listeners = []config.ListenerSpec{

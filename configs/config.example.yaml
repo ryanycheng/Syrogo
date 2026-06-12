@@ -81,6 +81,20 @@ outbounds:
     endpoint: "https://api.openai.com/v1"
     auth_token: "${OPENAI_API_KEY_PRIMARY}"
     tag: "openai-primary"
+    # Optional outbound-only quota tracker for upstream subscription limits.
+    # Multiple windows can be active at the same time; any exhausted window skips this outbound.
+    # A real upstream 429 enters cooldown and is probed again by real traffic after probe_interval.
+    # quota:
+    #   enabled: true
+    #   cooldown: "10m"
+    #   probe_interval: "1m"
+    #   windows:
+    #     - name: "five-hour"
+    #       duration: "5h"
+    #       max_requests: 1000
+    #     - name: "weekly"
+    #       duration: "168h"
+    #       max_requests: 10000
     # Optional platform-side usage fallback when the upstream omits usage.
     # This is a heuristic estimate, not the provider billing truth.
     # capabilities:

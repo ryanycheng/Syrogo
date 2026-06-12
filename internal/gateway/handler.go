@@ -62,6 +62,7 @@ func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.I
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/healthz", h.handleHealthz)
 	mux.HandleFunc("/stats/usage", h.handleUsageStats)
+	mux.HandleFunc("/stats/quota", h.handleQuotaStats)
 	mux.HandleFunc("/", h.handleRequest)
 }
 
@@ -98,6 +99,18 @@ func (h *Handler) handleUsageStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (h *Handler) handleQuotaStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAccounting(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": h.dispatcher.QueryQuota()})
+}
+
 func (h *Handler) handleByCodec(w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) bool {
 	codec, ok := h.registry.Get(inbound.Protocol)
 	if !ok {
@@ -116,6 +129,10 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/stats/usage" {
 		h.handleUsageStats(w, r)
+		return
+	}
+	if r.URL.Path == "/stats/quota" {
+		h.handleQuotaStats(w, r)
 		return
 	}
 

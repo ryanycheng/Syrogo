@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/accounting"
 	"github.com/ryanycheng/Syrogo/internal/provider"
+	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
@@ -217,6 +219,104 @@ func TestDispatchRecordsErrorKind(t *testing.T) {
 	}
 }
 
+func TestDispatchSkipsQuotaLimitedOutbound(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	tracker := quota.NewTestTracker([]quota.OutboundConfig{{
+		Name:          "primary",
+		Cooldown:      10 * time.Minute,
+		ProbeInterval: time.Minute,
+		Windows:       []quota.WindowConfig{{Name: "short", Duration: time.Hour, MaxRequests: 1}},
+	}}, func() time.Time { return now })
+	tracker.RecordSuccess("primary")
+	dispatcher := NewDispatcherWithStoreAndQuota(accounting.NewMemoryStore(), tracker)
+	primary := &stubProvider{name: "primary"}
+	fallback := &stubProvider{
+		name: "fallback",
+		resp: runtime.Response{Model: "gpt-4", Message: runtime.Message{Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "fallback ok"}}}},
+	}
+
+	resp, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{
+		{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+		{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+	}})
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if primary.req.Model != "" {
+		t.Fatalf("primary should be skipped, got req = %#v", primary.req)
+	}
+	if got := resp.Message.Parts[0].Text; got != "fallback ok" {
+		t.Fatalf("response text = %q, want fallback ok", got)
+	}
+}
+
+func TestDispatchMarksQuotaExceededCooldownAndProbeRecovery(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	tracker := quota.NewTestTracker([]quota.OutboundConfig{{
+		Name:          "primary",
+		Cooldown:      10 * time.Minute,
+		ProbeInterval: time.Minute,
+		Windows:       []quota.WindowConfig{{Name: "daily", Duration: 24 * time.Hour, MaxRequests: 100}},
+	}}, func() time.Time { return now })
+	dispatcher := NewDispatcherWithStoreAndQuota(accounting.NewMemoryStore(), tracker)
+	primary := &stubProvider{name: "primary", err: provider.NewQuotaExceededError(errors.New("quota"))}
+	fallback := &stubProvider{name: "fallback", resp: runtime.Response{Model: "gpt-4"}}
+	plan := runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{
+		{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+		{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+	}}
+
+	if _, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, plan); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	items := tracker.Snapshot()
+	if len(items) != 1 || items[0].State != quota.StateCooldown {
+		t.Fatalf("Snapshot() = %#v, want primary cooldown", items)
+	}
+
+	primary.req = runtime.Request{}
+	fallback.req = runtime.Request{}
+	if _, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, plan); err != nil {
+		t.Fatalf("Dispatch() during cooldown error = %v", err)
+	}
+	if primary.req.Model != "" || fallback.req.Model != "gpt-4" {
+		t.Fatalf("primary req = %#v fallback req = %#v, want cooldown skip", primary.req, fallback.req)
+	}
+
+	now = now.Add(time.Minute)
+	primary.err = nil
+	primary.resp = runtime.Response{Model: "gpt-4", Message: runtime.Message{Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "primary ok"}}}}
+	resp, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, plan)
+	if err != nil {
+		t.Fatalf("Dispatch() probe error = %v", err)
+	}
+	if got := resp.Message.Parts[0].Text; got != "primary ok" {
+		t.Fatalf("response text = %q, want primary ok", got)
+	}
+	if items := tracker.Snapshot(); len(items) != 1 || items[0].State != quota.StateAvailable {
+		t.Fatalf("Snapshot() after probe success = %#v, want available", items)
+	}
+}
+
+func TestDispatchStreamMarksQuotaExceededCooldown(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	tracker := quota.NewTestTracker([]quota.OutboundConfig{{
+		Name:          "primary",
+		Cooldown:      10 * time.Minute,
+		ProbeInterval: time.Minute,
+		Windows:       []quota.WindowConfig{{Name: "daily", Duration: 24 * time.Hour, MaxRequests: 100}},
+	}}, func() time.Time { return now })
+	dispatcher := NewDispatcherWithStoreAndQuota(accounting.NewMemoryStore(), tracker)
+	p := &stubProvider{name: "primary", err: provider.NewQuotaExceededError(errors.New("quota"))}
+
+	_, err := dispatcher.DispatchStream(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: p, Model: "gpt-4", OnError: runtime.FallbackAlways}}})
+	if err == nil {
+		t.Fatal("DispatchStream() error = nil, want quota error")
+	}
+	if items := tracker.Snapshot(); len(items) != 1 || items[0].State != quota.StateCooldown {
+		t.Fatalf("Snapshot() = %#v, want cooldown", items)
+	}
+}
 func TestDispatchStreamReturnsFirstOutboundEvents(t *testing.T) {
 	dispatcher := NewDispatcher()
 	p := &stubProvider{name: "primary", streamEvents: []runtime.StreamEvent{{Type: runtime.StreamEventMessageStart, ResponseID: "chatcmpl-1", Model: "gpt-4"}}}

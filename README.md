@@ -281,7 +281,45 @@ Current scope:
 - only runs when the upstream response omits `usage`
 - returns a platform-side estimate, not provider billing truth
 
-### 9. Read usage aggregates
+### 9. Track outbound quota windows
+
+For upstream subscriptions with overlapping request limits, you can enable outbound-only quota tracking on an outbound:
+
+```yaml
+outbounds:
+  - name: "openai-primary"
+    protocol: "openai_chat"
+    endpoint: "https://api.openai.com/v1"
+    auth_token: "${OPENAI_API_KEY_PRIMARY}"
+    tag: "openai-primary"
+    quota:
+      enabled: true
+      cooldown: "10m"
+      probe_interval: "1m"
+      windows:
+        - name: "five-hour"
+          duration: "5h"
+          max_requests: 1000
+        - name: "weekly"
+          duration: "168h"
+          max_requests: 10000
+```
+
+Scope:
+
+- only applies to outbound providers, not inbound/client-side rate limiting
+- multiple windows can be active at the same time; any exhausted window skips the outbound
+- provider 429 responses enter cooldown and are retried by real traffic after `probe_interval`
+- the first version tracks request counts, not token or billing quotas
+
+Read current quota state with the accounting admin token:
+
+```bash
+curl http://127.0.0.1:23234/stats/quota \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+```
+
+### 10. Read usage aggregates
 
 Syrogo now exposes a dedicated accounting read-only endpoint for usage aggregates.
 

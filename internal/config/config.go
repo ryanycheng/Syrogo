@@ -62,6 +62,20 @@ type OutboundSpec struct {
 	AuthToken    string               `yaml:"auth_token"`
 	Tag          string               `yaml:"tag"`
 	Capabilities OutboundCapabilities `yaml:"capabilities"`
+	Quota        OutboundQuotaConfig  `yaml:"quota"`
+}
+
+type OutboundQuotaConfig struct {
+	Enabled       bool                        `yaml:"enabled"`
+	Windows       []OutboundQuotaWindowConfig `yaml:"windows"`
+	Cooldown      DurationValue               `yaml:"cooldown"`
+	ProbeInterval DurationValue               `yaml:"probe_interval"`
+}
+
+type OutboundQuotaWindowConfig struct {
+	Name        string        `yaml:"name"`
+	Duration    DurationValue `yaml:"duration"`
+	MaxRequests int           `yaml:"max_requests"`
 }
 
 type OutboundCapabilities struct {
@@ -263,6 +277,9 @@ func (c Config) Validate() error {
 				return fmt.Errorf("outbounds.%s.usage_estimation_mode %q is unsupported", outbound.Name, outbound.Capabilities.UsageEstimationMode)
 			}
 		}
+		if err := validateOutboundQuota(outbound); err != nil {
+			return err
+		}
 		outboundNames[outbound.Name] = struct{}{}
 		outboundTags[outbound.Tag] = struct{}{}
 	}
@@ -311,6 +328,39 @@ func (c Config) Validate() error {
 	}
 
 	_ = outboundNames
+	return nil
+}
+
+func validateOutboundQuota(outbound OutboundSpec) error {
+	quota := outbound.Quota
+	if !quota.Enabled {
+		return nil
+	}
+	if len(quota.Windows) == 0 {
+		return fmt.Errorf("outbounds.%s.quota.windows is required when quota is enabled", outbound.Name)
+	}
+	if quota.Cooldown.Duration() <= 0 {
+		return fmt.Errorf("outbounds.%s.quota.cooldown must be a positive duration", outbound.Name)
+	}
+	if quota.ProbeInterval.Duration() <= 0 {
+		return fmt.Errorf("outbounds.%s.quota.probe_interval must be a positive duration", outbound.Name)
+	}
+	seen := make(map[string]struct{}, len(quota.Windows))
+	for i, window := range quota.Windows {
+		if window.Name == "" {
+			return fmt.Errorf("outbounds.%s.quota.windows[%d].name is required", outbound.Name, i)
+		}
+		if _, ok := seen[window.Name]; ok {
+			return fmt.Errorf("outbounds.%s.quota.windows[%d].name duplicates %q", outbound.Name, i, window.Name)
+		}
+		seen[window.Name] = struct{}{}
+		if window.Duration.Duration() <= 0 {
+			return fmt.Errorf("outbounds.%s.quota.windows[%d].duration must be a positive duration", outbound.Name, i)
+		}
+		if window.MaxRequests <= 0 {
+			return fmt.Errorf("outbounds.%s.quota.windows[%d].max_requests must be greater than 0", outbound.Name, i)
+		}
+	}
 	return nil
 }
 
