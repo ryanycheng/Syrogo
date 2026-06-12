@@ -30,10 +30,24 @@ type ListenerSpec struct {
 }
 
 type ClientSpec struct {
-	Name  string `yaml:"name"`
-	Token string `yaml:"token"`
-	Tag   string `yaml:"tag"`
+	Name  string            `yaml:"name"`
+	Token string            `yaml:"token"`
+	Tag   string            `yaml:"tag"`
+	Quota ClientQuotaConfig `yaml:"quota"`
 }
+
+type ClientQuotaConfig struct {
+	Enabled bool                `yaml:"enabled"`
+	Windows []QuotaWindowConfig `yaml:"windows"`
+}
+
+type QuotaWindowConfig struct {
+	Name        string        `yaml:"name"`
+	Duration    DurationValue `yaml:"duration"`
+	MaxRequests int           `yaml:"max_requests"`
+}
+
+type OutboundQuotaWindowConfig = QuotaWindowConfig
 
 type InboundSpec struct {
 	Name     string       `yaml:"name"`
@@ -66,16 +80,10 @@ type OutboundSpec struct {
 }
 
 type OutboundQuotaConfig struct {
-	Enabled       bool                        `yaml:"enabled"`
-	Windows       []OutboundQuotaWindowConfig `yaml:"windows"`
-	Cooldown      DurationValue               `yaml:"cooldown"`
-	ProbeInterval DurationValue               `yaml:"probe_interval"`
-}
-
-type OutboundQuotaWindowConfig struct {
-	Name        string        `yaml:"name"`
-	Duration    DurationValue `yaml:"duration"`
-	MaxRequests int           `yaml:"max_requests"`
+	Enabled       bool                `yaml:"enabled"`
+	Windows       []QuotaWindowConfig `yaml:"windows"`
+	Cooldown      DurationValue       `yaml:"cooldown"`
+	ProbeInterval DurationValue       `yaml:"probe_interval"`
 }
 
 type OutboundCapabilities struct {
@@ -182,6 +190,9 @@ func (c Config) Validate() error {
 			}
 			if owner, ok := clientNames[client.Name]; ok {
 				return fmt.Errorf("inbounds.%s.clients[%d].name duplicates client name used by %s", inbound.Name, i, owner)
+			}
+			if err := validateClientQuota(inbound.Name, i, client); err != nil {
+				return err
 			}
 			tokens[client.Token] = inbound.Name
 			clientNames[client.Name] = inbound.Name
@@ -331,13 +342,21 @@ func (c Config) Validate() error {
 	return nil
 }
 
+func validateClientQuota(inboundName string, index int, client ClientSpec) error {
+	quota := client.Quota
+	if !quota.Enabled {
+		return nil
+	}
+	return validateQuotaWindows(fmt.Sprintf("inbounds.%s.clients[%d].quota", inboundName, index), quota.Windows)
+}
+
 func validateOutboundQuota(outbound OutboundSpec) error {
 	quota := outbound.Quota
 	if !quota.Enabled {
 		return nil
 	}
-	if len(quota.Windows) == 0 {
-		return fmt.Errorf("outbounds.%s.quota.windows is required when quota is enabled", outbound.Name)
+	if err := validateQuotaWindows(fmt.Sprintf("outbounds.%s.quota", outbound.Name), quota.Windows); err != nil {
+		return err
 	}
 	if quota.Cooldown.Duration() <= 0 {
 		return fmt.Errorf("outbounds.%s.quota.cooldown must be a positive duration", outbound.Name)
@@ -345,20 +364,27 @@ func validateOutboundQuota(outbound OutboundSpec) error {
 	if quota.ProbeInterval.Duration() <= 0 {
 		return fmt.Errorf("outbounds.%s.quota.probe_interval must be a positive duration", outbound.Name)
 	}
-	seen := make(map[string]struct{}, len(quota.Windows))
-	for i, window := range quota.Windows {
+	return nil
+}
+
+func validateQuotaWindows(prefix string, windows []QuotaWindowConfig) error {
+	if len(windows) == 0 {
+		return fmt.Errorf("%s.windows is required when quota is enabled", prefix)
+	}
+	seen := make(map[string]struct{}, len(windows))
+	for i, window := range windows {
 		if window.Name == "" {
-			return fmt.Errorf("outbounds.%s.quota.windows[%d].name is required", outbound.Name, i)
+			return fmt.Errorf("%s.windows[%d].name is required", prefix, i)
 		}
 		if _, ok := seen[window.Name]; ok {
-			return fmt.Errorf("outbounds.%s.quota.windows[%d].name duplicates %q", outbound.Name, i, window.Name)
+			return fmt.Errorf("%s.windows[%d].name duplicates %q", prefix, i, window.Name)
 		}
 		seen[window.Name] = struct{}{}
 		if window.Duration.Duration() <= 0 {
-			return fmt.Errorf("outbounds.%s.quota.windows[%d].duration must be a positive duration", outbound.Name, i)
+			return fmt.Errorf("%s.windows[%d].duration must be a positive duration", prefix, i)
 		}
 		if window.MaxRequests <= 0 {
-			return fmt.Errorf("outbounds.%s.quota.windows[%d].max_requests must be greater than 0", outbound.Name, i)
+			return fmt.Errorf("%s.windows[%d].max_requests must be greater than 0", prefix, i)
 		}
 	}
 	return nil

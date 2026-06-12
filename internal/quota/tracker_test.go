@@ -112,3 +112,52 @@ func TestTrackerSnapshotReportsWindowUsageAndCooldown(t *testing.T) {
 		t.Fatalf("Snapshot()[0].Windows = %#v, want usage", item.Windows)
 	}
 }
+
+func TestClientTrackerAppliesWindows(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	tracker := NewTestClientTracker([]ClientConfig{{
+		Name:    "office-key",
+		Inbound: "openai-entry",
+		Windows: []WindowConfig{
+			{Name: "hourly", Duration: time.Hour, MaxRequests: 1},
+			{Name: "daily", Duration: 24 * time.Hour, MaxRequests: 100},
+		},
+	}}, func() time.Time { return now })
+
+	if decision := tracker.BeforeClientRequest("office-key"); !decision.Allowed {
+		t.Fatalf("BeforeClientRequest() = %#v, want allowed", decision)
+	}
+	tracker.RecordClientRequest("office-key")
+
+	decision := tracker.BeforeClientRequest("office-key")
+	if decision.Allowed || decision.Reason != StateLimited || decision.RetryAfter.IsZero() {
+		t.Fatalf("BeforeClientRequest() = %#v, want limited", decision)
+	}
+
+	now = now.Add(time.Hour + time.Nanosecond)
+	if decision := tracker.BeforeClientRequest("office-key"); !decision.Allowed {
+		t.Fatalf("BeforeClientRequest() after window expiry = %#v, want allowed", decision)
+	}
+}
+
+func TestClientTrackerSnapshotReportsClientState(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	tracker := NewTestClientTracker([]ClientConfig{{
+		Name:    "office-key",
+		Inbound: "openai-entry",
+		Windows: []WindowConfig{{Name: "hourly", Duration: time.Hour, MaxRequests: 1}},
+	}}, func() time.Time { return now })
+	tracker.RecordClientRequest("office-key")
+
+	items := tracker.ClientSnapshot()
+	if len(items) != 1 {
+		t.Fatalf("len(ClientSnapshot()) = %d, want 1", len(items))
+	}
+	item := items[0]
+	if item.Client != "office-key" || item.Inbound != "openai-entry" || item.Outbound != "" || item.State != StateLimited {
+		t.Fatalf("ClientSnapshot()[0] = %#v, want limited client state", item)
+	}
+	if len(item.Windows) != 1 || item.Windows[0].Used != 1 || item.Windows[0].Remaining != 0 {
+		t.Fatalf("ClientSnapshot()[0].Windows = %#v, want exhausted window", item.Windows)
+	}
+}

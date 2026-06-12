@@ -189,6 +189,73 @@ func TestConfigValidateRejectsDuplicateClientToken(t *testing.T) {
 	}
 }
 
+func TestConfigValidateSupportsClientQuotaWindows(t *testing.T) {
+	cfg := validConfig()
+	cfg.Inbounds[0].Clients[0].Quota = ClientQuotaConfig{
+		Enabled: true,
+		Windows: []QuotaWindowConfig{
+			{Name: "hourly", Duration: DurationValue("1h"), MaxRequests: 100},
+			{Name: "daily", Duration: DurationValue("24h"), MaxRequests: 1000},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigValidateRequiresClientQuotaWindows(t *testing.T) {
+	cfg := validConfig()
+	cfg.Inbounds[0].Clients[0].Quota = ClientQuotaConfig{Enabled: true}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "inbounds.openai-entry.clients[0].quota.windows is required when quota is enabled" {
+		t.Fatalf("Validate() error = %v, want missing client quota windows error", err)
+	}
+}
+
+func TestConfigValidateRejectsDuplicateClientQuotaWindowName(t *testing.T) {
+	cfg := validConfig()
+	cfg.Inbounds[0].Clients[0].Quota = ClientQuotaConfig{
+		Enabled: true,
+		Windows: []QuotaWindowConfig{
+			{Name: "daily", Duration: DurationValue("24h"), MaxRequests: 100},
+			{Name: "daily", Duration: DurationValue("168h"), MaxRequests: 1000},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "inbounds.openai-entry.clients[0].quota.windows[1].name duplicates \"daily\"" {
+		t.Fatalf("Validate() error = %v, want duplicate client quota window name error", err)
+	}
+}
+
+func TestConfigValidateRequiresPositiveClientQuotaDuration(t *testing.T) {
+	cfg := validConfig()
+	cfg.Inbounds[0].Clients[0].Quota = ClientQuotaConfig{
+		Enabled: true,
+		Windows: []QuotaWindowConfig{{Name: "daily", Duration: DurationValue("0s"), MaxRequests: 100}},
+	}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "inbounds.openai-entry.clients[0].quota.windows[0].duration must be a positive duration" {
+		t.Fatalf("Validate() error = %v, want invalid client quota duration error", err)
+	}
+}
+
+func TestConfigValidateRequiresPositiveClientQuotaLimit(t *testing.T) {
+	cfg := validConfig()
+	cfg.Inbounds[0].Clients[0].Quota = ClientQuotaConfig{
+		Enabled: true,
+		Windows: []QuotaWindowConfig{{Name: "daily", Duration: DurationValue("24h"), MaxRequests: 0}},
+	}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "inbounds.openai-entry.clients[0].quota.windows[0].max_requests must be greater than 0" {
+		t.Fatalf("Validate() error = %v, want invalid client quota limit error", err)
+	}
+}
+
 func TestConfigValidateRequiresOutboundTag(t *testing.T) {
 	cfg := validConfig()
 	cfg.Outbounds[0].Tag = ""

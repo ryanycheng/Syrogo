@@ -27,6 +27,12 @@ type OutboundConfig struct {
 	ProbeInterval time.Duration
 }
 
+type ClientConfig struct {
+	Name    string
+	Inbound string
+	Windows []WindowConfig
+}
+
 type Decision struct {
 	Allowed    bool
 	Reason     string
@@ -35,13 +41,14 @@ type Decision struct {
 }
 
 type Tracker struct {
-	mu        sync.Mutex
-	now       func() time.Time
-	outbounds map[string]*outboundState
+	mu       sync.Mutex
+	now      func() time.Time
+	subjects map[string]*subjectState
 }
 
-type outboundState struct {
+type subjectState struct {
 	name                string
+	inbound             string
 	windows             []windowState
 	cooldown            time.Duration
 	probeInterval       time.Duration
@@ -60,12 +67,14 @@ type windowState struct {
 }
 
 type SnapshotItem struct {
-	Outbound            string           `json:"outbound"`
+	Outbound            string           `json:"outbound,omitempty"`
+	Client              string           `json:"client,omitempty"`
+	Inbound             string           `json:"inbound,omitempty"`
 	Enabled             bool             `json:"enabled"`
 	State               string           `json:"state"`
-	CooldownUntil       string           `json:"cooldown_until"`
+	CooldownUntil       string           `json:"cooldown_until,omitempty"`
 	NextProbeAt         string           `json:"next_probe_at"`
-	LastQuotaExceededAt string           `json:"last_quota_exceeded_at"`
+	LastQuotaExceededAt string           `json:"last_quota_exceeded_at,omitempty"`
 	LastSuccessAt       string           `json:"last_success_at"`
 	Windows             []SnapshotWindow `json:"windows"`
 }
@@ -80,7 +89,7 @@ type SnapshotWindow struct {
 }
 
 func NewTracker(cfgs []OutboundConfig) *Tracker {
-	return newTracker(cfgs, time.Now)
+	return newTrackerFromOutbounds(cfgs, time.Now)
 }
 
 func NewTrackerFromOutbounds(outbounds []config.OutboundSpec) *Tracker {
@@ -89,17 +98,9 @@ func NewTrackerFromOutbounds(outbounds []config.OutboundSpec) *Tracker {
 		if !outbound.Quota.Enabled {
 			continue
 		}
-		windows := make([]WindowConfig, 0, len(outbound.Quota.Windows))
-		for _, window := range outbound.Quota.Windows {
-			windows = append(windows, WindowConfig{
-				Name:        window.Name,
-				Duration:    window.Duration.Duration(),
-				MaxRequests: window.MaxRequests,
-			})
-		}
 		cfgs = append(cfgs, OutboundConfig{
 			Name:          outbound.Name,
-			Windows:       windows,
+			Windows:       windowsFromConfig(outbound.Quota.Windows),
 			Cooldown:      outbound.Quota.Cooldown.Duration(),
 			ProbeInterval: outbound.Quota.ProbeInterval.Duration(),
 		})
@@ -110,38 +111,93 @@ func NewTrackerFromOutbounds(outbounds []config.OutboundSpec) *Tracker {
 	return NewTracker(cfgs)
 }
 
-func NewTestTracker(cfgs []OutboundConfig, now func() time.Time) *Tracker {
-	return newTracker(cfgs, now)
+func NewClientTrackerFromInbounds(inbounds []config.InboundSpec) *Tracker {
+	cfgs := make([]ClientConfig, 0)
+	for _, inbound := range inbounds {
+		for _, client := range inbound.Clients {
+			if !client.Quota.Enabled {
+				continue
+			}
+			cfgs = append(cfgs, ClientConfig{Name: client.Name, Inbound: inbound.Name, Windows: windowsFromConfig(client.Quota.Windows)})
+		}
+	}
+	if len(cfgs) == 0 {
+		return nil
+	}
+	return NewClientTracker(cfgs)
 }
 
-func newTracker(cfgs []OutboundConfig, now func() time.Time) *Tracker {
+func NewClientTracker(cfgs []ClientConfig) *Tracker {
+	return newTrackerFromClients(cfgs, time.Now)
+}
+
+func NewTestTracker(cfgs []OutboundConfig, now func() time.Time) *Tracker {
+	return newTrackerFromOutbounds(cfgs, now)
+}
+
+func NewTestClientTracker(cfgs []ClientConfig, now func() time.Time) *Tracker {
+	return newTrackerFromClients(cfgs, now)
+}
+
+func windowsFromConfig(windows []config.QuotaWindowConfig) []WindowConfig {
+	result := make([]WindowConfig, 0, len(windows))
+	for _, window := range windows {
+		result = append(result, WindowConfig{Name: window.Name, Duration: window.Duration.Duration(), MaxRequests: window.MaxRequests})
+	}
+	return result
+}
+
+func newTrackerFromOutbounds(cfgs []OutboundConfig, now func() time.Time) *Tracker {
 	if now == nil {
 		now = time.Now
 	}
-	tracker := &Tracker{now: now, outbounds: make(map[string]*outboundState, len(cfgs))}
+	tracker := &Tracker{now: now, subjects: make(map[string]*subjectState, len(cfgs))}
 	for _, cfg := range cfgs {
-		state := &outboundState{name: cfg.Name, cooldown: cfg.Cooldown, probeInterval: cfg.ProbeInterval, windows: make([]windowState, 0, len(cfg.Windows))}
-		for _, window := range cfg.Windows {
-			state.windows = append(state.windows, windowState{name: window.Name, duration: window.Duration, maxRequests: window.MaxRequests})
-		}
-		tracker.outbounds[cfg.Name] = state
+		tracker.subjects[cfg.Name] = newSubjectState(cfg.Name, "", cfg.Windows, cfg.Cooldown, cfg.ProbeInterval)
 	}
 	return tracker
 }
 
+func newTrackerFromClients(cfgs []ClientConfig, now func() time.Time) *Tracker {
+	if now == nil {
+		now = time.Now
+	}
+	tracker := &Tracker{now: now, subjects: make(map[string]*subjectState, len(cfgs))}
+	for _, cfg := range cfgs {
+		tracker.subjects[cfg.Name] = newSubjectState(cfg.Name, cfg.Inbound, cfg.Windows, 0, 0)
+	}
+	return tracker
+}
+
+func newSubjectState(name string, inbound string, windows []WindowConfig, cooldown time.Duration, probeInterval time.Duration) *subjectState {
+	state := &subjectState{name: name, inbound: inbound, cooldown: cooldown, probeInterval: probeInterval, windows: make([]windowState, 0, len(windows))}
+	for _, window := range windows {
+		state.windows = append(state.windows, windowState{name: window.Name, duration: window.Duration, maxRequests: window.MaxRequests})
+	}
+	return state
+}
+
 func (t *Tracker) BeforeAttempt(outbound string) Decision {
+	return t.beforeAttempt(outbound, true)
+}
+
+func (t *Tracker) BeforeClientRequest(client string) Decision {
+	return t.beforeAttempt(client, false)
+}
+
+func (t *Tracker) beforeAttempt(name string, allowProbe bool) Decision {
 	if t == nil {
 		return Decision{Allowed: true}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	state := t.outbounds[outbound]
+	state := t.subjects[name]
 	if state == nil {
 		return Decision{Allowed: true}
 	}
 	now := t.now().UTC()
 	state.prune(now)
-	if state.inCooldown(now) {
+	if allowProbe && state.inCooldown(now) {
 		if !state.nextProbeAt.IsZero() && !now.Before(state.nextProbeAt) && !state.probeInFlight {
 			state.probeInFlight = true
 			return Decision{Allowed: true, Probe: true}
@@ -155,12 +211,20 @@ func (t *Tracker) BeforeAttempt(outbound string) Decision {
 }
 
 func (t *Tracker) RecordSuccess(outbound string) {
+	t.recordSuccess(outbound, true)
+}
+
+func (t *Tracker) RecordClientRequest(client string) {
+	t.recordSuccess(client, false)
+}
+
+func (t *Tracker) recordSuccess(name string, clearCooldown bool) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	state := t.outbounds[outbound]
+	state := t.subjects[name]
 	if state == nil {
 		return
 	}
@@ -169,9 +233,11 @@ func (t *Tracker) RecordSuccess(outbound string) {
 	for i := range state.windows {
 		state.windows[i].events = append(state.windows[i].events, now)
 	}
-	state.cooldownUntil = time.Time{}
-	state.nextProbeAt = time.Time{}
-	state.probeInFlight = false
+	if clearCooldown {
+		state.cooldownUntil = time.Time{}
+		state.nextProbeAt = time.Time{}
+		state.probeInFlight = false
+	}
 	state.lastSuccessAt = now
 }
 
@@ -181,7 +247,7 @@ func (t *Tracker) RecordQuotaExceeded(outbound string) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	state := t.outbounds[outbound]
+	state := t.subjects[outbound]
 	if state == nil {
 		return
 	}
@@ -193,26 +259,39 @@ func (t *Tracker) RecordQuotaExceeded(outbound string) {
 }
 
 func (t *Tracker) Snapshot() []SnapshotItem {
+	return t.snapshot(false)
+}
+
+func (t *Tracker) ClientSnapshot() []SnapshotItem {
+	return t.snapshot(true)
+}
+
+func (t *Tracker) snapshot(client bool) []SnapshotItem {
 	if t == nil {
 		return nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now().UTC()
-	items := make([]SnapshotItem, 0, len(t.outbounds))
-	for _, state := range t.outbounds {
+	items := make([]SnapshotItem, 0, len(t.subjects))
+	for _, state := range t.subjects {
 		state.prune(now)
-		items = append(items, state.snapshot(now))
+		items = append(items, state.snapshot(now, client))
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].Outbound < items[j].Outbound })
+	sort.Slice(items, func(i, j int) bool {
+		if client {
+			return items[i].Client < items[j].Client
+		}
+		return items[i].Outbound < items[j].Outbound
+	})
 	return items
 }
 
-func (s *outboundState) inCooldown(now time.Time) bool {
+func (s *subjectState) inCooldown(now time.Time) bool {
 	return !s.cooldownUntil.IsZero() && now.Before(s.cooldownUntil)
 }
 
-func (s *outboundState) limitReached(now time.Time) (time.Time, bool) {
+func (s *subjectState) limitReached(now time.Time) (time.Time, bool) {
 	var retryAfter time.Time
 	for _, window := range s.windows {
 		if len(window.events) < window.maxRequests {
@@ -226,7 +305,7 @@ func (s *outboundState) limitReached(now time.Time) (time.Time, bool) {
 	return retryAfter, !retryAfter.IsZero() && now.Before(retryAfter)
 }
 
-func (s *outboundState) prune(now time.Time) {
+func (s *subjectState) prune(now time.Time) {
 	for i := range s.windows {
 		window := &s.windows[i]
 		cutoff := now.Add(-window.duration)
@@ -246,7 +325,7 @@ func (s *outboundState) prune(now time.Time) {
 	}
 }
 
-func (s *outboundState) snapshot(now time.Time) SnapshotItem {
+func (s *subjectState) snapshot(now time.Time, client bool) SnapshotItem {
 	state := StateAvailable
 	var retryAfter time.Time
 	if s.inCooldown(now) {
@@ -275,7 +354,6 @@ func (s *outboundState) snapshot(now time.Time) SnapshotItem {
 		})
 	}
 	item := SnapshotItem{
-		Outbound:            s.name,
 		Enabled:             true,
 		State:               state,
 		CooldownUntil:       formatTime(s.cooldownUntil),
@@ -283,6 +361,12 @@ func (s *outboundState) snapshot(now time.Time) SnapshotItem {
 		LastQuotaExceededAt: formatTime(s.lastQuotaExceededAt),
 		LastSuccessAt:       formatTime(s.lastSuccessAt),
 		Windows:             windows,
+	}
+	if client {
+		item.Client = s.name
+		item.Inbound = s.inbound
+	} else {
+		item.Outbound = s.name
 	}
 	if state == StateLimited && item.NextProbeAt == "" {
 		item.NextProbeAt = formatTime(retryAfter)

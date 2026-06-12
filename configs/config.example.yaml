@@ -14,6 +14,16 @@ inbounds:
       - name: "office-key"
         token: "${SYROGO_OPENAI_CLIENT_TOKEN}"
         tag: "office"
+        # Optional client-side request quota. Exceeding this returns 429 before routing.
+        # quota:
+        #   enabled: true
+        #   windows:
+        #     - name: "hourly"
+        #       duration: "1h"
+        #       max_requests: 100
+        #     - name: "daily"
+        #       duration: "24h"
+        #       max_requests: 1000
       - name: "mobile-key"
         token: "${SYROGO_MOBILE_CLIENT_TOKEN}"
         tag: "mobile"

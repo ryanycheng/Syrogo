@@ -20,6 +20,7 @@ It is not just a thin proxy for forwarding a single protocol. It sits between cl
 - multiple inbound protocols
 - multiple upstream providers
 - routing by client scenario
+- client-side request quota windows
 - basic scheduling such as failover and round_robin
 - future governance capabilities such as quota switching, usage statistics, and multi-node chaining
 
@@ -76,6 +77,7 @@ The current version supports:
   - `POST /v1/responses`
   - `POST /v1/messages`
 - tag-first routing by client scenario
+- client-side request quota windows
 - per-rule support for:
   - `failover`
   - `round_robin`
@@ -281,7 +283,45 @@ Current scope:
 - only runs when the upstream response omits `usage`
 - returns a platform-side estimate, not provider billing truth
 
-### 9. Track outbound quota windows
+### 9. Limit client request windows
+
+For client-side governance, you can set request quota windows on individual inbound clients:
+
+```yaml
+inbounds:
+  - name: "openai-entry"
+    protocol: "openai_chat"
+    path: "/v1/chat/completions"
+    clients:
+      - name: "office-key"
+        token: "${SYROGO_OPENAI_CLIENT_TOKEN}"
+        tag: "office"
+        quota:
+          enabled: true
+          windows:
+            - name: "hourly"
+              duration: "1h"
+              max_requests: 100
+            - name: "daily"
+              duration: "24h"
+              max_requests: 1000
+```
+
+Scope:
+
+- applies before routing, so exceeded clients receive HTTP 429 directly
+- uses `clients[].name` as the stable quota identity
+- multiple windows can be active at the same time; any exhausted window blocks the client
+- the first version tracks request counts, not token or billing quotas
+
+Read current client quota state with the accounting admin token:
+
+```bash
+curl http://127.0.0.1:23234/stats/client-quota \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+```
+
+### 10. Track outbound quota windows
 
 For upstream subscriptions with overlapping request limits, you can enable outbound-only quota tracking on an outbound:
 
@@ -319,7 +359,7 @@ curl http://127.0.0.1:23234/stats/quota \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-### 10. Read usage aggregates
+### 11. Read usage aggregates
 
 Syrogo now exposes a dedicated accounting read-only endpoint for usage aggregates.
 
@@ -417,7 +457,7 @@ accounting:
     queue_size: 4096
 ```
 
-### 10. Local debugging
+### 12. Local debugging
 
 For local development, you can use:
 

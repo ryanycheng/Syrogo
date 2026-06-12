@@ -12,11 +12,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/accounting"
 	"github.com/ryanycheng/Syrogo/internal/config"
 	"github.com/ryanycheng/Syrogo/internal/execution"
 	"github.com/ryanycheng/Syrogo/internal/provider"
+	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/router"
 	"github.com/ryanycheng/Syrogo/internal/runtime"
 	"github.com/ryanycheng/Syrogo/internal/semantic"
@@ -184,6 +186,83 @@ func TestQuotaStatsReturnsEmptyListWithAdminToken(t *testing.T) {
 		t.Fatalf("items = %#v, want empty list", resp.Items)
 	}
 }
+func TestClientQuotaRejectsBeforeDispatch(t *testing.T) {
+	providers := map[string]provider.Provider{"mock": provider.NewMock("mock")}
+	r, err := router.New(testRoutingConfig(), providers, testOutbounds())
+	if err != nil {
+		t.Fatalf("router.New() error = %v", err)
+	}
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	clientQuota := quota.NewTestClientTracker([]quota.ClientConfig{{
+		Name:    "office-key",
+		Inbound: "openai-entry",
+		Windows: []quota.WindowConfig{{Name: "tiny", Duration: time.Hour, MaxRequests: 1}},
+	}}, func() time.Time { return now })
+	h := NewWithClientQuota(r, execution.NewDispatcher(), testInbounds(), clientQuota, config.AccountingConfig{}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`)
+	first := httptest.NewRecorder()
+	mux.ServeHTTP(first, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", first.Code)
+	}
+
+	second := httptest.NewRecorder()
+	mux.ServeHTTP(second, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want 429", second.Code)
+	}
+	if !strings.Contains(second.Body.String(), "client quota exceeded") {
+		t.Fatalf("second body = %s, want client quota error", second.Body.String())
+	}
+}
+
+func TestClientQuotaStatsRequiresAdminToken(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/stats/client-quota", nil))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestClientQuotaStatsReturnsConfiguredClientState(t *testing.T) {
+	providers := map[string]provider.Provider{"mock": provider.NewMock("mock")}
+	r, err := router.New(testRoutingConfig(), providers, testOutbounds())
+	if err != nil {
+		t.Fatalf("router.New() error = %v", err)
+	}
+	clientQuota := quota.NewTestClientTracker([]quota.ClientConfig{{
+		Name:    "office-key",
+		Inbound: "openai-entry",
+		Windows: []quota.WindowConfig{{Name: "hourly", Duration: time.Hour, MaxRequests: 10}},
+	}}, func() time.Time { return time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC) })
+	h := NewWithClientQuota(r, execution.NewDispatcher(), testInbounds(), clientQuota, config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/stats/client-quota", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"client":"office-key"`) || !strings.Contains(w.Body.String(), `"inbound":"openai-entry"`) || !strings.Contains(w.Body.String(), `"name":"hourly"`) {
+		t.Fatalf("body = %s, want client quota state", w.Body.String())
+	}
+}
+
 func TestChatCompletionsRejectsMissingToken(t *testing.T) {
 	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
 	mux := http.NewServeMux()

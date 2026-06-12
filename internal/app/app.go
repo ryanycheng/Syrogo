@@ -42,9 +42,10 @@ func New(cfg config.Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	quotaTracker := quota.NewTrackerFromOutbounds(cfg.Outbounds)
-	dispatcher := execution.NewDispatcherWithStoreAndQuota(store, quotaTracker)
-	listeners := buildListeners(r, dispatcher, cfg, slog.Default())
+	outboundQuotaTracker := quota.NewTrackerFromOutbounds(cfg.Outbounds)
+	clientQuotaTracker := quota.NewClientTrackerFromInbounds(cfg.Inbounds)
+	dispatcher := execution.NewDispatcherWithStoreAndQuota(store, outboundQuotaTracker)
+	listeners := buildListeners(r, dispatcher, cfg, clientQuotaTracker, slog.Default())
 
 	return &App{
 		Server:          server.NewListeners(listeners),
@@ -53,11 +54,11 @@ func New(cfg config.Config) (*App, error) {
 	}, nil
 }
 
-func buildListeners(r *router.Router, dispatcher *execution.Dispatcher, cfg config.Config, logger *slog.Logger) []server.Listener {
+func buildListeners(r *router.Router, dispatcher *execution.Dispatcher, cfg config.Config, clientQuotaTracker *quota.Tracker, logger *slog.Logger) []server.Listener {
 	listeners := make([]server.Listener, 0, len(cfg.Listeners))
 	for _, listener := range cfg.Listeners {
 		mux := http.NewServeMux()
-		gateway.New(r, dispatcher, cfg.ListenerInbounds(listener), cfg.Accounting, logger).Register(mux)
+		gateway.NewWithClientQuota(r, dispatcher, cfg.ListenerInbounds(listener), clientQuotaTracker, cfg.Accounting, logger).Register(mux)
 		listeners = append(listeners, server.Listener{
 			Addr:    listener.Listen,
 			Handler: mux,

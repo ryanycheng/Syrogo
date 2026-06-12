@@ -125,6 +125,31 @@ func TestNewExposesConfiguredQuotaStats(t *testing.T) {
 		t.Fatalf("body = %s, want quota state for mock daily", w.Body.String())
 	}
 }
+
+func TestNewExposesConfiguredClientQuotaStats(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Inbounds[0].Clients[0].Quota = config.ClientQuotaConfig{
+		Enabled: true,
+		Windows: []config.QuotaWindowConfig{{Name: "hourly", Duration: config.DurationValue("1h"), MaxRequests: 100}},
+	}
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	listeners := app.Server.Listeners()
+	req := httptest.NewRequest(http.MethodGet, "/stats/client-quota", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"client":"office-key"`) || !strings.Contains(w.Body.String(), `"name":"hourly"`) {
+		t.Fatalf("body = %s, want client quota state for office-key hourly", w.Body.String())
+	}
+}
+
 func TestNewBindsEachListenerToItsInbounds(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Listeners = []config.ListenerSpec{

@@ -20,6 +20,7 @@ Syrogo 是一个面向多模型场景的 AI Gateway / Semantic Router。
 - 多种入口协议
 - 多上游 provider 接入
 - 按客户端场景进行路由
+- client 侧请求配额窗口
 - failover / round_robin 等基础调度
 - 后续额度切换、统计、治理与多节点串接能力
 
@@ -76,6 +77,7 @@ Syrogo 想解决的不是“再包一层 HTTP”，而是把这些变化收敛�
   - `POST /v1/responses`
   - `POST /v1/messages`
 - 按客户端场景进行 tag-first routing
+- client 侧请求配额窗口
 - 单条规则内支持：
   - `failover`
   - `round_robin`
@@ -281,7 +283,45 @@ outbounds:
 - 只在上游缺失 `usage` 时触发
 - 返回的是平台侧近似值，不是 provider 账单真值
 
-### 9. 跟踪 outbound 配额窗口
+### 9. 限制 client 请求配额窗口
+
+对于 client 侧治理，可以在单个 inbound client 上配置请求配额窗口：
+
+```yaml
+inbounds:
+  - name: "openai-entry"
+    protocol: "openai_chat"
+    path: "/v1/chat/completions"
+    clients:
+      - name: "office-key"
+        token: "${SYROGO_OPENAI_CLIENT_TOKEN}"
+        tag: "office"
+        quota:
+          enabled: true
+          windows:
+            - name: "hourly"
+              duration: "1h"
+              max_requests: 100
+            - name: "daily"
+              duration: "24h"
+              max_requests: 1000
+```
+
+当前范围：
+
+- 在路由前生效，超限 client 会直接收到 HTTP 429
+- 使用 `clients[].name` 作为稳定 quota 身份
+- 多个窗口会同时生效；任一窗口耗尽都会拦截该 client
+- 第一版只跟踪请求次数，不跟踪 token 或账单额度
+
+使用 accounting admin token 查看当前 client quota 状态：
+
+```bash
+curl http://127.0.0.1:23234/stats/client-quota \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+```
+
+### 10. 跟踪 outbound 配额窗口
 
 对于存在多个重叠请求限制的上游订阅，可以在 outbound 上启用 outbound-only quota tracker：
 
@@ -319,7 +359,7 @@ curl http://127.0.0.1:23234/stats/quota \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-### 10. 查看 usage 聚合统计
+### 11. 查看 usage 聚合统计
 
 Syrogo 现在提供一个独立的 accounting 只读端点，用于查看 usage 聚合结果。
 
