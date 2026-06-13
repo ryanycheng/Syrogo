@@ -244,7 +244,30 @@ SYROGO_ACCOUNTING_ADMIN_TOKEN=<accounting-admin-token> \
 make smoke
 ```
 
-### 7. Map route models
+### 7. Launch agent clients through Syrogo
+
+You can use `syrogo run` to start common agent CLIs with the right Syrogo environment variables injected:
+
+```bash
+syrogo run claude -- --model claude-sonnet-4-6
+syrogo run codex -- exec "Reply with exactly: syrogo-ok"
+```
+
+By default, `claude` selects one `anthropic_messages` inbound client and `codex` selects one `openai_responses` inbound client from `configs/config.yaml`. If there are multiple matching clients, pass `--client` or `--inbound`:
+
+```bash
+syrogo run claude --client anthropic-key --base-url http://127.0.0.1:23234
+syrogo run codex --inbound responses-entry --print-env
+```
+
+Current scope:
+
+- `claude` injects `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`
+- `codex` injects `OPENAI_BASE_URL` and `OPENAI_API_KEY`
+- `--print-env` prints the resolved environment without starting the client
+- the launched client still runs locally; Syrogo handles its model API traffic
+
+### 8. Map route models
 
 If one route needs to accept several inbound model names and send provider-specific names upstream, use `model_map` on the routing rule:
 
@@ -264,7 +287,7 @@ routing:
 
 Use `target_model` for one fixed model override, or `model_map` for per-request model mapping. A rule cannot set both.
 
-### 8. Declare Responses compatibility
+### 9. Declare Responses compatibility
 
 If an `openai_responses` upstream only supports part of the official Responses API, you can declare compatibility boundaries explicitly on the outbound:
 
@@ -282,7 +305,7 @@ outbounds:
       responses_assistant_history_native: true
 ```
 
-### 9. Declare usage estimation fallback
+### 10. Declare usage estimation fallback
 
 If an `openai_chat` or `anthropic_messages` upstream omits `usage`, you can let Syrogo fill a heuristic estimate on the outbound:
 
@@ -305,7 +328,7 @@ Current scope:
 - only runs when the upstream response omits `usage`
 - returns a platform-side estimate, not provider billing truth
 
-### 10. Limit client request windows
+### 11. Limit client request windows
 
 For client-side governance, you can set request quota windows on individual inbound clients:
 
@@ -343,7 +366,7 @@ curl http://127.0.0.1:23234/stats/client-quota \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-### 11. Track outbound quota windows
+### 12. Track outbound quota windows
 
 For upstream subscriptions with overlapping request limits, you can enable outbound-only quota tracking on an outbound:
 
@@ -381,7 +404,7 @@ curl http://127.0.0.1:23234/stats/quota \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-### 12. Persist and inspect quota governance
+### 13. Persist and inspect quota governance
 
 Syrogo can persist runtime quota state locally so restart recovery keeps recent client/outbound windows and outbound cooldowns:
 
@@ -406,7 +429,7 @@ curl http://127.0.0.1:23234/stats/governance \
 
 This includes provider health, outbound quota, client quota, and recent events such as `client_limited`, `outbound_limited`, `outbound_quota_exceeded`, `outbound_probe_succeeded`, `provider_health_limited`, and `provider_probe_succeeded`. Degraded outbounds are skipped during execution, then move into `probing` when the next real request is allowed to test recovery.
 
-### 13. Read usage aggregates
+### 14. Read usage aggregates
 
 Syrogo now exposes a dedicated accounting read-only endpoint for usage aggregates.
 
@@ -504,7 +527,7 @@ accounting:
     queue_size: 4096
 ```
 
-### 14. Local debugging
+### 15. Local debugging
 
 For local development, you can use:
 
@@ -551,7 +574,7 @@ The next priorities are:
 - gradually add governance-related capabilities
   - quota switching
   - statistics
-  - multi-node chaining
+  - multi-node relay / hop mode, for example domestic Syrogo A forwarding normalized traffic to overseas Syrogo B before B calls real upstream providers
 - extend more providers and protocol capabilities without breaking the main abstraction path
 
 ---

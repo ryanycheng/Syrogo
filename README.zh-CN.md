@@ -244,7 +244,30 @@ SYROGO_ACCOUNTING_ADMIN_TOKEN=<accounting-admin-token> \
 make smoke
 ```
 
-### 7. 映射路由模型
+### 7. 通过 Syrogo 启动 agent 客户端
+
+可以使用 `syrogo run` 启动常见 agent CLI，并自动注入指向 Syrogo 的环境变量：
+
+```bash
+syrogo run claude -- --model claude-sonnet-4-6
+syrogo run codex -- exec "Reply with exactly: syrogo-ok"
+```
+
+默认情况下，`claude` 会从 `configs/config.yaml` 中选择一个 `anthropic_messages` inbound client，`codex` 会选择一个 `openai_responses` inbound client。如果有多个匹配 client，可以传 `--client` 或 `--inbound`：
+
+```bash
+syrogo run claude --client anthropic-key --base-url http://127.0.0.1:23234
+syrogo run codex --inbound responses-entry --print-env
+```
+
+当前范围：
+
+- `claude` 注入 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN`
+- `codex` 注入 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`
+- `--print-env` 只打印解析后的环境变量，不启动客户端
+- 被启动的客户端仍在本地运行，Syrogo 负责承接它的模型 API 流量
+
+### 8. 映射路由模型
 
 如果一条 route 需要接受多个入口模型名，并把它们映射成上游 provider 使用的模型名，可以在 routing rule 上使用 `model_map`：
 
@@ -264,7 +287,7 @@ routing:
 
 如果整条规则固定覆盖为一个目标模型，使用 `target_model`；如果要按请求模型逐项映射，使用 `model_map`。同一条规则不能同时配置两者。
 
-### 8. 声明 Responses 兼容能力
+### 9. 声明 Responses 兼容能力
 
 如果某个 `openai_responses` 上游只兼容官方 Responses 的一部分能力，可以在 outbound 上显式声明能力边界：
 
@@ -282,7 +305,7 @@ outbounds:
       responses_assistant_history_native: true
 ```
 
-### 9. 声明 usage estimation 回补
+### 10. 声明 usage estimation 回补
 
 如果某个 `openai_chat` 或 `anthropic_messages` 上游没有返回 `usage`，可以在 outbound 上开启平台侧启发式补算：
 
@@ -305,7 +328,7 @@ outbounds:
 - 只在上游缺失 `usage` 时触发
 - 返回的是平台侧近似值，不是 provider 账单真值
 
-### 10. 限制 client 请求配额窗口
+### 11. 限制 client 请求配额窗口
 
 对于 client 侧治理，可以在单个 inbound client 上配置请求配额窗口：
 
@@ -343,7 +366,7 @@ curl http://127.0.0.1:23234/stats/client-quota \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-### 11. 跟踪 outbound 配额窗口
+### 12. 跟踪 outbound 配额窗口
 
 对于存在多个重叠请求限制的上游订阅，可以在 outbound 上启用 outbound-only quota tracker：
 
@@ -381,7 +404,7 @@ curl http://127.0.0.1:23234/stats/quota \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-### 12. 持久化与查看 quota 治理状态
+### 13. 持久化与查看 quota 治理状态
 
 Syrogo 可以把运行时 quota 状态持久化到本地，重启后恢复最近的 client/outbound 窗口与 outbound cooldown：
 
@@ -406,7 +429,7 @@ curl http://127.0.0.1:23234/stats/governance \
 
 响应包含 provider health、outbound quota、client quota，以及 `client_limited`、`outbound_limited`、`outbound_quota_exceeded`、`outbound_probe_succeeded`、`provider_health_limited`、`provider_probe_succeeded` 等最近事件。处于 degraded 状态的 outbound 会在执行时被跳过，等下一次真实请求允许探测恢复时进入 `probing`。
 
-### 13. 查看 usage 聚合统计
+### 14. 查看 usage 聚合统计
 
 Syrogo 现在提供一个独立的 accounting 只读端点，用于查看 usage 聚合结果。
 
@@ -543,7 +566,7 @@ accounting:
 - 逐步补齐治理相关能力
   - 额度切换
   - 统计
-  - 多节点串接
+  - 多节点 relay / hop 模式，例如国内 Syrogo A 把标准化流量转发到海外 Syrogo B，再由 B 访问真实上游 provider
 - 在不破坏主链路抽象的前提下，再扩展更多 provider 与协议能力
 
 ---

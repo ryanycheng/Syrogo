@@ -1,0 +1,205 @@
+package main
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+
+	"github.com/ryanycheng/Syrogo/internal/config"
+)
+
+type launcherOptions struct {
+	ConfigPath string
+	BaseURL    string
+	Client     string
+	Inbound    string
+	Token      string
+	PrintEnv   bool
+	Args       []string
+	Stdout     io.Writer
+	Stderr     io.Writer
+	Stdin      io.Reader
+}
+
+type launchPlan struct {
+	Command string
+	Args    []string
+	Env     map[string]string
+}
+
+func runLauncher(args []string) int {
+	opts := launcherOptions{Stdout: os.Stdout, Stderr: os.Stderr, Stdin: os.Stdin}
+	if err := parseLauncherOptions(args, &opts); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if err := launchAgent(opts); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
+func parseLauncherOptions(args []string, opts *launcherOptions) error {
+	if len(args) == 0 {
+		return errors.New("usage: syrogo run <claude|codex> [--config path] [--client name] [--inbound name] [--base-url url] [--token token] [--print-env] [-- <args>]")
+	}
+	agent := args[0]
+	if agent != "claude" && agent != "codex" {
+		return fmt.Errorf("unsupported agent %q", agent)
+	}
+
+	fs := flag.NewFlagSet("run "+agent, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ConfigPath, "config", "./configs/config.yaml", "path to config file")
+	fs.StringVar(&opts.BaseURL, "base-url", "", "Syrogo base URL")
+	fs.StringVar(&opts.Client, "client", "", "client name in config")
+	fs.StringVar(&opts.Inbound, "inbound", "", "inbound name in config")
+	fs.StringVar(&opts.Token, "token", "", "override Syrogo client token")
+	fs.BoolVar(&opts.PrintEnv, "print-env", false, "print launcher environment instead of executing")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if opts.BaseURL == "" {
+		opts.BaseURL = "http://127.0.0.1:23234"
+	}
+	opts.Args = append([]string{agent}, fs.Args()...)
+	return nil
+}
+
+func launchAgent(opts launcherOptions) error {
+	plan, err := buildLaunchPlan(opts)
+	if err != nil {
+		return err
+	}
+	if opts.PrintEnv {
+		return printLaunchPlan(opts.Stdout, plan)
+	}
+	cmd := exec.Command(plan.Command, plan.Args...)
+	cmd.Env = mergeEnv(os.Environ(), plan.Env)
+	cmd.Stdin = opts.Stdin
+	cmd.Stdout = opts.Stdout
+	cmd.Stderr = opts.Stderr
+	return cmd.Run()
+}
+
+func buildLaunchPlan(opts launcherOptions) (launchPlan, error) {
+	if len(opts.Args) == 0 {
+		return launchPlan{}, errors.New("agent command is required")
+	}
+	agent := opts.Args[0]
+	token := opts.Token
+	if token == "" {
+		cfg, err := config.Load(opts.ConfigPath)
+		if err != nil {
+			return launchPlan{}, err
+		}
+		selected, err := selectLauncherClient(cfg, opts.Inbound, opts.Client, agent)
+		if err != nil {
+			return launchPlan{}, err
+		}
+		token = selected.Token
+	}
+	if token == "" {
+		return launchPlan{}, errors.New("client token is required")
+	}
+
+	env := map[string]string{}
+	switch agent {
+	case "claude":
+		env["ANTHROPIC_BASE_URL"] = opts.BaseURL
+		env["ANTHROPIC_AUTH_TOKEN"] = token
+	case "codex":
+		env["OPENAI_BASE_URL"] = opts.BaseURL
+		env["OPENAI_API_KEY"] = token
+	default:
+		return launchPlan{}, fmt.Errorf("unsupported agent %q", agent)
+	}
+	return launchPlan{Command: agent, Args: append([]string(nil), opts.Args[1:]...), Env: env}, nil
+}
+
+type launcherClient struct {
+	Token string
+}
+
+func selectLauncherClient(cfg config.Config, inboundName string, clientName string, agent string) (launcherClient, error) {
+	preferredProtocol := ""
+	switch agent {
+	case "claude":
+		preferredProtocol = "anthropic_messages"
+	case "codex":
+		preferredProtocol = "openai_responses"
+	}
+	var matches []config.ClientSpec
+	for _, inbound := range cfg.Inbounds {
+		if inboundName != "" && inbound.Name != inboundName {
+			continue
+		}
+		if inboundName == "" && preferredProtocol != "" && inbound.Protocol != preferredProtocol {
+			continue
+		}
+		for _, client := range inbound.Clients {
+			if clientName != "" && client.Name != clientName {
+				continue
+			}
+			matches = append(matches, client)
+		}
+	}
+	if len(matches) == 0 {
+		return launcherClient{}, fmt.Errorf("no client matched inbound=%q client=%q for %s", inboundName, clientName, agent)
+	}
+	if len(matches) > 1 {
+		return launcherClient{}, fmt.Errorf("multiple clients matched for %s; pass --client or --inbound", agent)
+	}
+	return launcherClient{Token: matches[0].Token}, nil
+}
+
+func printLaunchPlan(w io.Writer, plan launchPlan) error {
+	keys := make([]string, 0, len(plan.Env))
+	for key := range plan.Env {
+		keys = append(keys, key)
+	}
+	for _, key := range keys {
+		if _, err := fmt.Fprintf(w, "%s=%s\n", key, plan.Env[key]); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintf(w, "command=%s", plan.Command); err != nil {
+		return err
+	}
+	if len(plan.Args) > 0 {
+		_, err := fmt.Fprintf(w, " %s", strings.Join(plan.Args, " "))
+		if err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintln(w)
+	return err
+}
+
+func mergeEnv(base []string, extra map[string]string) []string {
+	merged := make([]string, 0, len(base)+len(extra))
+	seen := make(map[string]struct{}, len(extra))
+	for _, item := range base {
+		key, _, ok := strings.Cut(item, "=")
+		if ok {
+			if value, replace := extra[key]; replace {
+				merged = append(merged, key+"="+value)
+				seen[key] = struct{}{}
+				continue
+			}
+		}
+		merged = append(merged, item)
+	}
+	for key, value := range extra {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		merged = append(merged, key+"="+value)
+	}
+	return merged
+}

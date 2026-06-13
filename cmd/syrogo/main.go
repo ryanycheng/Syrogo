@@ -29,6 +29,10 @@ func main() {
 }
 
 func runMain() int {
+	if len(os.Args) > 1 && os.Args[1] == "run" {
+		return runLauncher(os.Args[2:])
+	}
+
 	configPath := flag.String("config", "./configs/config.example.yaml", "path to config file")
 	devLog := flag.Bool("dev-log", false, "write logs to stdout and ./tmp/dev.log for local development")
 	flag.Parse()
