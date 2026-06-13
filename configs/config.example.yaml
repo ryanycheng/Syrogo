@@ -72,6 +72,11 @@ routing:
       to_tags:
         - "responses-primary"
       strategy: "failover"
+      # Optional per-route model mapping. Use this instead of target_model when one route
+      # accepts multiple source model names and maps them to upstream-specific names.
+      # model_map:
+      #   gpt-4: "gpt-4o-mini"
+      #   claude-sonnet-4-6: "gpt-5.4"
 
     - name: "anthropic-to-responses-route"
       from_tags:
@@ -141,6 +146,16 @@ outbounds:
     # capabilities:
     #   usage_estimation: true
     #   usage_estimation_mode: "heuristic"
+
+governance:
+  quota:
+    snapshot:
+      enabled: true
+      dir: "./tmp/quota"
+      flush_interval: "5s"
+    events:
+      enabled: true
+      max_entries: 200
 
 accounting:
   enabled: true

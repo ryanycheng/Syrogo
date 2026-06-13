@@ -192,6 +192,34 @@ func TestDispatchDoesNotFallbackWhenCapabilityUnsupported(t *testing.T) {
 	}
 }
 
+func TestDispatchRecordsProviderHealth(t *testing.T) {
+	now := time.Date(2026, 6, 13, 9, 0, 0, 0, time.UTC)
+	health := provider.NewTestHealthTracker([]string{"primary"}, func() time.Time { return now })
+	dispatcher := NewDispatcherWithStoreQuotaHealthAndEvents(accounting.NewMemoryStore(), nil, health, nil)
+	primary := &stubProvider{name: "primary", err: provider.NewTimeoutError(errors.New("timeout"))}
+	plan := runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackAlways}}}
+
+	_, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, plan)
+	if err == nil {
+		t.Fatal("Dispatch() error = nil, want error")
+	}
+	items := dispatcher.QueryProviderHealth()
+	if len(items) != 1 || items[0].State != provider.HealthDegraded || items[0].LastErrorKind != string(provider.ErrorKindTimeout) || items[0].ConsecutiveFailures != 1 {
+		t.Fatalf("health = %#v, want degraded timeout", items)
+	}
+
+	now = now.Add(time.Minute)
+	primary.err = nil
+	primary.resp = runtime.Response{Model: "gpt-4"}
+	if _, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, plan); err != nil {
+		t.Fatalf("Dispatch() after recovery error = %v", err)
+	}
+	items = dispatcher.QueryProviderHealth()
+	if len(items) != 1 || items[0].State != provider.HealthAvailable || items[0].ConsecutiveFailures != 0 || items[0].LastSuccessAt == "" {
+		t.Fatalf("health after recovery = %#v, want available", items)
+	}
+}
+
 func TestDispatchRecordsErrorKind(t *testing.T) {
 	store := accounting.NewMemoryStore()
 	dispatcher := NewDispatcherWithStore(store)
@@ -219,6 +247,30 @@ func TestDispatchRecordsErrorKind(t *testing.T) {
 	}
 }
 
+func TestDispatchSkipsHealthDegradedOutbound(t *testing.T) {
+	health := provider.NewTestHealthTracker([]string{"primary", "fallback"}, func() time.Time { return time.Date(2026, 6, 13, 9, 0, 0, 0, time.UTC) })
+	for range provider.DefaultHealthFailureThreshold {
+		health.RecordFailure("primary", provider.ErrorKindTimeout)
+	}
+	dispatcher := NewDispatcherWithStoreQuotaHealthAndEvents(accounting.NewMemoryStore(), nil, health, nil)
+	primary := &stubProvider{name: "primary"}
+	fallback := &stubProvider{name: "fallback", resp: runtime.Response{Model: "gpt-4", Message: runtime.Message{Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "fallback ok"}}}}}
+
+	resp, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{
+		{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+		{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+	}})
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if primary.req.Model != "" {
+		t.Fatalf("primary should be skipped, got req = %#v", primary.req)
+	}
+	if got := resp.Message.Parts[0].Text; got != "fallback ok" {
+		t.Fatalf("response text = %q, want fallback ok", got)
+	}
+}
+
 func TestDispatchSkipsQuotaLimitedOutbound(t *testing.T) {
 	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
 	tracker := quota.NewTestTracker([]quota.OutboundConfig{{
@@ -228,7 +280,8 @@ func TestDispatchSkipsQuotaLimitedOutbound(t *testing.T) {
 		Windows:       []quota.WindowConfig{{Name: "short", Duration: time.Hour, MaxRequests: 1}},
 	}}, func() time.Time { return now })
 	tracker.RecordSuccess("primary")
-	dispatcher := NewDispatcherWithStoreAndQuota(accounting.NewMemoryStore(), tracker)
+	recorder := quota.NewTestEventRecorder(10, func() time.Time { return now })
+	dispatcher := NewDispatcherWithStoreQuotaAndEvents(accounting.NewMemoryStore(), tracker, recorder)
 	primary := &stubProvider{name: "primary"}
 	fallback := &stubProvider{
 		name: "fallback",
@@ -248,6 +301,9 @@ func TestDispatchSkipsQuotaLimitedOutbound(t *testing.T) {
 	if got := resp.Message.Parts[0].Text; got != "fallback ok" {
 		t.Fatalf("response text = %q, want fallback ok", got)
 	}
+	if events := recorder.Snapshot(); len(events) != 1 || events[0].Type != quota.EventOutboundLimited || events[0].Outbound != "primary" {
+		t.Fatalf("events = %#v, want outbound limited event", events)
+	}
 }
 
 func TestDispatchMarksQuotaExceededCooldownAndProbeRecovery(t *testing.T) {
@@ -258,7 +314,8 @@ func TestDispatchMarksQuotaExceededCooldownAndProbeRecovery(t *testing.T) {
 		ProbeInterval: time.Minute,
 		Windows:       []quota.WindowConfig{{Name: "daily", Duration: 24 * time.Hour, MaxRequests: 100}},
 	}}, func() time.Time { return now })
-	dispatcher := NewDispatcherWithStoreAndQuota(accounting.NewMemoryStore(), tracker)
+	recorder := quota.NewTestEventRecorder(10, func() time.Time { return now })
+	dispatcher := NewDispatcherWithStoreQuotaAndEvents(accounting.NewMemoryStore(), tracker, recorder)
 	primary := &stubProvider{name: "primary", err: provider.NewQuotaExceededError(errors.New("quota"))}
 	fallback := &stubProvider{name: "fallback", resp: runtime.Response{Model: "gpt-4"}}
 	plan := runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{
@@ -295,6 +352,13 @@ func TestDispatchMarksQuotaExceededCooldownAndProbeRecovery(t *testing.T) {
 	}
 	if items := tracker.Snapshot(); len(items) != 1 || items[0].State != quota.StateAvailable {
 		t.Fatalf("Snapshot() after probe success = %#v, want available", items)
+	}
+	events := recorder.Snapshot()
+	if len(events) != 3 {
+		t.Fatalf("events = %#v, want 3 quota events", events)
+	}
+	if events[0].Type != quota.EventOutboundQuotaExceeded || events[1].Type != quota.EventOutboundLimited || events[2].Type != quota.EventOutboundProbeSucceeded {
+		t.Fatalf("events = %#v, want quota_exceeded, outbound_limited, probe_succeeded", events)
 	}
 }
 

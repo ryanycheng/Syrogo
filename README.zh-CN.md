@@ -11,7 +11,7 @@
 > 用更清晰的边界、多协议接入和面向网关的编排能力，承接多模型流量。
 
 - **多协议入口** — 在同一个网关中统一承接 OpenAI Chat、OpenAI Responses 与 Anthropic Messages。
-- **面向真实场景的路由** — 支持按 client tag、目标模型、failover 与 round_robin 进行调度。
+- **面向真实场景的路由** — 支持按 client tag、模型映射、failover 与 round_robin 进行调度。
 - **面向上游适配的执行层** — 接多个 provider，而不把协议差异散落到每个客户端里。
 
 Syrogo 是一个面向多模型场景的 AI Gateway / Semantic Router。
@@ -21,7 +21,7 @@ Syrogo 是一个面向多模型场景的 AI Gateway / Semantic Router。
 - 多上游 provider 接入
 - 按客户端场景进行路由
 - client 侧请求配额窗口
-- failover / round_robin 等基础调度
+- failover / round_robin 与 provider 健康感知 fallback 等基础调度
 - 后续额度切换、统计、治理与多节点串接能力
 
 当前项目仍处于 0→1 骨架建设阶段，优先目标是把服务主链路、协议边界与路由模型打稳。
@@ -82,7 +82,8 @@ Syrogo 想解决的不是“再包一层 HTTP”，而是把这些变化收敛�
   - `failover`
   - `round_robin`
   - `weighted_round_robin`
-- 支持按路由指定目标模型
+- 支持按路由指定目标模型与模型映射
+- provider 健康状态跟踪与 degraded outbound 动态跳过
 - 多类出站协议
   - `mock`
   - `openai_chat`
@@ -93,6 +94,7 @@ Syrogo 想解决的不是“再包一层 HTTP”，而是把这些变化收敛�
 - 部分兼容链路采用本地回放流式输出
 - 最小 tool calling 闭环
 - `openai_responses` 的兼容能力声明
+- quota 运行时治理，支持 snapshot 持久化、最近事件与 admin 统计接口
 - 本地开发日志与 trace 调试能力
 - 关键链路单元测试、回归测试与流程测试
 
@@ -102,7 +104,7 @@ Syrogo 想解决的不是“再包一层 HTTP”，而是把这些变化收敛�
 | --- | --- | --- |
 | 入口协议 | `openai_chat`、`openai_responses`、`anthropic_messages` | 对外路径分别是 `/v1/chat/completions`、`/v1/responses`、`/v1/messages` |
 | 出站协议 | `mock`、`openai_chat`、`openai_responses`、`anthropic_messages` | 路由按 tag 选择 outbound |
-| 路由能力 | `failover`、`round_robin`、`target_model` 覆盖 | 从 inbound client tag 开始匹配 |
+| 路由能力 | `failover`、`round_robin`、`weighted_round_robin`、`target_model`、`model_map` | 从 inbound client tag 开始匹配 |
 | 流式能力 | Chat / Responses / Messages 的 SSE 序列化 | 部分兼容链路会本地回放 `runtime.StreamEvent`，不是上游逐帧透传 |
 | Tool calling | 最小 function tool loop 与 custom tool 覆盖 | Responses 与 Anthropic bridge 路径已有回归测试 |
 | Responses capability | `responses_previous_response_id`、`responses_builtin_tools`、`responses_tool_result_status_error`、`responses_assistant_history_native` | capability 声明仅适用于 `openai_responses` outbound |
@@ -242,7 +244,27 @@ SYROGO_ACCOUNTING_ADMIN_TOKEN=<accounting-admin-token> \
 make smoke
 ```
 
-### 7. 声明 Responses 兼容能力
+### 7. 映射路由模型
+
+如果一条 route 需要接受多个入口模型名，并把它们映射成上游 provider 使用的模型名，可以在 routing rule 上使用 `model_map`：
+
+```yaml
+routing:
+  rules:
+    - name: "responses-route"
+      from_tags:
+        - "responses"
+      to_tags:
+        - "responses-primary"
+      strategy: "failover"
+      model_map:
+        gpt-4: "gpt-4o-mini"
+        claude-sonnet-4-6: "gpt-5.4"
+```
+
+如果整条规则固定覆盖为一个目标模型，使用 `target_model`；如果要按请求模型逐项映射，使用 `model_map`。同一条规则不能同时配置两者。
+
+### 8. 声明 Responses 兼容能力
 
 如果某个 `openai_responses` 上游只兼容官方 Responses 的一部分能力，可以在 outbound 上显式声明能力边界：
 
@@ -260,7 +282,7 @@ outbounds:
       responses_assistant_history_native: true
 ```
 
-### 8. 声明 usage estimation 回补
+### 9. 声明 usage estimation 回补
 
 如果某个 `openai_chat` 或 `anthropic_messages` 上游没有返回 `usage`，可以在 outbound 上开启平台侧启发式补算：
 
@@ -283,7 +305,7 @@ outbounds:
 - 只在上游缺失 `usage` 时触发
 - 返回的是平台侧近似值，不是 provider 账单真值
 
-### 9. 限制 client 请求配额窗口
+### 10. 限制 client 请求配额窗口
 
 对于 client 侧治理，可以在单个 inbound client 上配置请求配额窗口：
 
@@ -321,7 +343,7 @@ curl http://127.0.0.1:23234/stats/client-quota \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-### 10. 跟踪 outbound 配额窗口
+### 11. 跟踪 outbound 配额窗口
 
 对于存在多个重叠请求限制的上游订阅，可以在 outbound 上启用 outbound-only quota tracker：
 
@@ -359,7 +381,32 @@ curl http://127.0.0.1:23234/stats/quota \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-### 11. 查看 usage 聚合统计
+### 12. 持久化与查看 quota 治理状态
+
+Syrogo 可以把运行时 quota 状态持久化到本地，重启后恢复最近的 client/outbound 窗口与 outbound cooldown：
+
+```yaml
+governance:
+  quota:
+    snapshot:
+      enabled: true
+      dir: "./tmp/quota"
+      flush_interval: "5s"
+    events:
+      enabled: true
+      max_entries: 200
+```
+
+使用 accounting admin token 可以在一个响应里查看 quota 状态与最近 quota 事件：
+
+```bash
+curl http://127.0.0.1:23234/stats/governance \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+```
+
+响应包含 provider health、outbound quota、client quota，以及 `client_limited`、`outbound_limited`、`outbound_quota_exceeded`、`outbound_probe_succeeded` 等最近事件。处于 degraded 状态的 outbound 会在执行时被跳过，以便优先尝试 fallback step。
+
+### 13. 查看 usage 聚合统计
 
 Syrogo 现在提供一个独立的 accounting 只读端点，用于查看 usage 聚合结果。
 

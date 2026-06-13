@@ -12,8 +12,10 @@ import (
 )
 
 type Dispatcher struct {
-	store        accounting.Store
-	quotaTracker *quota.Tracker
+	store         accounting.Store
+	quotaTracker  *quota.Tracker
+	healthTracker *provider.HealthTracker
+	eventRecorder *quota.EventRecorder
 }
 
 func NewDispatcher() *Dispatcher {
@@ -25,10 +27,18 @@ func NewDispatcherWithStore(store accounting.Store) *Dispatcher {
 }
 
 func NewDispatcherWithStoreAndQuota(store accounting.Store, quotaTracker *quota.Tracker) *Dispatcher {
+	return NewDispatcherWithStoreQuotaAndEvents(store, quotaTracker, nil)
+}
+
+func NewDispatcherWithStoreQuotaAndEvents(store accounting.Store, quotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder) *Dispatcher {
+	return NewDispatcherWithStoreQuotaHealthAndEvents(store, quotaTracker, nil, eventRecorder)
+}
+
+func NewDispatcherWithStoreQuotaHealthAndEvents(store accounting.Store, quotaTracker *quota.Tracker, healthTracker *provider.HealthTracker, eventRecorder *quota.EventRecorder) *Dispatcher {
 	if store == nil {
 		store = accounting.NewMemoryStore()
 	}
-	return &Dispatcher{store: store, quotaTracker: quotaTracker}
+	return &Dispatcher{store: store, quotaTracker: quotaTracker, healthTracker: healthTracker, eventRecorder: eventRecorder}
 }
 
 func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan runtime.ExecutionPlan) (runtime.Response, error) {
@@ -53,13 +63,18 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan run
 
 		decision := d.beforeAttempt(step.OutboundName)
 		if !decision.Allowed {
+			d.recordOutboundLimited(step.OutboundName, decision)
 			lastErr = provider.NewQuotaExceededError(fmt.Errorf("outbound %q quota %s", step.OutboundName, decision.Reason))
+			continue
+		}
+		if healthDecision := d.beforeHealthAttempt(step.OutboundName); !healthDecision.Allowed {
+			lastErr = provider.NewRetryableError(fmt.Errorf("outbound %q health %s", step.OutboundName, healthDecision.Reason))
 			continue
 		}
 
 		resp, err := step.OutboundTarget.ChatCompletion(ctx, stepReq)
 		if err == nil {
-			d.recordSuccess(step.OutboundName)
+			d.recordSuccess(step.OutboundName, decision.Probe)
 			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, resp.Model, resp.Usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), i))
 			return resp, nil
 		}
@@ -103,13 +118,18 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 
 		decision := d.beforeAttempt(step.OutboundName)
 		if !decision.Allowed {
+			d.recordOutboundLimited(step.OutboundName, decision)
 			lastErr = provider.NewQuotaExceededError(fmt.Errorf("outbound %q quota %s", step.OutboundName, decision.Reason))
+			continue
+		}
+		if healthDecision := d.beforeHealthAttempt(step.OutboundName); !healthDecision.Allowed {
+			lastErr = provider.NewRetryableError(fmt.Errorf("outbound %q health %s", step.OutboundName, healthDecision.Reason))
 			continue
 		}
 
 		events, err := step.OutboundTarget.StreamCompletion(ctx, stepReq)
 		if err == nil {
-			return d.wrapStream(ctx, plan, step, stepReq.Model, i, startedAt, events), nil
+			return d.wrapStream(ctx, plan, step, stepReq.Model, i, startedAt, events, decision.Probe), nil
 		}
 
 		lastErr = err
@@ -143,11 +163,25 @@ func (d *Dispatcher) QueryQuota() []quota.SnapshotItem {
 	return d.quotaTracker.Snapshot()
 }
 
+func (d *Dispatcher) QueryQuotaEvents() []quota.Event {
+	if d.eventRecorder == nil {
+		return nil
+	}
+	return d.eventRecorder.Snapshot()
+}
+
+func (d *Dispatcher) QueryProviderHealth() []provider.HealthSnapshotItem {
+	if d.healthTracker == nil {
+		return nil
+	}
+	return d.healthTracker.Snapshot()
+}
+
 func (d *Dispatcher) Close(ctx context.Context) error {
 	return d.store.Close(ctx)
 }
 
-func (d *Dispatcher) wrapStream(ctx context.Context, plan runtime.ExecutionPlan, step runtime.ExecutionStep, requestedModel string, fallbackCount int, startedAt time.Time, events <-chan runtime.StreamEvent) <-chan runtime.StreamEvent {
+func (d *Dispatcher) wrapStream(ctx context.Context, plan runtime.ExecutionPlan, step runtime.ExecutionStep, requestedModel string, fallbackCount int, startedAt time.Time, events <-chan runtime.StreamEvent, probe bool) <-chan runtime.StreamEvent {
 	out := make(chan runtime.StreamEvent)
 	go func() {
 		defer close(out)
@@ -171,6 +205,7 @@ func (d *Dispatcher) wrapStream(ctx context.Context, plan runtime.ExecutionPlan,
 			out <- event
 		}
 		if !recorded {
+			d.recordSuccess(step.OutboundName, probe)
 			d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), fallbackCount))
 		}
 	}()
@@ -184,16 +219,44 @@ func (d *Dispatcher) beforeAttempt(outbound string) quota.Decision {
 	return d.quotaTracker.BeforeAttempt(outbound)
 }
 
-func (d *Dispatcher) recordSuccess(outbound string) {
+func (d *Dispatcher) beforeHealthAttempt(outbound string) provider.HealthDecision {
+	if d.healthTracker == nil {
+		return provider.HealthDecision{Allowed: true}
+	}
+	return d.healthTracker.BeforeAttempt(outbound)
+}
+
+func (d *Dispatcher) recordSuccess(outbound string, probe bool) {
 	if d.quotaTracker != nil {
 		d.quotaTracker.RecordSuccess(outbound)
+	}
+	if d.healthTracker != nil {
+		d.healthTracker.RecordSuccess(outbound)
+	}
+	if probe {
+		d.eventRecorder.Record(quota.Event{Type: quota.EventOutboundProbeSucceeded, Outbound: outbound})
 	}
 }
 
 func (d *Dispatcher) recordProviderError(outbound string, kind provider.ErrorKind) {
+	if d.healthTracker != nil {
+		d.healthTracker.RecordFailure(outbound, kind)
+	}
 	if d.quotaTracker != nil && kind == provider.ErrorKindQuotaExceeded {
 		d.quotaTracker.RecordQuotaExceeded(outbound)
+		d.eventRecorder.Record(quota.Event{Type: quota.EventOutboundQuotaExceeded, Outbound: outbound, Reason: string(kind)})
 	}
+}
+
+func (d *Dispatcher) recordOutboundLimited(outbound string, decision quota.Decision) {
+	d.eventRecorder.Record(quota.Event{Type: quota.EventOutboundLimited, Outbound: outbound, Reason: decision.Reason, RetryAfter: formatRetryAfter(decision.RetryAfter)})
+}
+
+func formatRetryAfter(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 func (d *Dispatcher) record(record runtime.UsageRecord) {

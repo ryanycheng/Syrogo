@@ -26,7 +26,7 @@ Environment:
   SYROGO_OPENAI_CLIENT_TOKEN       Token for /v1/chat/completions
   SYROGO_RESPONSES_CLIENT_TOKEN    Token for /v1/responses
   SYROGO_ANTHROPIC_CLIENT_TOKEN    Token for /v1/messages
-  SYROGO_ACCOUNTING_ADMIN_TOKEN    Optional token for /stats/usage
+  SYROGO_ACCOUNTING_ADMIN_TOKEN    Optional token for /stats/usage and governance stats
   SYROGO_SMOKE_CHAT_MODEL          Chat model, default gpt-4o-mini
   SYROGO_SMOKE_RESPONSES_MODEL     Responses model, default gpt-4o-mini
   SYROGO_SMOKE_MESSAGES_MODEL      Messages model, default claude-sonnet-4-5
@@ -107,6 +107,34 @@ request_stream() {
   log "PASS: $name stream HTTP $status"
 }
 
+request_json_contains() {
+  local name="$1" method="$2" path="$3" token="$4" body_file="$5" auth_header="$6"
+  shift 6
+  local out status pattern
+  out="${TMP_DIR:-$(mktemp -d)}/$name.out"
+  TMP_DIR="$(dirname "$out")"
+  if [ -n "$body_file" ]; then
+    status="$(curl -sS -o "$out" -w '%{http_code}' -X "$method" "$BASE_URL$path" \
+      -H "$auth_header: $token" \
+      -H 'Content-Type: application/json' \
+      --data-binary "@$body_file")"
+  else
+    status="$(curl -sS -o "$out" -w '%{http_code}' -X "$method" "$BASE_URL$path" \
+      -H "$auth_header: $token")"
+  fi
+  if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+    fail "$name returned HTTP $status: $(tr '\n' ' ' < "$out" | cut -c 1-300)"
+    return
+  fi
+  for pattern in "$@"; do
+    if ! grep -q "$pattern" "$out"; then
+      fail "$name response missing $pattern"
+      return
+    fi
+  done
+  log "PASS: $name HTTP $status"
+}
+
 check_healthz() {
   local out status
   TMP_DIR="${TMP_DIR:-$(mktemp -d)}"
@@ -160,13 +188,16 @@ check_messages() {
   fi
 }
 
-check_usage() {
+check_admin_stats() {
   if [ -z "$ADMIN_TOKEN" ]; then
-    skip 'SYROGO_ACCOUNTING_ADMIN_TOKEN is not set; skipping /stats/usage'
+    skip 'SYROGO_ACCOUNTING_ADMIN_TOKEN is not set; skipping admin stats'
     return
   fi
   request_json usage_by_key GET '/stats/usage?group_by=key' "Bearer $ADMIN_TOKEN" '' Authorization
   request_json usage_by_provider GET '/stats/usage?group_by=provider' "Bearer $ADMIN_TOKEN" '' Authorization
+  request_json quota_stats GET /stats/quota "Bearer $ADMIN_TOKEN" '' Authorization
+  request_json client_quota_stats GET /stats/client-quota "Bearer $ADMIN_TOKEN" '' Authorization
+  request_json_contains governance_stats GET /stats/governance "Bearer $ADMIN_TOKEN" '' Authorization '"provider_health"' '"quota"' '"events"'
 }
 
 main() {
@@ -181,7 +212,7 @@ main() {
   check_chat
   check_responses
   check_messages
-  check_usage
+  check_admin_stats
 
   if [ "$RAN_PROTOCOLS" -eq 0 ]; then
     fail 'no protocol checks were executed; set at least one client token environment variable'

@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -147,6 +148,51 @@ func TestNewExposesConfiguredClientQuotaStats(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"client":"office-key"`) || !strings.Contains(w.Body.String(), `"name":"hourly"`) {
 		t.Fatalf("body = %s, want client quota state for office-key hourly", w.Body.String())
+	}
+}
+
+func TestNewRestoresQuotaSnapshot(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Governance.Quota.Snapshot = config.GovernanceQuotaSnapshotConfig{Enabled: true, Dir: t.TempDir(), FlushInterval: config.DurationValue("1h")}
+	cfg.Inbounds[0].Clients[0].Quota = config.ClientQuotaConfig{
+		Enabled: true,
+		Windows: []config.QuotaWindowConfig{{Name: "hourly", Duration: config.DurationValue("1h"), MaxRequests: 1}},
+	}
+
+	first, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-4",
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "hello",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	listeners := first.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	restored, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() restore error = %v", err)
+	}
+	defer func() { _ = restored.Close(context.Background()) }()
+	listeners = restored.Server.Listeners()
+	w = httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 after restored client quota, body = %s", w.Code, w.Body.String())
 	}
 }
 

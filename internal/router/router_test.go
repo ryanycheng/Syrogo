@@ -232,6 +232,35 @@ func TestPlanRuleCanOverrideTargetModel(t *testing.T) {
 	}
 }
 
+func TestPlanRuleCanMapRequestModel(t *testing.T) {
+	r, err := New(config.RoutingConfig{Rules: []config.RoutingRule{{
+		Name:     "office",
+		FromTags: []string{"office"},
+		ToTags:   []string{"mock-a"},
+		Strategy: "failover",
+		ModelMap: map[string]string{"gpt-4": "gpt-4o-mini"},
+	}}}, testProviders(), testOutbounds())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	plan, err := r.Plan(runtime.RouteContext{Request: runtime.Request{Model: "gpt-4"}, ActiveTag: "office"})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if plan.Steps[0].Model != "gpt-4o-mini" {
+		t.Fatalf("Plan().Steps[0].Model = %q, want mapped model", plan.Steps[0].Model)
+	}
+
+	plan, err = r.Plan(runtime.RouteContext{Request: runtime.Request{Model: "claude-sonnet-4-6"}, ActiveTag: "office"})
+	if err != nil {
+		t.Fatalf("Plan() unmatched model error = %v", err)
+	}
+	if plan.Steps[0].Model != "claude-sonnet-4-6" {
+		t.Fatalf("Plan().Steps[0].Model = %q, want original model", plan.Steps[0].Model)
+	}
+}
+
 func TestPlanFailsWhenNoRuleMatches(t *testing.T) {
 	r, err := New(config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", FromTags: []string{"office"}, ToTags: []string{"mock-a"}, Strategy: "failover"}}}, testProviders(), testOutbounds())
 	if err != nil {

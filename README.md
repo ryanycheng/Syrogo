@@ -11,7 +11,7 @@
 > Route model traffic with clearer boundaries, multi-protocol access, and gateway-ready orchestration.
 
 - **Multi-protocol inbounds** — OpenAI Chat, OpenAI Responses, and Anthropic Messages in one gateway.
-- **Routing for real scenarios** — route by client tag, target model, failover, and round_robin.
+- **Routing for real scenarios** — route by client tag, model mapping, failover, and round_robin.
 - **Provider-ready execution** — connect multiple upstreams without pushing protocol differences into every client.
 
 Syrogo is an AI Gateway / Semantic Router for multi-model scenarios.
@@ -21,7 +21,7 @@ It is not just a thin proxy for forwarding a single protocol. It sits between cl
 - multiple upstream providers
 - routing by client scenario
 - client-side request quota windows
-- basic scheduling such as failover and round_robin
+- basic scheduling such as failover, round_robin, and provider health-aware fallback
 - future governance capabilities such as quota switching, usage statistics, and multi-node chaining
 
 The project is still in the 0→1 bootstrap stage. The current priority is to stabilize the main service path, protocol boundaries, and routing model.
@@ -82,7 +82,8 @@ The current version supports:
   - `failover`
   - `round_robin`
   - `weighted_round_robin`
-- route-level target model selection
+- route-level target model selection and model mapping
+- provider health tracking with degraded outbound skipping
 - multiple outbound protocols
   - `mock`
   - `openai_chat`
@@ -93,6 +94,7 @@ The current version supports:
 - local replay streaming for some compatibility paths
 - a minimal tool-calling loop
 - `openai_responses` compatibility declarations
+- runtime quota governance with snapshot persistence, recent events, and admin stats
 - local development logging and trace debugging
 - unit, regression, and flow/integration coverage for key paths
 
@@ -102,7 +104,7 @@ The current version supports:
 | --- | --- | --- |
 | Inbound protocols | `openai_chat`, `openai_responses`, `anthropic_messages` | Exposed as `/v1/chat/completions`, `/v1/responses`, `/v1/messages` |
 | Outbound protocols | `mock`, `openai_chat`, `openai_responses`, `anthropic_messages` | Routing selects outbound by tag |
-| Routing | `failover`, `round_robin`, `target_model` override | Match starts from inbound client tag |
+| Routing | `failover`, `round_robin`, `weighted_round_robin`, `target_model`, `model_map` | Match starts from inbound client tag |
 | Streaming | Chat / Responses / Messages SSE serialization | Some compatibility paths replay local `runtime.StreamEvent` instead of upstream frame passthrough |
 | Tool calling | Minimal function tool loop and custom tool coverage | Responses and Anthropic bridge paths have regression coverage |
 | Responses capabilities | `responses_previous_response_id`, `responses_builtin_tools`, `responses_tool_result_status_error`, `responses_assistant_history_native` | Capability declarations only apply to `openai_responses` outbounds |
@@ -242,7 +244,27 @@ SYROGO_ACCOUNTING_ADMIN_TOKEN=<accounting-admin-token> \
 make smoke
 ```
 
-### 7. Declare Responses compatibility
+### 7. Map route models
+
+If one route needs to accept several inbound model names and send provider-specific names upstream, use `model_map` on the routing rule:
+
+```yaml
+routing:
+  rules:
+    - name: "responses-route"
+      from_tags:
+        - "responses"
+      to_tags:
+        - "responses-primary"
+      strategy: "failover"
+      model_map:
+        gpt-4: "gpt-4o-mini"
+        claude-sonnet-4-6: "gpt-5.4"
+```
+
+Use `target_model` for one fixed model override, or `model_map` for per-request model mapping. A rule cannot set both.
+
+### 8. Declare Responses compatibility
 
 If an `openai_responses` upstream only supports part of the official Responses API, you can declare compatibility boundaries explicitly on the outbound:
 
@@ -260,7 +282,7 @@ outbounds:
       responses_assistant_history_native: true
 ```
 
-### 8. Declare usage estimation fallback
+### 9. Declare usage estimation fallback
 
 If an `openai_chat` or `anthropic_messages` upstream omits `usage`, you can let Syrogo fill a heuristic estimate on the outbound:
 
@@ -283,7 +305,7 @@ Current scope:
 - only runs when the upstream response omits `usage`
 - returns a platform-side estimate, not provider billing truth
 
-### 9. Limit client request windows
+### 10. Limit client request windows
 
 For client-side governance, you can set request quota windows on individual inbound clients:
 
@@ -321,7 +343,7 @@ curl http://127.0.0.1:23234/stats/client-quota \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-### 10. Track outbound quota windows
+### 11. Track outbound quota windows
 
 For upstream subscriptions with overlapping request limits, you can enable outbound-only quota tracking on an outbound:
 
@@ -359,7 +381,32 @@ curl http://127.0.0.1:23234/stats/quota \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-### 11. Read usage aggregates
+### 12. Persist and inspect quota governance
+
+Syrogo can persist runtime quota state locally so restart recovery keeps recent client/outbound windows and outbound cooldowns:
+
+```yaml
+governance:
+  quota:
+    snapshot:
+      enabled: true
+      dir: "./tmp/quota"
+      flush_interval: "5s"
+    events:
+      enabled: true
+      max_entries: 200
+```
+
+Use the accounting admin token to inspect quota state and recent quota events in one response:
+
+```bash
+curl http://127.0.0.1:23234/stats/governance \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+```
+
+This includes provider health, outbound quota, client quota, and recent events such as `client_limited`, `outbound_limited`, `outbound_quota_exceeded`, and `outbound_probe_succeeded`. Degraded outbounds are skipped during execution so fallback steps can be tried first.
+
+### 13. Read usage aggregates
 
 Syrogo now exposes a dedicated accounting read-only endpoint for usage aggregates.
 
@@ -457,7 +504,7 @@ accounting:
     queue_size: 4096
 ```
 
-### 12. Local debugging
+### 14. Local debugging
 
 For local development, you can use:
 

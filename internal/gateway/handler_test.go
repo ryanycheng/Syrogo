@@ -186,6 +186,56 @@ func TestQuotaStatsReturnsEmptyListWithAdminToken(t *testing.T) {
 		t.Fatalf("items = %#v, want empty list", resp.Items)
 	}
 }
+func TestGovernanceStatsRequiresAdminToken(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/stats/governance", nil))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestGovernanceStatsReturnsQuotaAndEvents(t *testing.T) {
+	providers := map[string]provider.Provider{"mock": provider.NewMock("mock")}
+	r, err := router.New(testRoutingConfig(), providers, testOutbounds())
+	if err != nil {
+		t.Fatalf("router.New() error = %v", err)
+	}
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	clientQuota := quota.NewTestClientTracker([]quota.ClientConfig{{
+		Name:    "office-key",
+		Inbound: "openai-entry",
+		Windows: []quota.WindowConfig{{Name: "hourly", Duration: time.Hour, MaxRequests: 1}},
+	}}, func() time.Time { return now })
+	recorder := quota.NewTestEventRecorder(10, func() time.Time { return now })
+	recorder.Record(quota.Event{Type: quota.EventClientLimited, Client: "office-key", Inbound: "openai-entry"})
+	health := provider.NewTestHealthTracker([]string{"mock"}, func() time.Time { return now })
+	health.RecordFailure("mock", provider.ErrorKindTimeout)
+	h := NewWithClientQuotaAndEvents(r, execution.NewDispatcherWithStoreQuotaHealthAndEvents(accounting.NewMemoryStore(), nil, health, recorder), testInbounds(), clientQuota, recorder, config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/stats/governance", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"client":"office-key"`) || !strings.Contains(body, `"type":"client_limited"`) || !strings.Contains(body, `"provider_health"`) || !strings.Contains(body, `"state":"degraded"`) {
+		t.Fatalf("body = %s, want governance quota, health, and events", body)
+	}
+}
+
 func TestClientQuotaRejectsBeforeDispatch(t *testing.T) {
 	providers := map[string]provider.Provider{"mock": provider.NewMock("mock")}
 	r, err := router.New(testRoutingConfig(), providers, testOutbounds())
@@ -198,7 +248,8 @@ func TestClientQuotaRejectsBeforeDispatch(t *testing.T) {
 		Inbound: "openai-entry",
 		Windows: []quota.WindowConfig{{Name: "tiny", Duration: time.Hour, MaxRequests: 1}},
 	}}, func() time.Time { return now })
-	h := NewWithClientQuota(r, execution.NewDispatcher(), testInbounds(), clientQuota, config.AccountingConfig{}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	recorder := quota.NewTestEventRecorder(10, func() time.Time { return now })
+	h := NewWithClientQuotaAndEvents(r, execution.NewDispatcher(), testInbounds(), clientQuota, recorder, config.AccountingConfig{}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 	mux := http.NewServeMux()
 	h.Register(mux)
 
@@ -214,8 +265,23 @@ func TestClientQuotaRejectsBeforeDispatch(t *testing.T) {
 	if second.Code != http.StatusTooManyRequests {
 		t.Fatalf("second status = %d, want 429", second.Code)
 	}
-	if !strings.Contains(second.Body.String(), "client quota exceeded") {
-		t.Fatalf("second body = %s, want client quota error", second.Body.String())
+	var quotaError struct {
+		Error        string `json:"error"`
+		Type         string `json:"type"`
+		QuotaSubject string `json:"quota_subject"`
+		Inbound      string `json:"inbound"`
+		Reason       string `json:"reason"`
+		RetryAfter   string `json:"retry_after"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &quotaError); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if quotaError.Error != "client quota exceeded" || quotaError.Type != quota.EventClientLimited || quotaError.QuotaSubject != "office-key" || quotaError.Inbound != "openai-entry" || quotaError.Reason != quota.StateLimited || quotaError.RetryAfter == "" {
+		t.Fatalf("quota error = %#v, want structured client quota error", quotaError)
+	}
+	events := recorder.Snapshot()
+	if len(events) != 1 || events[0].Type != quota.EventClientLimited || events[0].Client != "office-key" || events[0].Inbound != "openai-entry" {
+		t.Fatalf("events = %#v, want client limited event", events)
 	}
 }
 

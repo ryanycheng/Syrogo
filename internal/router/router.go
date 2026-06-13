@@ -14,7 +14,7 @@ type compiledRule struct {
 	fromTags         []string
 	toTags           []string
 	strategy         runtime.RoutingStrategy
-	targetModel      string
+	modelMap         map[string]string
 	resolvedSet      []string
 	weightedResolved []string
 }
@@ -68,10 +68,7 @@ func (r *Router) Plan(ctx runtime.RouteContext) (runtime.ExecutionPlan, error) {
 		}
 
 		steps := make([]runtime.ExecutionStep, 0, len(ordered))
-		model := ctx.Request.Model
-		if rule.targetModel != "" {
-			model = rule.targetModel
-		}
+		model := rule.resolveModel(ctx.Request.Model)
 		for _, outboundName := range ordered {
 			target := r.providers[outboundName]
 			steps = append(steps, runtime.ExecutionStep{
@@ -132,12 +129,36 @@ func compileRules(rules []config.RoutingRule, outboundByTag map[string][]string)
 			fromTags:         append([]string(nil), rule.FromTags...),
 			toTags:           append([]string(nil), rule.ToTags...),
 			strategy:         runtime.RoutingStrategy(rule.Strategy),
-			targetModel:      rule.TargetModel,
+			modelMap:         compileModelMap(rule),
 			resolvedSet:      resolved,
 			weightedResolved: weightedResolved,
 		})
 	}
 	return compiled
+}
+
+func compileModelMap(rule config.RoutingRule) map[string]string {
+	if rule.TargetModel != "" {
+		return map[string]string{"*": rule.TargetModel}
+	}
+	if len(rule.ModelMap) == 0 {
+		return nil
+	}
+	modelMap := make(map[string]string, len(rule.ModelMap))
+	for from, to := range rule.ModelMap {
+		modelMap[from] = to
+	}
+	return modelMap
+}
+
+func (r compiledRule) resolveModel(requestedModel string) string {
+	if mapped := r.modelMap[requestedModel]; mapped != "" {
+		return mapped
+	}
+	if mapped := r.modelMap["*"]; mapped != "" {
+		return mapped
+	}
+	return requestedModel
 }
 
 func expandWeightedResolved(rule config.RoutingRule, outboundByTag map[string][]string) []string {

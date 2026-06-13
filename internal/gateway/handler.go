@@ -22,6 +22,7 @@ type Handler struct {
 	dispatcher         *execution.Dispatcher
 	inbounds           []config.InboundSpec
 	clientQuotaTracker *quota.Tracker
+	eventRecorder      *quota.EventRecorder
 	registry           *InboundRegistry
 	logger             *slog.Logger
 	accounting         config.AccountingConfig
@@ -52,6 +53,10 @@ func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.I
 }
 
 func NewWithClientQuota(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
+	return NewWithClientQuotaAndEvents(r, dispatcher, inbounds, clientQuotaTracker, nil, accountingCfg, logger)
+}
+
+func NewWithClientQuotaAndEvents(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -60,6 +65,7 @@ func NewWithClientQuota(r *router.Router, dispatcher *execution.Dispatcher, inbo
 		dispatcher:         dispatcher,
 		inbounds:           append([]config.InboundSpec(nil), inbounds...),
 		clientQuotaTracker: clientQuotaTracker,
+		eventRecorder:      eventRecorder,
 		registry:           DefaultInboundRegistry(),
 		logger:             logger,
 		accounting:         accountingCfg,
@@ -71,6 +77,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/stats/usage", h.handleUsageStats)
 	mux.HandleFunc("/stats/quota", h.handleQuotaStats)
 	mux.HandleFunc("/stats/client-quota", h.handleClientQuotaStats)
+	mux.HandleFunc("/stats/governance", h.handleGovernanceStats)
 	mux.HandleFunc("/", h.handleRequest)
 }
 
@@ -135,6 +142,29 @@ func (h *Handler) handleClientQuotaStats(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (h *Handler) handleGovernanceStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAccounting(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	clientQuota := []quota.SnapshotItem(nil)
+	if h.clientQuotaTracker != nil {
+		clientQuota = h.clientQuotaTracker.ClientSnapshot()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider_health": h.dispatcher.QueryProviderHealth(),
+		"quota": map[string]any{
+			"outbound": h.dispatcher.QueryQuota(),
+			"client":   clientQuota,
+		},
+		"events": h.eventRecorder.Snapshot(),
+	})
+}
+
 func (h *Handler) handleByCodec(w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) bool {
 	codec, ok := h.registry.Get(inbound.Protocol)
 	if !ok {
@@ -161,6 +191,10 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/stats/client-quota" {
 		h.handleClientQuotaStats(w, r)
+		return
+	}
+	if r.URL.Path == "/stats/governance" {
+		h.handleGovernanceStats(w, r)
 		return
 	}
 
@@ -199,8 +233,9 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	)
 	requestLogger.Info("request started")
 	if decision := h.beforeClientRequest(client.Name); !decision.Allowed {
+		h.recordClientLimited(client.Name, inbound.Name, decision)
 		requestLogger.Warn("request rejected", slog.String("reason", "client quota exceeded"))
-		writeError(lw, http.StatusTooManyRequests, "client quota exceeded")
+		writeClientQuotaError(lw, client.Name, inbound.Name, decision)
 		requestLogger.Info("request completed",
 			slog.Int("status", lw.statusCode),
 			slog.Duration("duration", time.Since(startedAt)),
@@ -262,6 +297,17 @@ func (h *Handler) recordClientRequest(clientName string) {
 	}
 }
 
+func (h *Handler) recordClientLimited(clientName string, inboundName string, decision quota.Decision) {
+	h.eventRecorder.Record(quota.Event{Type: quota.EventClientLimited, Client: clientName, Inbound: inboundName, Reason: decision.Reason, RetryAfter: formatRetryAfter(decision.RetryAfter)})
+}
+
+func formatRetryAfter(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
 func (h *Handler) planRequest(req runtime.Request, inbound config.InboundSpec, client config.ClientSpec) (runtime.ExecutionPlan, error) {
 	return h.router.Plan(runtime.RouteContext{
 		Request:         req,
@@ -299,6 +345,17 @@ func nonEmpty(value, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func writeClientQuotaError(w http.ResponseWriter, clientName string, inboundName string, decision quota.Decision) {
+	writeJSON(w, http.StatusTooManyRequests, map[string]string{
+		"error":         "client quota exceeded",
+		"type":          quota.EventClientLimited,
+		"quota_subject": clientName,
+		"inbound":       inboundName,
+		"reason":        decision.Reason,
+		"retry_after":   formatRetryAfter(decision.RetryAfter),
+	})
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

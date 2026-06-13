@@ -17,9 +17,10 @@ import (
 )
 
 type App struct {
-	Server          *server.HTTPServer
-	accountingStore accounting.Store
-	dispatcher      *execution.Dispatcher
+	Server             *server.HTTPServer
+	accountingStore    accounting.Store
+	dispatcher         *execution.Dispatcher
+	quotaSnapshotStore *quota.SnapshotStore
 }
 
 func New(cfg config.Config) (*App, error) {
@@ -44,21 +45,32 @@ func New(cfg config.Config) (*App, error) {
 	}
 	outboundQuotaTracker := quota.NewTrackerFromOutbounds(cfg.Outbounds)
 	clientQuotaTracker := quota.NewClientTrackerFromInbounds(cfg.Inbounds)
-	dispatcher := execution.NewDispatcherWithStoreAndQuota(store, outboundQuotaTracker)
-	listeners := buildListeners(r, dispatcher, cfg, clientQuotaTracker, slog.Default())
+	quotaSnapshotStore, err := quota.NewSnapshotStore(cfg.Governance.Quota.Snapshot, outboundQuotaTracker, clientQuotaTracker)
+	if err != nil {
+		return nil, err
+	}
+	outboundNames := make([]string, 0, len(cfg.Outbounds))
+	for _, outbound := range cfg.Outbounds {
+		outboundNames = append(outboundNames, outbound.Name)
+	}
+	healthTracker := provider.NewHealthTracker(outboundNames)
+	eventRecorder := quota.NewEventRecorder(cfg.Governance.Quota.Events)
+	dispatcher := execution.NewDispatcherWithStoreQuotaHealthAndEvents(store, outboundQuotaTracker, healthTracker, eventRecorder)
+	listeners := buildListeners(r, dispatcher, cfg, clientQuotaTracker, eventRecorder, slog.Default())
 
 	return &App{
-		Server:          server.NewListeners(listeners),
-		accountingStore: store,
-		dispatcher:      dispatcher,
+		Server:             server.NewListeners(listeners),
+		accountingStore:    store,
+		dispatcher:         dispatcher,
+		quotaSnapshotStore: quotaSnapshotStore,
 	}, nil
 }
 
-func buildListeners(r *router.Router, dispatcher *execution.Dispatcher, cfg config.Config, clientQuotaTracker *quota.Tracker, logger *slog.Logger) []server.Listener {
+func buildListeners(r *router.Router, dispatcher *execution.Dispatcher, cfg config.Config, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, logger *slog.Logger) []server.Listener {
 	listeners := make([]server.Listener, 0, len(cfg.Listeners))
 	for _, listener := range cfg.Listeners {
 		mux := http.NewServeMux()
-		gateway.NewWithClientQuota(r, dispatcher, cfg.ListenerInbounds(listener), clientQuotaTracker, cfg.Accounting, logger).Register(mux)
+		gateway.NewWithClientQuotaAndEvents(r, dispatcher, cfg.ListenerInbounds(listener), clientQuotaTracker, eventRecorder, cfg.Accounting, logger).Register(mux)
 		listeners = append(listeners, server.Listener{
 			Addr:    listener.Listen,
 			Handler: mux,
@@ -68,10 +80,17 @@ func buildListeners(r *router.Router, dispatcher *execution.Dispatcher, cfg conf
 }
 
 func (a *App) Close(ctx context.Context) error {
-	if a == nil || a.dispatcher == nil {
+	if a == nil {
 		return nil
 	}
-	return a.dispatcher.Close(ctx)
+	var err error
+	if a.dispatcher != nil {
+		err = a.dispatcher.Close(ctx)
+	}
+	if closeErr := a.quotaSnapshotStore.Close(ctx); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 func newAccountingStore(cfg config.AccountingConfig) (accounting.Store, error) {
