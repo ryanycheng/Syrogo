@@ -271,6 +271,49 @@ func TestDispatchSkipsHealthDegradedOutbound(t *testing.T) {
 	}
 }
 
+func TestDispatchHealthProbeRecoversDegradedOutbound(t *testing.T) {
+	now := time.Date(2026, 6, 13, 9, 0, 0, 0, time.UTC)
+	health := provider.NewTestHealthTrackerWithProbeInterval([]string{"primary", "fallback"}, func() time.Time { return now }, time.Minute)
+	for range provider.DefaultHealthFailureThreshold {
+		health.RecordFailure("primary", provider.ErrorKindTimeout)
+	}
+	recorder := quota.NewTestEventRecorder(10, func() time.Time { return now })
+	dispatcher := NewDispatcherWithStoreQuotaHealthAndEvents(accounting.NewMemoryStore(), nil, health, recorder)
+	primary := &stubProvider{name: "primary"}
+	fallback := &stubProvider{name: "fallback", resp: runtime.Response{Model: "gpt-4", Message: runtime.Message{Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "fallback ok"}}}}}
+	plan := runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{
+		{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+		{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+	}}
+
+	resp, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, plan)
+	if err != nil {
+		t.Fatalf("Dispatch() before probe error = %v", err)
+	}
+	if primary.req.Model != "" || resp.Message.Parts[0].Text != "fallback ok" {
+		t.Fatalf("primary req = %#v resp = %#v, want degraded skip to fallback", primary.req, resp)
+	}
+
+	now = now.Add(time.Minute)
+	primary.resp = runtime.Response{Model: "gpt-4", Message: runtime.Message{Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "primary ok"}}}}
+	primary.req = runtime.Request{}
+	fallback.req = runtime.Request{}
+	resp, err = dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, plan)
+	if err != nil {
+		t.Fatalf("Dispatch() probe error = %v", err)
+	}
+	if primary.req.Model != "gpt-4" || fallback.req.Model != "" || resp.Message.Parts[0].Text != "primary ok" {
+		t.Fatalf("primary req = %#v fallback req = %#v resp = %#v, want successful primary probe", primary.req, fallback.req, resp)
+	}
+	items := dispatcher.QueryProviderHealth()
+	if len(items) != 2 || items[1].State != provider.HealthAvailable || items[1].ConsecutiveFailures != 0 {
+		t.Fatalf("health = %#v, want recovered primary", items)
+	}
+	events := recorder.Snapshot()
+	if len(events) != 2 || events[0].Type != quota.EventProviderHealthLimited || events[1].Type != quota.EventProviderProbeSucceeded {
+		t.Fatalf("events = %#v, want health limited and probe succeeded", events)
+	}
+}
 func TestDispatchSkipsQuotaLimitedOutbound(t *testing.T) {
 	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
 	tracker := quota.NewTestTracker([]quota.OutboundConfig{{

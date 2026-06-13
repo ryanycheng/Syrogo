@@ -83,7 +83,7 @@ The current version supports:
   - `round_robin`
   - `weighted_round_robin`
 - route-level target model selection and model mapping
-- provider health tracking with degraded outbound skipping
+- provider health tracking with degraded/probing outbound recovery
 - multiple outbound protocols
   - `mock`
   - `openai_chat`
@@ -404,7 +404,7 @@ curl http://127.0.0.1:23234/stats/governance \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-This includes provider health, outbound quota, client quota, and recent events such as `client_limited`, `outbound_limited`, `outbound_quota_exceeded`, and `outbound_probe_succeeded`. Degraded outbounds are skipped during execution so fallback steps can be tried first.
+This includes provider health, outbound quota, client quota, and recent events such as `client_limited`, `outbound_limited`, `outbound_quota_exceeded`, `outbound_probe_succeeded`, `provider_health_limited`, and `provider_probe_succeeded`. Degraded outbounds are skipped during execution, then move into `probing` when the next real request is allowed to test recovery.
 
 ### 13. Read usage aggregates
 

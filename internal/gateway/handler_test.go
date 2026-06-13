@@ -216,7 +216,9 @@ func TestGovernanceStatsReturnsQuotaAndEvents(t *testing.T) {
 	recorder := quota.NewTestEventRecorder(10, func() time.Time { return now })
 	recorder.Record(quota.Event{Type: quota.EventClientLimited, Client: "office-key", Inbound: "openai-entry"})
 	health := provider.NewTestHealthTracker([]string{"mock"}, func() time.Time { return now })
-	health.RecordFailure("mock", provider.ErrorKindTimeout)
+	for range provider.DefaultHealthFailureThreshold {
+		health.RecordFailure("mock", provider.ErrorKindTimeout)
+	}
 	h := NewWithClientQuotaAndEvents(r, execution.NewDispatcherWithStoreQuotaHealthAndEvents(accounting.NewMemoryStore(), nil, health, recorder), testInbounds(), clientQuota, recorder, config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 
 	mux := http.NewServeMux()
@@ -231,8 +233,8 @@ func TestGovernanceStatsReturnsQuotaAndEvents(t *testing.T) {
 		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, `"client":"office-key"`) || !strings.Contains(body, `"type":"client_limited"`) || !strings.Contains(body, `"provider_health"`) || !strings.Contains(body, `"state":"degraded"`) {
-		t.Fatalf("body = %s, want governance quota, health, and events", body)
+	if !strings.Contains(body, `"client":"office-key"`) || !strings.Contains(body, `"type":"client_limited"`) || !strings.Contains(body, `"provider_health"`) || !strings.Contains(body, `"state":"degraded"`) || !strings.Contains(body, `"next_probe_at"`) {
+		t.Fatalf("body = %s, want governance quota, health, probe, and events", body)
 	}
 }
 

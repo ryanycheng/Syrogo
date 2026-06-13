@@ -83,7 +83,7 @@ Syrogo 想解决的不是“再包一层 HTTP”，而是把这些变化收敛�
   - `round_robin`
   - `weighted_round_robin`
 - 支持按路由指定目标模型与模型映射
-- provider 健康状态跟踪与 degraded outbound 动态跳过
+- provider 健康状态跟踪与 degraded/probing outbound 恢复
 - 多类出站协议
   - `mock`
   - `openai_chat`
@@ -404,7 +404,7 @@ curl http://127.0.0.1:23234/stats/governance \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-响应包含 provider health、outbound quota、client quota，以及 `client_limited`、`outbound_limited`、`outbound_quota_exceeded`、`outbound_probe_succeeded` 等最近事件。处于 degraded 状态的 outbound 会在执行时被跳过，以便优先尝试 fallback step。
+响应包含 provider health、outbound quota、client quota，以及 `client_limited`、`outbound_limited`、`outbound_quota_exceeded`、`outbound_probe_succeeded`、`provider_health_limited`、`provider_probe_succeeded` 等最近事件。处于 degraded 状态的 outbound 会在执行时被跳过，等下一次真实请求允许探测恢复时进入 `probing`。
 
 ### 13. 查看 usage 聚合统计
 

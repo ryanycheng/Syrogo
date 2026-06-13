@@ -12,6 +12,8 @@ const (
 	EventOutboundLimited        = "outbound_limited"
 	EventOutboundQuotaExceeded  = "outbound_quota_exceeded"
 	EventOutboundProbeSucceeded = "outbound_probe_succeeded"
+	EventProviderHealthLimited  = "provider_health_limited"
+	EventProviderProbeSucceeded = "provider_probe_succeeded"
 )
 
 type Event struct {
