@@ -88,6 +88,25 @@ type SnapshotWindow struct {
 	ResetAt   string `json:"reset_at"`
 }
 
+type PersistedState struct {
+	CapturedAt string                      `json:"captured_at"`
+	Subjects   map[string]PersistedSubject `json:"subjects"`
+}
+
+type PersistedSubject struct {
+	Name                string                          `json:"name"`
+	Inbound             string                          `json:"inbound,omitempty"`
+	CooldownUntil       string                          `json:"cooldown_until,omitempty"`
+	NextProbeAt         string                          `json:"next_probe_at,omitempty"`
+	LastQuotaExceededAt string                          `json:"last_quota_exceeded_at,omitempty"`
+	LastSuccessAt       string                          `json:"last_success_at,omitempty"`
+	Windows             map[string]PersistedWindowState `json:"windows"`
+}
+
+type PersistedWindowState struct {
+	Events []string `json:"events"`
+}
+
 func NewTracker(cfgs []OutboundConfig) *Tracker {
 	return newTrackerFromOutbounds(cfgs, time.Now)
 }
@@ -266,6 +285,82 @@ func (t *Tracker) ClientSnapshot() []SnapshotItem {
 	return t.snapshot(true)
 }
 
+func (t *Tracker) ExportState() PersistedState {
+	state := PersistedState{CapturedAt: formatTime(time.Now().UTC()), Subjects: map[string]PersistedSubject{}}
+	if t == nil {
+		return state
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now().UTC()
+	state.CapturedAt = formatTime(now)
+	for name, subject := range t.subjects {
+		subject.prune(now)
+		windows := make(map[string]PersistedWindowState, len(subject.windows))
+		for _, window := range subject.windows {
+			events := make([]string, 0, len(window.events))
+			for _, event := range window.events {
+				events = append(events, formatTime(event))
+			}
+			windows[window.name] = PersistedWindowState{Events: events}
+		}
+		state.Subjects[name] = PersistedSubject{
+			Name:                subject.name,
+			Inbound:             subject.inbound,
+			CooldownUntil:       formatTime(subject.cooldownUntil),
+			NextProbeAt:         formatTime(subject.nextProbeAt),
+			LastQuotaExceededAt: formatTime(subject.lastQuotaExceededAt),
+			LastSuccessAt:       formatTime(subject.lastSuccessAt),
+			Windows:             windows,
+		}
+	}
+	return state
+}
+
+func (t *Tracker) ImportState(persisted PersistedState) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now().UTC()
+	for name, persistedSubject := range persisted.Subjects {
+		subject := t.subjects[name]
+		if subject == nil {
+			continue
+		}
+		if value, ok := parsePersistedTime(persistedSubject.CooldownUntil); ok {
+			subject.cooldownUntil = value
+		}
+		if value, ok := parsePersistedTime(persistedSubject.NextProbeAt); ok {
+			subject.nextProbeAt = value
+		}
+		if value, ok := parsePersistedTime(persistedSubject.LastQuotaExceededAt); ok {
+			subject.lastQuotaExceededAt = value
+		}
+		if value, ok := parsePersistedTime(persistedSubject.LastSuccessAt); ok {
+			subject.lastSuccessAt = value
+		}
+		for i := range subject.windows {
+			persistedWindow, ok := persistedSubject.Windows[subject.windows[i].name]
+			if !ok {
+				continue
+			}
+			events := make([]time.Time, 0, len(persistedWindow.Events))
+			cutoff := now.Add(-subject.windows[i].duration)
+			for _, raw := range persistedWindow.Events {
+				value, ok := parsePersistedTime(raw)
+				if ok && value.After(cutoff) {
+					events = append(events, value)
+				}
+			}
+			sort.Slice(events, func(i, j int) bool { return events[i].Before(events[j]) })
+			subject.windows[i].events = events
+		}
+		subject.prune(now)
+	}
+}
+
 func (t *Tracker) snapshot(client bool) []SnapshotItem {
 	if t == nil {
 		return nil
@@ -372,6 +467,17 @@ func (s *subjectState) snapshot(now time.Time, client bool) SnapshotItem {
 		item.NextProbeAt = formatTime(retryAfter)
 	}
 	return item
+}
+
+func parsePersistedTime(value string) (time.Time, bool) {
+	if value == "" {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return parsed.UTC(), true
 }
 
 func formatTime(value time.Time) string {

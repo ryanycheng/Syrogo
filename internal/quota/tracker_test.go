@@ -89,6 +89,35 @@ func TestTrackerProbeQuotaExceededRefreshesCooldown(t *testing.T) {
 	}
 }
 
+func TestTrackerExportsAndImportsState(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	source := NewTestTracker([]OutboundConfig{{
+		Name:          "primary",
+		Cooldown:      10 * time.Minute,
+		ProbeInterval: time.Minute,
+		Windows:       []WindowConfig{{Name: "hourly", Duration: time.Hour, MaxRequests: 1}},
+	}}, func() time.Time { return now })
+	source.RecordSuccess("primary")
+	source.RecordQuotaExceeded("primary")
+	state := source.ExportState()
+
+	target := NewTestTracker([]OutboundConfig{{
+		Name:          "primary",
+		Cooldown:      10 * time.Minute,
+		ProbeInterval: time.Minute,
+		Windows:       []WindowConfig{{Name: "hourly", Duration: time.Hour, MaxRequests: 1}},
+	}}, func() time.Time { return now })
+	target.ImportState(state)
+
+	decision := target.BeforeAttempt("primary")
+	if decision.Allowed || decision.Reason != StateCooldown {
+		t.Fatalf("BeforeAttempt() after import = %#v, want cooldown", decision)
+	}
+	items := target.Snapshot()
+	if len(items) != 1 || items[0].Windows[0].Used != 1 {
+		t.Fatalf("Snapshot() after import = %#v, want restored window usage", items)
+	}
+}
 func TestTrackerSnapshotReportsWindowUsageAndCooldown(t *testing.T) {
 	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
 	tracker := NewTestTracker([]OutboundConfig{{

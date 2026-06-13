@@ -17,6 +17,7 @@ type Config struct {
 	Routing    RoutingConfig    `yaml:"routing"`
 	Outbounds  []OutboundSpec   `yaml:"outbounds"`
 	Accounting AccountingConfig `yaml:"accounting"`
+	Governance GovernanceConfig `yaml:"governance"`
 }
 
 type ServerConfig struct {
@@ -57,12 +58,13 @@ type InboundSpec struct {
 }
 
 type RoutingRule struct {
-	Name        string         `yaml:"name"`
-	FromTags    []string       `yaml:"from_tags"`
-	ToTags      []string       `yaml:"to_tags"`
-	Strategy    string         `yaml:"strategy"`
-	Weights     map[string]int `yaml:"weights"`
-	TargetModel string         `yaml:"target_model"`
+	Name        string            `yaml:"name"`
+	FromTags    []string          `yaml:"from_tags"`
+	ToTags      []string          `yaml:"to_tags"`
+	Strategy    string            `yaml:"strategy"`
+	Weights     map[string]int    `yaml:"weights"`
+	TargetModel string            `yaml:"target_model"`
+	ModelMap    map[string]string `yaml:"model_map"`
 }
 
 type RoutingConfig struct {
@@ -106,6 +108,26 @@ func (d DurationValue) Duration() time.Duration {
 		return 0
 	}
 	return parsed
+}
+
+type GovernanceConfig struct {
+	Quota GovernanceQuotaConfig `yaml:"quota"`
+}
+
+type GovernanceQuotaConfig struct {
+	Snapshot GovernanceQuotaSnapshotConfig `yaml:"snapshot"`
+	Events   GovernanceQuotaEventsConfig   `yaml:"events"`
+}
+
+type GovernanceQuotaSnapshotConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	Dir           string        `yaml:"dir"`
+	FlushInterval DurationValue `yaml:"flush_interval"`
+}
+
+type GovernanceQuotaEventsConfig struct {
+	Enabled    bool `yaml:"enabled"`
+	MaxEntries int  `yaml:"max_entries"`
 }
 
 type AccountingConfig struct {
@@ -238,6 +260,10 @@ func (c Config) Validate() error {
 		}
 	}
 
+	if err := validateGovernance(c.Governance); err != nil {
+		return err
+	}
+
 	outboundNames := make(map[string]struct{}, len(c.Outbounds))
 	outboundTags := make(map[string]struct{}, len(c.Outbounds))
 	for _, outbound := range c.Outbounds {
@@ -313,6 +339,17 @@ func (c Config) Validate() error {
 				return fmt.Errorf("routing.rules[%d].to_tags %q not found in outbounds", i, tag)
 			}
 		}
+		if rule.TargetModel != "" && len(rule.ModelMap) > 0 {
+			return fmt.Errorf("routing.rules[%d].model_map cannot be used with target_model", i)
+		}
+		for from, to := range rule.ModelMap {
+			if from == "" {
+				return fmt.Errorf("routing.rules[%d].model_map contains empty source model", i)
+			}
+			if to == "" {
+				return fmt.Errorf("routing.rules[%d].model_map.%s must not be empty", i, from)
+			}
+		}
 		if rule.Strategy == "weighted_round_robin" {
 			if len(rule.Weights) == 0 {
 				return fmt.Errorf("routing.rules[%d].weights is required when strategy=weighted_round_robin", i)
@@ -339,6 +376,21 @@ func (c Config) Validate() error {
 	}
 
 	_ = outboundNames
+	return nil
+}
+
+func validateGovernance(cfg GovernanceConfig) error {
+	if cfg.Quota.Snapshot.Enabled {
+		if cfg.Quota.Snapshot.Dir == "" {
+			return fmt.Errorf("governance.quota.snapshot.dir is required when governance.quota.snapshot.enabled=true")
+		}
+		if cfg.Quota.Snapshot.FlushInterval.Duration() <= 0 {
+			return fmt.Errorf("governance.quota.snapshot.flush_interval must be a positive duration")
+		}
+	}
+	if cfg.Quota.Events.Enabled && cfg.Quota.Events.MaxEntries <= 0 {
+		return fmt.Errorf("governance.quota.events.max_entries must be greater than 0")
+	}
 	return nil
 }
 

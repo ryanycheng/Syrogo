@@ -256,6 +256,46 @@ func TestConfigValidateRequiresPositiveClientQuotaLimit(t *testing.T) {
 	}
 }
 
+func TestConfigValidateSupportsGovernanceQuotaSnapshot(t *testing.T) {
+	cfg := validConfig()
+	cfg.Governance.Quota.Snapshot = GovernanceQuotaSnapshotConfig{Enabled: true, Dir: "./tmp/quota", FlushInterval: DurationValue("2s")}
+	cfg.Governance.Quota.Events = GovernanceQuotaEventsConfig{Enabled: true, MaxEntries: 100}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigValidateRequiresGovernanceQuotaSnapshotDir(t *testing.T) {
+	cfg := validConfig()
+	cfg.Governance.Quota.Snapshot = GovernanceQuotaSnapshotConfig{Enabled: true, FlushInterval: DurationValue("2s")}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "governance.quota.snapshot.dir is required when governance.quota.snapshot.enabled=true" {
+		t.Fatalf("Validate() error = %v, want missing governance quota snapshot dir error", err)
+	}
+}
+
+func TestConfigValidateRequiresGovernanceQuotaSnapshotFlushInterval(t *testing.T) {
+	cfg := validConfig()
+	cfg.Governance.Quota.Snapshot = GovernanceQuotaSnapshotConfig{Enabled: true, Dir: "./tmp/quota"}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "governance.quota.snapshot.flush_interval must be a positive duration" {
+		t.Fatalf("Validate() error = %v, want invalid governance quota snapshot flush interval error", err)
+	}
+}
+
+func TestConfigValidateRequiresPositiveGovernanceQuotaEventLimit(t *testing.T) {
+	cfg := validConfig()
+	cfg.Governance.Quota.Events = GovernanceQuotaEventsConfig{Enabled: true}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "governance.quota.events.max_entries must be greater than 0" {
+		t.Fatalf("Validate() error = %v, want invalid governance quota events max entries error", err)
+	}
+}
+
 func TestConfigValidateRequiresOutboundTag(t *testing.T) {
 	cfg := validConfig()
 	cfg.Outbounds[0].Tag = ""
@@ -438,6 +478,36 @@ func TestConfigValidateRejectsUnknownToTag(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil || err.Error() != "routing.rules[0].to_tags \"missing-tag\" not found in outbounds" {
 		t.Fatalf("Validate() error = %v, want missing to_tag error", err)
+	}
+}
+
+func TestConfigValidateSupportsRoutingModelMap(t *testing.T) {
+	cfg := validConfig()
+	cfg.Routing.Rules[0].ModelMap = map[string]string{"gpt-4": "gpt-4o-mini"}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigValidateRejectsRoutingModelMapWithTargetModel(t *testing.T) {
+	cfg := validConfig()
+	cfg.Routing.Rules[0].TargetModel = "gpt-4o-mini"
+	cfg.Routing.Rules[0].ModelMap = map[string]string{"gpt-4": "gpt-4o-mini"}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "routing.rules[0].model_map cannot be used with target_model" {
+		t.Fatalf("Validate() error = %v, want model_map target_model conflict error", err)
+	}
+}
+
+func TestConfigValidateRejectsRoutingModelMapEmptyTarget(t *testing.T) {
+	cfg := validConfig()
+	cfg.Routing.Rules[0].ModelMap = map[string]string{"gpt-4": ""}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "routing.rules[0].model_map.gpt-4 must not be empty" {
+		t.Fatalf("Validate() error = %v, want empty model_map target error", err)
 	}
 }
 
