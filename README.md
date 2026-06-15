@@ -264,7 +264,7 @@ Current scope:
 
 - `claude` injects `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`
 - `codex` injects `OPENAI_BASE_URL` and `OPENAI_API_KEY`
-- `--print-env` prints the resolved environment without starting the client
+- `--print-env` prints the resolved environment in stable key order, with sensitive values redacted, without starting the client
 - the launched client still runs locally; Syrogo handles its model API traffic
 
 ### 8. Map route models

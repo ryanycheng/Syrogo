@@ -264,7 +264,7 @@ syrogo run codex --inbound responses-entry --print-env
 
 - `claude` 注入 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN`
 - `codex` 注入 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`
-- `--print-env` 只打印解析后的环境变量，不启动客户端
+- `--print-env` 按稳定 key 顺序打印解析后的环境变量，并默认脱敏敏感值，不启动客户端
 - 被启动的客户端仍在本地运行，Syrogo 负责承接它的模型 API 流量
 
 ### 8. 映射路由模型

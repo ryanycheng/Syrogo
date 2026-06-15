@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
@@ -65,10 +67,36 @@ func parseLauncherOptions(args []string, opts *launcherOptions) error {
 		return err
 	}
 	if opts.BaseURL == "" {
-		opts.BaseURL = "http://127.0.0.1:23234"
+		baseURL, err := inferLauncherBaseURL(opts.ConfigPath)
+		if err != nil {
+			return err
+		}
+		opts.BaseURL = baseURL
 	}
 	opts.Args = append([]string{agent}, fs.Args()...)
 	return nil
+}
+
+func inferLauncherBaseURL(configPath string) (string, error) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return "", err
+	}
+	listen := cfg.ListenAddress()
+	if listen == "" {
+		return "http://127.0.0.1:23234", nil
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		if strings.HasPrefix(listen, ":") {
+			return "http://127.0.0.1" + listen, nil
+		}
+		return "", fmt.Errorf("infer launcher base url from listen %q: %w", listen, err)
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("http://%s", net.JoinHostPort(host, port)), nil
 }
 
 func launchAgent(opts launcherOptions) error {
@@ -163,8 +191,9 @@ func printLaunchPlan(w io.Writer, plan launchPlan) error {
 	for key := range plan.Env {
 		keys = append(keys, key)
 	}
+	sort.Strings(keys)
 	for _, key := range keys {
-		if _, err := fmt.Fprintf(w, "%s=%s\n", key, plan.Env[key]); err != nil {
+		if _, err := fmt.Fprintf(w, "%s=%s\n", key, redactLaunchEnvValue(key, plan.Env[key])); err != nil {
 			return err
 		}
 	}
@@ -179,6 +208,14 @@ func printLaunchPlan(w io.Writer, plan launchPlan) error {
 	}
 	_, err := fmt.Fprintln(w)
 	return err
+}
+
+func redactLaunchEnvValue(key string, value string) string {
+	upperKey := strings.ToUpper(key)
+	if strings.Contains(upperKey, "TOKEN") || strings.Contains(upperKey, "KEY") || strings.Contains(upperKey, "SECRET") || strings.Contains(upperKey, "PASSWORD") {
+		return "<redacted>"
+	}
+	return value
 }
 
 func mergeEnv(base []string, extra map[string]string) []string {

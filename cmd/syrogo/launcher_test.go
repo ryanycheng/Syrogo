@@ -1,12 +1,81 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestParseLauncherOptionsInfersBaseURLFromConfig(t *testing.T) {
+	configPath := writeLauncherConfig(t, `
+listeners:
+  - name: "debug"
+    listen: ":23235"
+    inbounds: ["responses-entry"]
+inbounds:
+  - name: "responses-entry"
+    protocol: "openai_responses"
+    path: "/v1/responses"
+    clients:
+      - name: "responses-key"
+        token: "token"
+        tag: "responses"
+outbounds:
+  - name: "mock"
+    protocol: "mock"
+    tag: "mock"
+routing:
+  rules:
+    - from_tags: ["responses"]
+      to_tags: ["mock"]
+      strategy: "failover"
+`)
+
+	var opts launcherOptions
+	err := parseLauncherOptions([]string{"codex", "--config", configPath, "exec", "hello"}, &opts)
+	if err != nil {
+		t.Fatalf("parseLauncherOptions() error = %v", err)
+	}
+	if opts.BaseURL != "http://127.0.0.1:23235" {
+		t.Fatalf("opts.BaseURL = %q, want inferred debug port", opts.BaseURL)
+	}
+}
+
+func TestParseLauncherOptionsKeepsExplicitBaseURL(t *testing.T) {
+	configPath := writeLauncherConfig(t, `
+server:
+  listen: ":23235"
+inbounds:
+  - name: "responses-entry"
+    protocol: "openai_responses"
+    path: "/v1/responses"
+    clients:
+      - name: "responses-key"
+        token: "token"
+        tag: "responses"
+outbounds:
+  - name: "mock"
+    protocol: "mock"
+    tag: "mock"
+routing:
+  rules:
+    - from_tags: ["responses"]
+      to_tags: ["mock"]
+      strategy: "failover"
+`)
+
+	var opts launcherOptions
+	err := parseLauncherOptions([]string{"codex", "--config", configPath, "--base-url", "http://gateway.local", "exec", "hello"}, &opts)
+	if err != nil {
+		t.Fatalf("parseLauncherOptions() error = %v", err)
+	}
+	if opts.BaseURL != "http://gateway.local" {
+		t.Fatalf("opts.BaseURL = %q, want explicit base URL", opts.BaseURL)
+	}
+}
 
 func TestBuildLaunchPlanForClaude(t *testing.T) {
 	configPath := writeLauncherConfig(t, `
@@ -108,6 +177,38 @@ func TestMergeEnvOverridesExistingValues(t *testing.T) {
 	joined := strings.Join(got, "\n")
 	if !strings.Contains(joined, "OPENAI_API_KEY=new") || !strings.Contains(joined, "OPENAI_BASE_URL=http://gateway") || !strings.Contains(joined, "PATH=/bin") || strings.Contains(joined, "OPENAI_API_KEY=old") {
 		t.Fatalf("mergeEnv() = %#v, want overridden env", got)
+	}
+}
+
+func TestPrintLaunchPlanSortsEnvironment(t *testing.T) {
+	var buf bytes.Buffer
+	err := printLaunchPlan(&buf, launchPlan{
+		Command: "codex",
+		Args:    []string{"exec", "hello"},
+		Env: map[string]string{
+			"OPENAI_API_KEY":  "token",
+			"OPENAI_BASE_URL": "http://gateway",
+		},
+	})
+	if err != nil {
+		t.Fatalf("printLaunchPlan() error = %v", err)
+	}
+	want := "OPENAI_API_KEY=<redacted>\nOPENAI_BASE_URL=http://gateway\ncommand=codex exec hello\n"
+	if buf.String() != want {
+		t.Fatalf("printLaunchPlan() = %q, want %q", buf.String(), want)
+	}
+}
+
+func TestRedactLaunchEnvValue(t *testing.T) {
+	cases := map[string]string{
+		"ANTHROPIC_AUTH_TOKEN": "<redacted>",
+		"OPENAI_API_KEY":       "<redacted>",
+		"OPENAI_BASE_URL":      "http://gateway",
+	}
+	for key, want := range cases {
+		if got := redactLaunchEnvValue(key, "http://gateway"); got != want {
+			t.Fatalf("redactLaunchEnvValue(%q) = %q, want %q", key, got, want)
+		}
 	}
 }
 
