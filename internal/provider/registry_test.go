@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
@@ -8,18 +9,37 @@ import (
 
 func TestFactoryRegistryNewBuildsRegisteredProvider(t *testing.T) {
 	registry := NewFactoryRegistry()
-	if err := registry.Register("mock", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error) {
+	if err := registry.Register("mock", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) (Provider, error) {
 		return NewMock(name), nil
 	}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	got, err := registry.New("mock", "demo", "", "", config.OutboundCapabilities{})
+	got, err := registry.New("mock", "demo", "", "", config.OutboundCapabilities{}, nil)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	if got.Name() != "demo" {
 		t.Fatalf("got.Name() = %q, want demo", got.Name())
+	}
+}
+
+func TestFactoryRegistryPassesHTTPClient(t *testing.T) {
+	registry := NewFactoryRegistry()
+	client := &http.Client{}
+	var gotClient *http.Client
+	if err := registry.Register("mock", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) (Provider, error) {
+		gotClient = httpClient
+		return NewMock(name), nil
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	if _, err := registry.New("mock", "demo", "", "", config.OutboundCapabilities{}, client); err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if gotClient != client {
+		t.Fatalf("factory httpClient = %#v, want passed client", gotClient)
 	}
 }
 
@@ -38,7 +58,7 @@ func TestDefaultFactoryRegistryRegistersCoreProtocols(t *testing.T) {
 
 func TestFactoryRegistryRejectsDuplicateRegister(t *testing.T) {
 	registry := NewFactoryRegistry()
-	factory := func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error) {
+	factory := func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) (Provider, error) {
 		return NewMock(name), nil
 	}
 	if err := registry.Register("mock", factory); err != nil {
@@ -54,7 +74,7 @@ func TestFactoryRegistryRejectsDuplicateRegister(t *testing.T) {
 func TestFactoryRegistryRejectsUnknownProtocol(t *testing.T) {
 	registry := NewFactoryRegistry()
 
-	_, err := registry.New("missing", "demo", "", "", config.OutboundCapabilities{})
+	_, err := registry.New("missing", "demo", "", "", config.OutboundCapabilities{}, nil)
 	if err == nil || err.Error() != "unsupported provider protocol \"missing\"" {
 		t.Fatalf("New() error = %v, want unsupported provider protocol error", err)
 	}

@@ -287,7 +287,28 @@ routing:
 
 Use `target_model` for one fixed model override, or `model_map` for per-request model mapping. A rule cannot set both.
 
-### 9. Declare Responses compatibility
+### 9. Configure outbound proxy
+
+If one upstream provider needs a dedicated network exit, configure a proxy on that outbound:
+
+```yaml
+outbounds:
+  - name: "openai-primary"
+    protocol: "openai_chat"
+    endpoint: "https://api.openai.com/v1"
+    auth_token: "${OPENAI_API_KEY_PRIMARY}"
+    tag: "openai-primary"
+    proxy:
+      url: "http://127.0.0.1:7890"
+```
+
+Scope:
+
+- proxy settings are per outbound, not global
+- unset `proxy.url` keeps the default outbound HTTP behavior
+- current proxy URL schemes are `http`, `https`, and `socks5`
+
+### 10. Declare Responses compatibility
 
 If an `openai_responses` upstream only supports part of the official Responses API, you can declare compatibility boundaries explicitly on the outbound:
 
@@ -305,7 +326,7 @@ outbounds:
       responses_assistant_history_native: true
 ```
 
-### 10. Declare usage estimation fallback
+### 11. Declare usage estimation fallback
 
 If an `openai_chat` or `anthropic_messages` upstream omits `usage`, you can let Syrogo fill a heuristic estimate on the outbound:
 
@@ -328,7 +349,7 @@ Current scope:
 - only runs when the upstream response omits `usage`
 - returns a platform-side estimate, not provider billing truth
 
-### 11. Limit client request windows
+### 12. Limit client request windows
 
 For client-side governance, you can set request quota windows on individual inbound clients:
 
@@ -366,7 +387,7 @@ curl http://127.0.0.1:23234/stats/client-quota \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-### 12. Track outbound quota windows
+### 13. Track outbound quota windows
 
 For upstream subscriptions with overlapping request limits, you can enable outbound-only quota tracking on an outbound:
 
@@ -404,7 +425,7 @@ curl http://127.0.0.1:23234/stats/quota \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-### 13. Persist and inspect quota governance
+### 14. Persist and inspect quota governance
 
 Syrogo can persist runtime quota state locally so restart recovery keeps recent client/outbound windows and outbound cooldowns:
 
@@ -429,7 +450,7 @@ curl http://127.0.0.1:23234/stats/governance \
 
 This includes provider health, outbound quota, client quota, and recent events such as `client_limited`, `outbound_limited`, `outbound_quota_exceeded`, `outbound_probe_succeeded`, `provider_health_limited`, and `provider_probe_succeeded`. Degraded outbounds are skipped during execution, then move into `probing` when the next real request is allowed to test recovery.
 
-### 14. Read usage aggregates
+### 15. Read usage aggregates
 
 Syrogo now exposes a dedicated accounting read-only endpoint for usage aggregates.
 
@@ -527,7 +548,7 @@ accounting:
     queue_size: 4096
 ```
 
-### 15. Local debugging
+### 16. Local debugging
 
 For local development, you can use:
 

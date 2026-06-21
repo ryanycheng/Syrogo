@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/protocol"
@@ -79,6 +81,11 @@ type OutboundSpec struct {
 	Tag          string               `yaml:"tag"`
 	Capabilities OutboundCapabilities `yaml:"capabilities"`
 	Quota        OutboundQuotaConfig  `yaml:"quota"`
+	Proxy        OutboundProxyConfig  `yaml:"proxy"`
+}
+
+type OutboundProxyConfig struct {
+	URL string `yaml:"url"`
 }
 
 type OutboundQuotaConfig struct {
@@ -314,6 +321,9 @@ func (c Config) Validate() error {
 				return fmt.Errorf("outbounds.%s.usage_estimation_mode %q is unsupported", outbound.Name, outbound.Capabilities.UsageEstimationMode)
 			}
 		}
+		if err := validateOutboundProxy(outbound); err != nil {
+			return err
+		}
 		if err := validateOutboundQuota(outbound); err != nil {
 			return err
 		}
@@ -400,6 +410,26 @@ func validateClientQuota(inboundName string, index int, client ClientSpec) error
 		return nil
 	}
 	return validateQuotaWindows(fmt.Sprintf("inbounds.%s.clients[%d].quota", inboundName, index), quota.Windows)
+}
+
+func validateOutboundProxy(outbound OutboundSpec) error {
+	proxyURL := strings.TrimSpace(outbound.Proxy.URL)
+	if proxyURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		return fmt.Errorf("outbounds.%s.proxy.url is invalid: %w", outbound.Name, err)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("outbounds.%s.proxy.url host is required", outbound.Name)
+	}
+	switch parsed.Scheme {
+	case "http", "https", "socks5":
+		return nil
+	default:
+		return fmt.Errorf("outbounds.%s.proxy.url has unsupported scheme %q", outbound.Name, parsed.Scheme)
+	}
 }
 
 func validateOutboundQuota(outbound OutboundSpec) error {

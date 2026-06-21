@@ -27,7 +27,11 @@ func New(cfg config.Config) (*App, error) {
 	providers := make(map[string]provider.Provider, len(cfg.Outbounds))
 	registry := provider.DefaultFactoryRegistry()
 	for _, spec := range cfg.Outbounds {
-		instance, err := registry.New(spec.Protocol, spec.Name, spec.Endpoint, spec.AuthToken, spec.Capabilities)
+		httpClient, err := provider.NewHTTPClient(spec.Proxy)
+		if err != nil {
+			return nil, fmt.Errorf("create outbound %q http client: %w", spec.Name, err)
+		}
+		instance, err := registry.New(spec.Protocol, spec.Name, spec.Endpoint, spec.AuthToken, spec.Capabilities, httpClient)
 		if err != nil {
 			return nil, err
 		}

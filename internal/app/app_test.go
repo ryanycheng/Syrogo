@@ -81,6 +81,53 @@ func TestNewSucceedsWithOpenAICompatibleProvider(t *testing.T) {
 	}
 }
 
+func TestNewUsesOutboundProxy(t *testing.T) {
+	seen := make(chan string, 1)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.URL.String()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-proxy","object":"chat.completion","created":1,"model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"proxied"},"finish_reason":"stop"}]}`))
+	}))
+	defer proxy.Close()
+
+	cfg := baseConfig()
+	cfg.Outbounds = []config.OutboundSpec{{
+		Name:      "openai",
+		Protocol:  "openai_chat",
+		Endpoint:  "http://upstream.example/v1",
+		AuthToken: "key-1",
+		Tag:       "openai-tag",
+		Proxy:     config.OutboundProxyConfig{URL: proxy.URL},
+	}}
+	cfg.Routing.Rules[0].ToTags = []string{"openai-tag"}
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-4",
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "hello",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	listeners := app.Server.Listeners()
+	w := httptest.NewRecorder()
+	listeners[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+
+	got := <-seen
+	if got != "http://upstream.example/v1/chat/completions" {
+		t.Fatalf("proxy saw URL %q, want upstream chat completions URL", got)
+	}
+}
+
 func TestNewSucceedsWithAnthropicMessagesProvider(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Outbounds = []config.OutboundSpec{{

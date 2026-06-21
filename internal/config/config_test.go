@@ -671,6 +671,46 @@ func TestConfigValidateRequiresPositiveAccountingLocalFileFlushInterval(t *testi
 		t.Fatalf("Validate() error = %v, want invalid flush_interval error", err)
 	}
 }
+func TestConfigValidateSupportsOutboundProxyURL(t *testing.T) {
+	for _, proxyURL := range []string{
+		"http://127.0.0.1:7890",
+		"https://proxy.example:443",
+		"socks5://127.0.0.1:1080",
+	} {
+		t.Run(proxyURL, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Outbounds[0].Proxy = OutboundProxyConfig{URL: proxyURL}
+
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestConfigValidateRejectsInvalidOutboundProxyURL(t *testing.T) {
+	cases := []struct {
+		name     string
+		proxyURL string
+		wantErr  string
+	}{
+		{name: "missing-host", proxyURL: "http://", wantErr: "outbounds.mock.proxy.url host is required"},
+		{name: "unsupported-scheme", proxyURL: "ftp://proxy.example:21", wantErr: "outbounds.mock.proxy.url has unsupported scheme \"ftp\""},
+		{name: "invalid-url", proxyURL: "http://[::1", wantErr: "outbounds.mock.proxy.url is invalid: parse \"http://[::1\": missing ']' in host"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Outbounds[0].Proxy = OutboundProxyConfig{URL: tc.proxyURL}
+
+			err := cfg.Validate()
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("Validate() error = %v, want %s", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestConfigValidateSupportsOutboundQuotaWindows(t *testing.T) {
 	cfg := validConfig()
 	cfg.Outbounds[0].Quota = OutboundQuotaConfig{

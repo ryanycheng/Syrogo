@@ -2,13 +2,14 @@ package provider
 
 import (
 	"fmt"
+	"net/http"
 	"sort"
 	"sync"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
 )
 
-type Factory func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error)
+type Factory func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) (Provider, error)
 
 type FactoryRegistry struct {
 	mu        sync.RWMutex
@@ -45,7 +46,7 @@ func (r *FactoryRegistry) MustRegister(protocol string, factory Factory) {
 	}
 }
 
-func (r *FactoryRegistry) New(protocol, name, endpoint, authToken string, capabilities config.OutboundCapabilities) (Provider, error) {
+func (r *FactoryRegistry) New(protocol, name, endpoint, authToken string, capabilities config.OutboundCapabilities, httpClient *http.Client) (Provider, error) {
 	r.mu.RLock()
 	factory, ok := r.factories[protocol]
 	r.mu.RUnlock()
@@ -57,7 +58,7 @@ func (r *FactoryRegistry) New(protocol, name, endpoint, authToken string, capabi
 	if authToken != "" {
 		apiKeys = []string{authToken}
 	}
-	return factory(name, endpoint, apiKeys, capabilities)
+	return factory(name, endpoint, apiKeys, capabilities, httpClient)
 }
 
 func (r *FactoryRegistry) Has(protocol string) bool {
@@ -86,17 +87,17 @@ func DefaultFactoryRegistry() *FactoryRegistry {
 
 func newDefaultFactoryRegistry() *FactoryRegistry {
 	registry := NewFactoryRegistry()
-	registry.MustRegister("mock", func(name, _ string, _ []string, _ config.OutboundCapabilities) (Provider, error) {
+	registry.MustRegister("mock", func(name, _ string, _ []string, _ config.OutboundCapabilities, _ *http.Client) (Provider, error) {
 		return NewMock(name), nil
 	})
-	registry.MustRegister("openai_chat", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error) {
-		return NewOpenAICompatibleWithCapabilities(name, endpoint, apiKeys, capabilities, nil), nil
+	registry.MustRegister("openai_chat", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) (Provider, error) {
+		return NewOpenAICompatibleWithCapabilities(name, endpoint, apiKeys, capabilities, httpClient), nil
 	})
-	registry.MustRegister("openai_responses", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error) {
-		return NewOpenAIResponsesCompatible(name, endpoint, apiKeys, capabilities, nil), nil
+	registry.MustRegister("openai_responses", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) (Provider, error) {
+		return NewOpenAIResponsesCompatible(name, endpoint, apiKeys, capabilities, httpClient), nil
 	})
-	registry.MustRegister("anthropic_messages", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities) (Provider, error) {
-		return NewAnthropicMessagesCompatibleWithCapabilities(name, endpoint, apiKeys, capabilities, nil), nil
+	registry.MustRegister("anthropic_messages", func(name, endpoint string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) (Provider, error) {
+		return NewAnthropicMessagesCompatibleWithCapabilities(name, endpoint, apiKeys, capabilities, httpClient), nil
 	})
 	return registry
 }
