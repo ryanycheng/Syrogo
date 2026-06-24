@@ -172,6 +172,51 @@ func TestParseLauncherOptionsRejectsUnsupportedAgent(t *testing.T) {
 	}
 }
 
+func TestDefaultLauncherConfigPathPrefersLocalConfig(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() error = %v", err)
+	}
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "configs"), 0o755); err != nil {
+		t.Fatalf("os.Mkdir() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "configs", "config.yaml"), []byte("server:\n  listen: ':23234'\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("os.Chdir() error = %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Fatalf("restore cwd error = %v", err)
+		}
+	}()
+
+	if got := defaultLauncherConfigPath(); got != filepath.Join(".", "configs", "config.yaml") {
+		t.Fatalf("defaultLauncherConfigPath() = %q, want local config", got)
+	}
+}
+
+func TestDefaultLauncherConfigPathFallsBackToInstalledConfig(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() error = %v", err)
+	}
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("os.Chdir() error = %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Fatalf("restore cwd error = %v", err)
+		}
+	}()
+
+	if got := defaultLauncherConfigPath(); got != installedConfigPath {
+		t.Fatalf("defaultLauncherConfigPath() = %q, want installed config", got)
+	}
+}
 func TestMergeEnvOverridesExistingValues(t *testing.T) {
 	got := mergeEnv([]string{"OPENAI_API_KEY=old", "PATH=/bin"}, map[string]string{"OPENAI_API_KEY": "new", "OPENAI_BASE_URL": "http://gateway"})
 	joined := strings.Join(got, "\n")

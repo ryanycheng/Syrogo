@@ -90,6 +90,7 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 安装器会自动：
 - 安装到 `/opt/syrogo`
 - 把二进制安装到 `/opt/syrogo/bin/syrogo`
+- 创建 `/usr/local/bin/syrogo`，让普通 shell 可以直接使用 `syrogo` 命令
 - 安装 `syrogo.service` 到 `/etc/systemd/system/syrogo.service`
 - 启用并重启 `syrogo` 服务
 - 最后对 `http://127.0.0.1:23234/healthz` 做一次健康检查
@@ -210,7 +211,7 @@ sudo systemctl restart syrogo
 sudo bash ./scripts/install.sh --uninstall
 ```
 
-`--purge-config` 目前仅为了兼容保留；由于默认配置本来就在 `/opt/syrogo` 下面，卸载时不会再有额外效果。
+`--purge-config` 目前仅为了兼容保留；由于默认配置本来就在 `/opt/syrogo` 下面，卸载时不会再有额外效果。如果 `/usr/local/bin/syrogo` 是指向 `/opt/syrogo/bin/syrogo` 的软链接，安装器也会一起移除。
 
 ---
 

@@ -180,7 +180,7 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0
 ```
 
-Without `--version` or `--archive`, the installer resolves the latest GitHub release automatically. It uses `/opt/syrogo/config/config.yaml` as the default config path, reuses the same command path for upgrades, and keeps the installed config unless you pass `--force-config`.
+Without `--version` or `--archive`, the installer resolves the latest GitHub release automatically. It uses `/opt/syrogo/config/config.yaml` as the default config path, creates `/usr/local/bin/syrogo` so `syrogo run ...` is available from normal shells, and keeps the installed config unless you pass `--force-config`.
 
 For complete deployment examples, see [`docs/deploy.md`](./docs/deploy.md).
 
@@ -253,11 +253,11 @@ syrogo run claude -- --model claude-sonnet-4-6
 syrogo run codex -- exec "Reply with exactly: syrogo-ok"
 ```
 
-By default, `claude` selects one `anthropic_messages` inbound client and `codex` selects one `openai_responses` inbound client from `configs/config.yaml`. If there are multiple matching clients, pass `--client` or `--inbound`:
+By default, `claude` selects one `anthropic_messages` inbound client and `codex` selects one `openai_responses` inbound client. In a source checkout, `syrogo run` uses `./configs/config.yaml` when it exists; installed binaries fall back to `/opt/syrogo/config/config.yaml`. You can also pass `--config` before or after the subcommand. If there are multiple matching clients, pass `--client` or `--inbound`:
 
 ```bash
-syrogo run claude --client anthropic-key --base-url http://127.0.0.1:23234
-syrogo run codex --inbound responses-entry --print-env
+syrogo --config /opt/syrogo/config/config.yaml run claude --client anthropic-key --base-url http://127.0.0.1:23234
+syrogo run codex --config ./configs/config.yaml --inbound responses-entry --print-env
 ```
 
 If you want your current shell to use Syrogo directly, evaluate the activation output:

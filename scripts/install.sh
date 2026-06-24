@@ -5,6 +5,7 @@ REPO="ryanycheng/Syrogo"
 SERVICE_NAME="syrogo"
 INSTALL_ROOT="/opt/syrogo"
 BIN_PATH="$INSTALL_ROOT/bin/syrogo"
+SYMLINK_PATH="/usr/local/bin/syrogo"
 CONFIG_PATH="$INSTALL_ROOT/config/config.yaml"
 DEFAULT_CONFIG_SOURCE="$INSTALL_ROOT/config/config.yaml"
 CONFIG_SOURCE="$DEFAULT_CONFIG_SOURCE"
@@ -41,6 +42,7 @@ Options:
   --force-config         Overwrite /opt/syrogo/config/config.yaml from --config
   --user <name>          Service user (default: syrogo)
   --install-root <path>  Install root (default: /opt/syrogo)
+  --symlink <path>       Command symlink path (default: /usr/local/bin/syrogo)
   --health-url <url>     Health check URL (default: http://127.0.0.1:23234/healthz)
   --skip-healthcheck     Skip final health check
   -h, --help             Show this help
@@ -50,7 +52,7 @@ Notes:
   - Without --version or --archive, the installer uses the latest GitHub release with a short timeout.
   - On first install, if /opt/syrogo/config/config.yaml is missing, the installer downloads config.example.yaml there.
   - With --version, the example config is fetched from the matching release tag.
-  - With --archive or latest release install, the example config is fetched from master.
+  - The installer creates a symlink at /usr/local/bin/syrogo so the command is available from PATH.
   - The installer keeps an existing installed config by default.
   - Pass --force-config if you want to replace /opt/syrogo/config/config.yaml from --config.
   - --uninstall removes the default config together with /opt/syrogo.
@@ -123,6 +125,11 @@ parse_args() {
       --install-root)
         [ "$#" -ge 2 ] || fail "missing value for --install-root"
         INSTALL_ROOT="$2"
+        shift 2
+        ;;
+      --symlink)
+        [ "$#" -ge 2 ] || fail "missing value for --symlink"
+        SYMLINK_PATH="$2"
         shift 2
         ;;
       --health-url)
@@ -256,6 +263,22 @@ extract_binary() {
   install -m 0755 "$binary_source" "$BIN_PATH"
 }
 
+install_symlink() {
+  local symlink_dir current_target
+  symlink_dir="$(dirname "$SYMLINK_PATH")"
+  install -d -m 0755 "$symlink_dir"
+  if [ -e "$SYMLINK_PATH" ] || [ -L "$SYMLINK_PATH" ]; then
+    if [ -L "$SYMLINK_PATH" ]; then
+      current_target="$(readlink "$SYMLINK_PATH")"
+      if [ "$current_target" = "$BIN_PATH" ]; then
+        return
+      fi
+    fi
+    fail "command path already exists and is not managed by this installer: $SYMLINK_PATH"
+  fi
+  ln -s "$BIN_PATH" "$SYMLINK_PATH"
+  log "installed command symlink: $SYMLINK_PATH -> $BIN_PATH"
+}
 install_or_keep_config() {
   if [ -f "$CONFIG_PATH" ] && [ "$FORCE_CONFIG" -eq 0 ]; then
     log "config unchanged: $CONFIG_PATH"
@@ -293,6 +316,27 @@ WantedBy=multi-user.target
 EOF
 }
 
+remove_symlink() {
+  local current_target
+  if [ ! -L "$SYMLINK_PATH" ]; then
+    if [ -e "$SYMLINK_PATH" ]; then
+      log "command path exists but is not a symlink, leaving unchanged: $SYMLINK_PATH"
+    else
+      log "command symlink not found: $SYMLINK_PATH"
+    fi
+    return
+  fi
+
+  current_target="$(readlink "$SYMLINK_PATH")"
+  if [ "$current_target" != "$BIN_PATH" ]; then
+    log "command symlink points elsewhere, leaving unchanged: $SYMLINK_PATH -> $current_target"
+    return
+  fi
+
+  rm -f "$SYMLINK_PATH"
+  log "removed command symlink: $SYMLINK_PATH"
+}
+
 uninstall_service() {
   if [ "$INSTALL_ROOT" != "/opt/syrogo" ]; then
     fail "refusing to uninstall unexpected install root: $INSTALL_ROOT"
@@ -308,6 +352,8 @@ uninstall_service() {
   fi
 
   systemctl daemon-reload
+
+  remove_symlink
 
   if [ -d "$INSTALL_ROOT" ]; then
     rm -rf "$INSTALL_ROOT"
@@ -360,12 +406,14 @@ main() {
   fi
   ensure_service_user
   extract_binary
+  install_symlink
   install_or_keep_config
   install_unit
   chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_ROOT"
   start_service
   healthcheck
   log "installed Syrogo to $INSTALL_ROOT"
+  log "command path: $SYMLINK_PATH"
   log "config path: $CONFIG_PATH"
   if [ "$CONFIG_INITIALIZED" -eq 1 ]; then
     log "example config initialized at $DEFAULT_CONFIG_SOURCE"

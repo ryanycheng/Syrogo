@@ -8,11 +8,14 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
 )
+
+const installedConfigPath = "/opt/syrogo/config/config.yaml"
 
 type launcherOptions struct {
 	ConfigPath string
@@ -75,7 +78,7 @@ func parseActivateOptions(args []string, opts *launcherOptions) error {
 
 	fs := flag.NewFlagSet("activate "+agent, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.ConfigPath, "config", "./configs/config.yaml", "path to config file")
+	fs.StringVar(&opts.ConfigPath, "config", defaultLauncherConfigPath(), "path to config file")
 	fs.StringVar(&opts.BaseURL, "base-url", "", "Syrogo base URL")
 	fs.StringVar(&opts.Client, "client", "", "client name in config")
 	fs.StringVar(&opts.Inbound, "inbound", "", "inbound name in config")
@@ -107,7 +110,7 @@ func parseLauncherOptions(args []string, opts *launcherOptions) error {
 
 	fs := flag.NewFlagSet("run "+agent, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.ConfigPath, "config", "./configs/config.yaml", "path to config file")
+	fs.StringVar(&opts.ConfigPath, "config", defaultLauncherConfigPath(), "path to config file")
 	fs.StringVar(&opts.BaseURL, "base-url", "", "Syrogo base URL")
 	fs.StringVar(&opts.Client, "client", "", "client name in config")
 	fs.StringVar(&opts.Inbound, "inbound", "", "inbound name in config")
@@ -125,6 +128,14 @@ func parseLauncherOptions(args []string, opts *launcherOptions) error {
 	}
 	opts.Args = append([]string{agent}, fs.Args()...)
 	return nil
+}
+
+func defaultLauncherConfigPath() string {
+	localConfig := filepath.Join(".", "configs", "config.yaml")
+	if _, err := os.Stat(localConfig); err == nil {
+		return localConfig
+	}
+	return installedConfigPath
 }
 
 func inferLauncherBaseURL(configPath string) (string, error) {

@@ -29,12 +29,13 @@ func main() {
 }
 
 func runMain() int {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	args := os.Args[1:]
+	if command, commandArgs, ok := splitCommandArgs(args); ok {
+		switch command {
 		case "run":
-			return runLauncher(os.Args[2:])
+			return runLauncher(commandArgs)
 		case "activate":
-			return runActivate(os.Args[2:])
+			return runActivate(commandArgs)
 		}
 	}
 
@@ -60,6 +61,32 @@ func runMain() int {
 		return 1
 	}
 	return 0
+}
+
+func splitCommandArgs(args []string) (string, []string, bool) {
+	for index, arg := range args {
+		if arg != "run" && arg != "activate" {
+			continue
+		}
+
+		commandArgs := append([]string(nil), args[index+1:]...)
+		prefix := args[:index]
+		for i := 0; i < len(prefix); i++ {
+			switch prefix[i] {
+			case "--config", "-config":
+				if i+1 < len(prefix) {
+					commandArgs = append([]string{"--config", prefix[i+1]}, commandArgs...)
+					i++
+				}
+			default:
+				if value, ok := strings.CutPrefix(prefix[i], "--config="); ok {
+					commandArgs = append([]string{"--config", value}, commandArgs...)
+				}
+			}
+		}
+		return arg, commandArgs, true
+	}
+	return "", nil, false
 }
 
 func run(configPath string, devLogEnabled bool) error {

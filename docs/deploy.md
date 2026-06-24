@@ -90,6 +90,7 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 The installer will:
 - install Syrogo into `/opt/syrogo`
 - install the binary into `/opt/syrogo/bin/syrogo`
+- create `/usr/local/bin/syrogo` so the command is available from normal shells
 - install `syrogo.service` into `/etc/systemd/system/syrogo.service`
 - enable and restart the `syrogo` service
 - run a final `/healthz` check against `http://127.0.0.1:23234/healthz`
@@ -210,7 +211,7 @@ To remove the service and all installed contents under `/opt/syrogo`:
 sudo bash ./scripts/install.sh --uninstall
 ```
 
-`--purge-config` is currently kept only for compatibility. Since the default config already lives under `/opt/syrogo`, it has no extra effect during uninstall.
+`--purge-config` is currently kept only for compatibility. Since the default config already lives under `/opt/syrogo`, it has no extra effect during uninstall. The installer also removes `/usr/local/bin/syrogo` when it is a symlink to `/opt/syrogo/bin/syrogo`.
 
 ---
 

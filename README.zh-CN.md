@@ -180,7 +180,7 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0
 ```
 
-如果不传 `--version` 或 `--archive`，安装器会自动解析 GitHub 上的 latest release。安装器默认使用 `/opt/syrogo/config/config.yaml` 作为配置路径，升级复用同一条命令路径，且默认保留已安装配置；只有显式传 `--force-config` 才会覆盖。
+如果不传 `--version` 或 `--archive`，安装器会自动解析 GitHub 上的 latest release。安装器默认使用 `/opt/syrogo/config/config.yaml` 作为配置路径，并创建 `/usr/local/bin/syrogo`，让普通 shell 可以直接执行 `syrogo run ...`；默认保留已安装配置，只有显式传 `--force-config` 才会覆盖。
 
 完整部署示例请见 [`docs/deploy.zh-CN.md`](./docs/deploy.zh-CN.md)。
 
@@ -253,11 +253,11 @@ syrogo run claude -- --model claude-sonnet-4-6
 syrogo run codex -- exec "Reply with exactly: syrogo-ok"
 ```
 
-默认情况下，`claude` 会从 `configs/config.yaml` 中选择一个 `anthropic_messages` inbound client，`codex` 会选择一个 `openai_responses` inbound client。如果有多个匹配 client，可以传 `--client` 或 `--inbound`：
+默认情况下，`claude` 会选择一个 `anthropic_messages` inbound client，`codex` 会选择一个 `openai_responses` inbound client。在源码目录中，`syrogo run` 会优先使用存在的 `./configs/config.yaml`；安装后的二进制从其他目录运行时会回退到 `/opt/syrogo/config/config.yaml`。也可以把 `--config` 放在子命令前或后显式指定配置。如果有多个匹配 client，可以传 `--client` 或 `--inbound`：
 
 ```bash
-syrogo run claude --client anthropic-key --base-url http://127.0.0.1:23234
-syrogo run codex --inbound responses-entry --print-env
+syrogo --config /opt/syrogo/config/config.yaml run claude --client anthropic-key --base-url http://127.0.0.1:23234
+syrogo run codex --config ./configs/config.yaml --inbound responses-entry --print-env
 ```
 
 如果希望当前 shell 直接使用 Syrogo，可以执行 activation 输出：
