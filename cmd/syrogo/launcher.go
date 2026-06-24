@@ -46,6 +46,56 @@ func runLauncher(args []string) int {
 	return 0
 }
 
+func runActivate(args []string) int {
+	opts := launcherOptions{Stdout: os.Stdout, Stderr: os.Stderr, Stdin: os.Stdin}
+	if err := parseActivateOptions(args, &opts); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	plan, err := buildLaunchPlan(opts)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := printShellExports(opts.Stdout, plan.Env); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
+func parseActivateOptions(args []string, opts *launcherOptions) error {
+	if len(args) == 0 {
+		return errors.New("usage: syrogo activate <claude|codex> [--config path] [--client name] [--inbound name] [--base-url url] [--token token]")
+	}
+	agent := args[0]
+	if agent != "claude" && agent != "codex" {
+		return fmt.Errorf("unsupported agent %q", agent)
+	}
+
+	fs := flag.NewFlagSet("activate "+agent, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ConfigPath, "config", "./configs/config.yaml", "path to config file")
+	fs.StringVar(&opts.BaseURL, "base-url", "", "Syrogo base URL")
+	fs.StringVar(&opts.Client, "client", "", "client name in config")
+	fs.StringVar(&opts.Inbound, "inbound", "", "inbound name in config")
+	fs.StringVar(&opts.Token, "token", "", "override Syrogo client token")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if len(fs.Args()) > 0 {
+		return errors.New("activate does not accept agent command arguments")
+	}
+	if opts.BaseURL == "" {
+		baseURL, err := inferLauncherBaseURL(opts.ConfigPath)
+		if err != nil {
+			return err
+		}
+		opts.BaseURL = baseURL
+	}
+	opts.Args = []string{agent}
+	return nil
+}
 func parseLauncherOptions(args []string, opts *launcherOptions) error {
 	if len(args) == 0 {
 		return errors.New("usage: syrogo run <claude|codex> [--config path] [--client name] [--inbound name] [--base-url url] [--token token] [--print-env] [-- <args>]")
@@ -208,6 +258,24 @@ func printLaunchPlan(w io.Writer, plan launchPlan) error {
 	}
 	_, err := fmt.Fprintln(w)
 	return err
+}
+
+func printShellExports(w io.Writer, env map[string]string) error {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if _, err := fmt.Fprintf(w, "export %s=%s\n", key, shellQuote(env[key])); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func redactLaunchEnvValue(key string, value string) string {

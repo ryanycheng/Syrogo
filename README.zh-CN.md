@@ -260,11 +260,21 @@ syrogo run claude --client anthropic-key --base-url http://127.0.0.1:23234
 syrogo run codex --inbound responses-entry --print-env
 ```
 
+如果希望当前 shell 直接使用 Syrogo，可以执行 activation 输出：
+
+```bash
+eval "$(syrogo activate claude --client anthropic-key)"
+eval "$(syrogo activate codex --client responses-key)"
+```
+
+如果希望新 shell 默认生效，也可以把同样的 `eval "$(syrogo activate ...)"` 放进 shell rc 文件。
+
 当前范围：
 
 - `claude` 注入 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN`
 - `codex` 注入 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`
 - `--print-env` 按稳定 key 顺序打印解析后的环境变量，并默认脱敏敏感值，不启动客户端
+- `activate` 会输出真实 shell `export` 语句供 `eval` 使用，不要把输出贴到日志里
 - 被启动的客户端仍在本地运行，Syrogo 负责承接它的模型 API 流量
 
 ### 8. 映射路由模型

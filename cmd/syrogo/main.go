@@ -29,8 +29,13 @@ func main() {
 }
 
 func runMain() int {
-	if len(os.Args) > 1 && os.Args[1] == "run" {
-		return runLauncher(os.Args[2:])
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "run":
+			return runLauncher(os.Args[2:])
+		case "activate":
+			return runActivate(os.Args[2:])
+		}
 	}
 
 	configPath := flag.String("config", "./configs/config.example.yaml", "path to config file")

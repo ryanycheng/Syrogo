@@ -260,11 +260,21 @@ syrogo run claude --client anthropic-key --base-url http://127.0.0.1:23234
 syrogo run codex --inbound responses-entry --print-env
 ```
 
+If you want your current shell to use Syrogo directly, evaluate the activation output:
+
+```bash
+eval "$(syrogo activate claude --client anthropic-key)"
+eval "$(syrogo activate codex --client responses-key)"
+```
+
+You can put the same `eval "$(syrogo activate ...)"` line in your shell rc file when you want a persistent default for new shells.
+
 Current scope:
 
 - `claude` injects `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`
 - `codex` injects `OPENAI_BASE_URL` and `OPENAI_API_KEY`
 - `--print-env` prints the resolved environment in stable key order, with sensitive values redacted, without starting the client
+- `activate` prints real shell `export` statements for `eval`, so do not paste its output into logs
 - the launched client still runs locally; Syrogo handles its model API traffic
 
 ### 8. Map route models

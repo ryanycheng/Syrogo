@@ -212,6 +212,29 @@ func TestRedactLaunchEnvValue(t *testing.T) {
 	}
 }
 
+func TestParseActivateOptionsRejectsAgentArgs(t *testing.T) {
+	var opts launcherOptions
+	err := parseActivateOptions([]string{"claude", "--", "--model", "claude-sonnet-4-6"}, &opts)
+	if err == nil || err.Error() != "activate does not accept agent command arguments" {
+		t.Fatalf("parseActivateOptions() error = %v, want extra args error", err)
+	}
+}
+
+func TestPrintShellExportsUsesRealValues(t *testing.T) {
+	var buf bytes.Buffer
+	err := printShellExports(&buf, map[string]string{
+		"OPENAI_API_KEY":  "token'with-quote",
+		"OPENAI_BASE_URL": "http://gateway",
+	})
+	if err != nil {
+		t.Fatalf("printShellExports() error = %v", err)
+	}
+	want := "export OPENAI_API_KEY='token'\\''with-quote'\nexport OPENAI_BASE_URL='http://gateway'\n"
+	if buf.String() != want {
+		t.Fatalf("printShellExports() = %q, want %q", buf.String(), want)
+	}
+}
+
 func writeLauncherConfig(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
