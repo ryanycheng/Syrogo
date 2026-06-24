@@ -88,6 +88,33 @@ func authorizedRequest(method, path, token string, body []byte) *http.Request {
 	return req
 }
 
+func validGatewayConfigYAML() string {
+	return `
+listeners:
+  - name: public
+    listen: ":8080"
+    inbounds: [openai-entry]
+inbounds:
+  - name: openai-entry
+    protocol: openai_chat
+    path: /v1/chat/completions
+    clients:
+      - name: office-key
+        token: client-token
+        tag: office
+outbounds:
+  - name: mock
+    protocol: mock
+    tag: mock-tag
+routing:
+  rules:
+    - name: office-route
+      from_tags: [office]
+      to_tags: [mock-tag]
+      strategy: failover
+`
+}
+
 func TestHealthzReturnsOK(t *testing.T) {
 	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
 
@@ -100,6 +127,61 @@ func TestHealthzReturnsOK(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestConfigValidateRequiresAdminToken(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/config/validate", strings.NewReader(validGatewayConfigYAML())))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestConfigValidateAcceptsValidConfig(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/validate", "admin-token", []byte(validGatewayConfigYAML())))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if got["ok"] != true {
+		t.Fatalf("response = %#v, want ok true", got)
+	}
+}
+
+func TestConfigValidateRejectsInvalidConfig(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/validate", "admin-token", []byte("server:\n  listen: ':8080'\n")))
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "at least one outbound is required") {
+		t.Fatalf("body = %q, want validation error", w.Body.String())
 	}
 }
 

@@ -460,7 +460,19 @@ curl http://127.0.0.1:23234/stats/governance \
 
 This includes provider health, outbound quota, client quota, and recent events such as `client_limited`, `outbound_limited`, `outbound_quota_exceeded`, `outbound_probe_succeeded`, `provider_health_limited`, and `provider_probe_succeeded`. Degraded outbounds are skipped during execution, then move into `probing` when the next real request is allowed to test recovery.
 
-### 15. Read usage aggregates
+### 15. Validate config changes
+
+Use the accounting admin token to dry-run a YAML config before replacing a live config file:
+
+```bash
+curl http://127.0.0.1:23234/admin/config/validate \
+  -H 'Authorization: Bearer <accounting-admin-token>' \
+  --data-binary @configs/config.yaml
+```
+
+This endpoint only parses and validates the submitted config. It does not reload or apply changes to running traffic.
+
+### 16. Read usage aggregates
 
 Syrogo now exposes a dedicated accounting read-only endpoint for usage aggregates.
 

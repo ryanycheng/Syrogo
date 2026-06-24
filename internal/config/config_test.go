@@ -25,6 +25,60 @@ func validConfig() Config {
 	}
 }
 
+func TestParseBytesValidatesYAMLConfig(t *testing.T) {
+	cfg, err := ParseBytes([]byte(`
+listeners:
+  - name: public
+    listen: ":8080"
+    inbounds: [openai-entry]
+inbounds:
+  - name: openai-entry
+    protocol: openai_chat
+    path: /v1/chat/completions
+    clients:
+      - name: office-key
+        token: client-token
+        tag: office
+outbounds:
+  - name: mock
+    protocol: mock
+    tag: mock-tag
+routing:
+  rules:
+    - name: office-route
+      from_tags: [office]
+      to_tags: [mock-tag]
+      strategy: failover
+`))
+	if err != nil {
+		t.Fatalf("ParseBytes() error = %v", err)
+	}
+	if cfg.Inbounds[0].Name != "openai-entry" {
+		t.Fatalf("ParseBytes() inbound = %#v, want openai-entry", cfg.Inbounds[0])
+	}
+}
+
+func TestParseBytesRejectsInvalidYAML(t *testing.T) {
+	_, err := ParseBytes([]byte("listeners: ["))
+	if err == nil {
+		t.Fatal("ParseBytes() error = nil, want YAML error")
+	}
+}
+
+func TestParseBytesRejectsInvalidConfig(t *testing.T) {
+	_, err := ParseBytes([]byte(`
+server:
+  listen: ":8080"
+outbounds:
+  - name: mock
+    protocol: mock
+    tag: mock-tag
+`))
+	if err == nil {
+		t.Fatal("ParseBytes() error = nil, want validation error")
+	}
+}
+
 func TestConfigValidateSuccess(t *testing.T) {
 	cfg := validConfig()
 	if err := cfg.Validate(); err != nil {

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -78,6 +79,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/stats/quota", h.handleQuotaStats)
 	mux.HandleFunc("/stats/client-quota", h.handleClientQuotaStats)
 	mux.HandleFunc("/stats/governance", h.handleGovernanceStats)
+	mux.HandleFunc("/admin/config/validate", h.handleConfigValidate)
 	mux.HandleFunc("/", h.handleRequest)
 }
 
@@ -165,6 +167,28 @@ func (h *Handler) handleGovernanceStats(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (h *Handler) handleConfigValidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAccounting(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read config: "+err.Error())
+		return
+	}
+	if _, err := config.ParseBytes(body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (h *Handler) handleByCodec(w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) bool {
 	codec, ok := h.registry.Get(inbound.Protocol)
 	if !ok {
@@ -195,6 +219,10 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/stats/governance" {
 		h.handleGovernanceStats(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/validate" {
+		h.handleConfigValidate(w, r)
 		return
 	}
 

@@ -460,7 +460,19 @@ curl http://127.0.0.1:23234/stats/governance \
 
 响应包含 provider health、outbound quota、client quota，以及 `client_limited`、`outbound_limited`、`outbound_quota_exceeded`、`outbound_probe_succeeded`、`provider_health_limited`、`provider_probe_succeeded` 等最近事件。处于 degraded 状态的 outbound 会在执行时被跳过，等下一次真实请求允许探测恢复时进入 `probing`。
 
-### 15. 查看 usage 聚合统计
+### 15. 校验配置变更
+
+使用 accounting admin token 可以在替换线上配置文件前，先 dry-run 校验一份 YAML 配置：
+
+```bash
+curl http://127.0.0.1:23234/admin/config/validate \
+  -H 'Authorization: Bearer <accounting-admin-token>' \
+  --data-binary @configs/config.yaml
+```
+
+这个端点只会解析并校验提交的配置，不会 reload，也不会把变更应用到当前运行流量。
+
+### 16. 查看 usage 聚合统计
 
 Syrogo 现在提供一个独立的 accounting 只读端点，用于查看 usage 聚合结果。
 

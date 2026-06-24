@@ -161,7 +161,10 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
+	return ParseBytes(data)
+}
 
+func ParseBytes(data []byte) (Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("unmarshal config: %w", err)
