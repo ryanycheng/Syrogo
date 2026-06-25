@@ -249,11 +249,11 @@ make smoke
 可以使用 `syrogo run` 启动常见 agent CLI，并自动注入指向 Syrogo 的环境变量：
 
 ```bash
-syrogo run claude -- --model claude-sonnet-4-6
-syrogo run codex -- exec "Reply with exactly: syrogo-ok"
+syrogo run claude --model claude-sonnet-4-6 --dangerously-skip-permissions
+syrogo run codex exec "Reply with exactly: syrogo-ok"
 ```
 
-默认情况下，`claude` 会选择一个 `anthropic_messages` inbound client，`codex` 会选择一个 `openai_responses` inbound client。在源码目录中，`syrogo run` 会优先使用存在的 `./configs/config.yaml`；安装后的二进制从其他目录运行时会回退到 `/opt/syrogo/config/config.yaml`。也可以把 `--config` 放在子命令前或后显式指定配置。如果有多个匹配 client，可以传 `--client` 或 `--inbound`：
+默认情况下，`claude` 会选择一个 `anthropic_messages` inbound client，`codex` 会选择一个 `openai_responses` inbound client。在源码目录中，`syrogo run` 会优先使用存在的 `./configs/config.yaml`；安装后的二进制从其他目录运行时会回退到 `/opt/syrogo/config/config.yaml`。也可以把 `--config` 放在子命令前或后显式指定配置。Syrogo launcher 自己的参数应放在 agent 原生参数前；遇到第一个 agent 原生参数后，后续参数会原样透传。如果有多个匹配 client，可以传 `--client` 或 `--inbound`：
 
 ```bash
 syrogo --config /opt/syrogo/config/config.yaml run claude --client anthropic-key --base-url http://127.0.0.1:23234

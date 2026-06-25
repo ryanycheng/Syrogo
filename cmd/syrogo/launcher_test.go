@@ -77,6 +77,77 @@ routing:
 	}
 }
 
+func TestParseLauncherOptionsPassesAgentFlagsWithoutSeparator(t *testing.T) {
+	configPath := writeLauncherConfig(t, `
+server:
+  listen: ":23234"
+inbounds:
+  - name: "anthropic-entry"
+    protocol: "anthropic_messages"
+    path: "/v1/messages"
+    clients:
+      - name: "claude-key"
+        token: "token"
+        tag: "claude"
+outbounds:
+  - name: "mock"
+    protocol: "mock"
+    tag: "mock"
+routing:
+  rules:
+    - from_tags: ["claude"]
+      to_tags: ["mock"]
+      strategy: "failover"
+`)
+
+	var opts launcherOptions
+	err := parseLauncherOptions([]string{"claude", "--config", configPath, "--client", "claude-key", "--dangerously-skip-permissions", "--model", "claude-sonnet-4-6"}, &opts)
+	if err != nil {
+		t.Fatalf("parseLauncherOptions() error = %v", err)
+	}
+	if opts.Client != "claude-key" {
+		t.Fatalf("opts.Client = %q, want claude-key", opts.Client)
+	}
+	want := []string{"claude", "--dangerously-skip-permissions", "--model", "claude-sonnet-4-6"}
+	if !reflect.DeepEqual(opts.Args, want) {
+		t.Fatalf("opts.Args = %#v, want %#v", opts.Args, want)
+	}
+}
+
+func TestParseLauncherOptionsPassesAgentCommandArguments(t *testing.T) {
+	configPath := writeLauncherConfig(t, `
+server:
+  listen: ":23235"
+inbounds:
+  - name: "responses-entry"
+    protocol: "openai_responses"
+    path: "/v1/responses"
+    clients:
+      - name: "responses-key"
+        token: "token"
+        tag: "responses"
+outbounds:
+  - name: "mock"
+    protocol: "mock"
+    tag: "mock"
+routing:
+  rules:
+    - from_tags: ["responses"]
+      to_tags: ["mock"]
+      strategy: "failover"
+`)
+
+	var opts launcherOptions
+	err := parseLauncherOptions([]string{"codex", "--config", configPath, "exec", "hello"}, &opts)
+	if err != nil {
+		t.Fatalf("parseLauncherOptions() error = %v", err)
+	}
+	want := []string{"codex", "exec", "hello"}
+	if !reflect.DeepEqual(opts.Args, want) {
+		t.Fatalf("opts.Args = %#v, want %#v", opts.Args, want)
+	}
+}
+
 func TestBuildLaunchPlanForClaude(t *testing.T) {
 	configPath := writeLauncherConfig(t, `
 server:

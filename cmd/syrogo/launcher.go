@@ -108,6 +108,7 @@ func parseLauncherOptions(args []string, opts *launcherOptions) error {
 		return fmt.Errorf("unsupported agent %q", agent)
 	}
 
+	runArgs, agentArgs := splitLauncherArgs(args[1:])
 	fs := flag.NewFlagSet("run "+agent, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.ConfigPath, "config", defaultLauncherConfigPath(), "path to config file")
@@ -116,7 +117,7 @@ func parseLauncherOptions(args []string, opts *launcherOptions) error {
 	fs.StringVar(&opts.Inbound, "inbound", "", "inbound name in config")
 	fs.StringVar(&opts.Token, "token", "", "override Syrogo client token")
 	fs.BoolVar(&opts.PrintEnv, "print-env", false, "print launcher environment instead of executing")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(runArgs); err != nil {
 		return err
 	}
 	if opts.BaseURL == "" {
@@ -126,8 +127,46 @@ func parseLauncherOptions(args []string, opts *launcherOptions) error {
 		}
 		opts.BaseURL = baseURL
 	}
-	opts.Args = append([]string{agent}, fs.Args()...)
+	opts.Args = append([]string{agent}, agentArgs...)
 	return nil
+}
+
+func splitLauncherArgs(args []string) ([]string, []string) {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if arg == "--" {
+			return append([]string(nil), args[:index]...), append([]string(nil), args[index+1:]...)
+		}
+		if !isLauncherFlag(arg) {
+			return append([]string(nil), args[:index]...), append([]string(nil), args[index:]...)
+		}
+		if requiresLauncherFlagValue(arg) && !strings.Contains(arg, "=") {
+			index++
+		}
+	}
+	return append([]string(nil), args...), nil
+}
+
+func isLauncherFlag(arg string) bool {
+	if strings.Contains(arg, "=") {
+		name, _, _ := strings.Cut(arg, "=")
+		arg = name
+	}
+	switch arg {
+	case "--config", "-config", "--base-url", "-base-url", "--client", "-client", "--inbound", "-inbound", "--token", "-token", "--print-env", "-print-env":
+		return true
+	default:
+		return false
+	}
+}
+
+func requiresLauncherFlagValue(arg string) bool {
+	switch arg {
+	case "--config", "-config", "--base-url", "-base-url", "--client", "-client", "--inbound", "-inbound", "--token", "-token":
+		return true
+	default:
+		return false
+	}
 }
 
 func defaultLauncherConfigPath() string {
