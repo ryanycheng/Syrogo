@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/accounting"
+	"github.com/ryanycheng/Syrogo/internal/latency"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/runtime"
@@ -16,6 +17,7 @@ type Dispatcher struct {
 	quotaTracker  *quota.Tracker
 	healthTracker *provider.HealthTracker
 	eventRecorder *quota.EventRecorder
+	latencyStore  *latency.Store
 }
 
 func NewDispatcher() *Dispatcher {
@@ -35,10 +37,14 @@ func NewDispatcherWithStoreQuotaAndEvents(store accounting.Store, quotaTracker *
 }
 
 func NewDispatcherWithStoreQuotaHealthAndEvents(store accounting.Store, quotaTracker *quota.Tracker, healthTracker *provider.HealthTracker, eventRecorder *quota.EventRecorder) *Dispatcher {
+	return NewDispatcherWithStoreQuotaHealthEventsAndLatency(store, quotaTracker, healthTracker, eventRecorder, nil)
+}
+
+func NewDispatcherWithStoreQuotaHealthEventsAndLatency(store accounting.Store, quotaTracker *quota.Tracker, healthTracker *provider.HealthTracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store) *Dispatcher {
 	if store == nil {
 		store = accounting.NewMemoryStore()
 	}
-	return &Dispatcher{store: store, quotaTracker: quotaTracker, healthTracker: healthTracker, eventRecorder: eventRecorder}
+	return &Dispatcher{store: store, quotaTracker: quotaTracker, healthTracker: healthTracker, eventRecorder: eventRecorder, latencyStore: latencyStore}
 }
 
 func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan runtime.ExecutionPlan) (runtime.Response, error) {
@@ -74,7 +80,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan run
 			continue
 		}
 
+		attemptStartedAt := time.Now()
 		resp, err := step.OutboundTarget.ChatCompletion(ctx, stepReq)
+		latency.RecordSpan(ctx, "provider_dispatch", attemptStartedAt, map[string]string{
+			"outbound": step.OutboundName,
+			"protocol": step.OutboundProtocol,
+		})
 		if err == nil {
 			d.recordSuccess(step.OutboundName, decision.Probe, healthDecision.Probe)
 			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, resp.Model, resp.Usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), i))
@@ -131,7 +142,13 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 			continue
 		}
 
+		attemptStartedAt := time.Now()
 		events, err := step.OutboundTarget.StreamCompletion(ctx, stepReq)
+		latency.RecordSpan(ctx, "provider_dispatch", attemptStartedAt, map[string]string{
+			"outbound": step.OutboundName,
+			"protocol": step.OutboundProtocol,
+			"stream":   "true",
+		})
 		if err == nil {
 			return d.wrapStream(ctx, plan, step, stepReq.Model, i, startedAt, events, decision.Probe, healthDecision.Probe), nil
 		}
@@ -179,6 +196,13 @@ func (d *Dispatcher) QueryProviderHealth() []provider.HealthSnapshotItem {
 		return nil
 	}
 	return d.healthTracker.Snapshot()
+}
+
+func (d *Dispatcher) QueryLatency() latency.Snapshot {
+	if d.latencyStore == nil {
+		return latency.Snapshot{}
+	}
+	return d.latencyStore.Snapshot()
 }
 
 func (d *Dispatcher) Close(ctx context.Context) error {

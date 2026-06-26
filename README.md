@@ -460,6 +460,15 @@ curl http://127.0.0.1:23234/stats/governance \
 
 This includes provider health, outbound quota, client quota, and recent events such as `client_limited`, `outbound_limited`, `outbound_quota_exceeded`, `outbound_probe_succeeded`, `provider_health_limited`, and `provider_probe_succeeded`. Degraded outbounds are skipped during execution, then move into `probing` when the next real request is allowed to test recovery.
 
+Use the same admin token to inspect recent request latency timelines:
+
+```bash
+curl http://127.0.0.1:23234/stats/latency \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+```
+
+The response includes request metadata, HTTP status, total duration, and spans such as `route_plan`, `provider_dispatch`, `upstream_round_trip`, `upstream_read`, `upstream_stream_read`, and `egress_write`. When an outbound uses a proxy, `upstream_round_trip` measures the Syrogo-to-proxy path until response headers arrive; proxy-to-upstream work is included in that wait unless the proxy exposes its own metrics.
+
 ### 15. Validate config changes
 
 Use the accounting admin token to dry-run a YAML config before replacing a live config file:

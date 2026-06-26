@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ryanycheng/Syrogo/internal/latency"
 	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
@@ -63,7 +64,12 @@ func (p *AnthropicMessagesProvider) completionWithAPIKey(ctx context.Context, re
 		CreatedAt: time.Now().Format(time.RFC3339Nano),
 	}
 
+	upstreamStartedAt := time.Now()
 	httpResp, err := p.httpClient.Do(httpReq)
+	latency.RecordSpan(ctx, "upstream_round_trip", upstreamStartedAt, map[string]string{
+		"provider": p.providerName,
+		"protocol": "anthropic_messages",
+	})
 	if err != nil {
 		trace.Error = err.Error()
 		appendProviderTraceSnapshot(trace)
@@ -73,7 +79,12 @@ func (p *AnthropicMessagesProvider) completionWithAPIKey(ctx context.Context, re
 		_ = httpResp.Body.Close()
 	}()
 
+	readStartedAt := time.Now()
 	responseBody, err := io.ReadAll(httpResp.Body)
+	latency.RecordSpan(ctx, "upstream_read", readStartedAt, map[string]string{
+		"provider": p.providerName,
+		"protocol": "anthropic_messages",
+	})
 	if err != nil {
 		trace.Status = httpResp.StatusCode
 		trace.Error = err.Error()

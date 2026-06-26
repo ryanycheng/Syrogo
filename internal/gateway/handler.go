@@ -12,6 +12,7 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/accounting"
 	"github.com/ryanycheng/Syrogo/internal/config"
 	"github.com/ryanycheng/Syrogo/internal/execution"
+	"github.com/ryanycheng/Syrogo/internal/latency"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/router"
@@ -27,16 +28,27 @@ type Handler struct {
 	registry           *InboundRegistry
 	logger             *slog.Logger
 	accounting         config.AccountingConfig
+	latencyStore       *latency.Store
 }
 
 type loggingResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
+	recorder   *latency.Recorder
 }
 
 func (w *loggingResponseWriter) WriteHeader(statusCode int) {
 	w.statusCode = statusCode
 	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *loggingResponseWriter) Write(p []byte) (int, error) {
+	startedAt := time.Now()
+	n, err := w.ResponseWriter.Write(p)
+	if w.recorder != nil {
+		w.recorder.AddSpan("egress_write", startedAt, nil)
+	}
+	return n, err
 }
 
 func (w *loggingResponseWriter) Flush() {
@@ -58,6 +70,10 @@ func NewWithClientQuota(r *router.Router, dispatcher *execution.Dispatcher, inbo
 }
 
 func NewWithClientQuotaAndEvents(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
+	return NewWithClientQuotaEventsAndLatency(r, dispatcher, inbounds, clientQuotaTracker, eventRecorder, nil, accountingCfg, logger)
+}
+
+func NewWithClientQuotaEventsAndLatency(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -70,6 +86,7 @@ func NewWithClientQuotaAndEvents(r *router.Router, dispatcher *execution.Dispatc
 		registry:           DefaultInboundRegistry(),
 		logger:             logger,
 		accounting:         accountingCfg,
+		latencyStore:       latencyStore,
 	}
 }
 
@@ -79,6 +96,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/stats/quota", h.handleQuotaStats)
 	mux.HandleFunc("/stats/client-quota", h.handleClientQuotaStats)
 	mux.HandleFunc("/stats/governance", h.handleGovernanceStats)
+	mux.HandleFunc("/stats/latency", h.handleLatencyStats)
 	mux.HandleFunc("/admin/config/validate", h.handleConfigValidate)
 	mux.HandleFunc("/", h.handleRequest)
 }
@@ -167,6 +185,18 @@ func (h *Handler) handleGovernanceStats(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (h *Handler) handleLatencyStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAccounting(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	writeJSON(w, http.StatusOK, h.dispatcher.QueryLatency())
+}
+
 func (h *Handler) handleConfigValidate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -221,6 +251,10 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		h.handleGovernanceStats(w, r)
 		return
 	}
+	if r.URL.Path == "/stats/latency" {
+		h.handleLatencyStats(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/config/validate" {
 		h.handleConfigValidate(w, r)
 		return
@@ -229,7 +263,12 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now()
 	lw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 	requestID := startedAt.Format("20060102-150405.000000000")
-	r = r.WithContext(withRequestID(r.Context(), requestID))
+	ctx, latencyRecorder := latency.Start(r.Context(), h.latencyStore, requestID, r.Method, r.URL.Path, startedAt)
+	lw.recorder = latencyRecorder
+	r = r.WithContext(withRequestID(ctx, requestID))
+	defer func() {
+		latencyRecorder.Finish(lw.statusCode, time.Now())
+	}()
 
 	inbound, client, ok := h.matchInbound(r)
 	if !ok {
@@ -248,6 +287,8 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+
+	latencyRecorder.SetRoute(inbound.Name, inbound.Protocol, client.Name, client.Tag)
 
 	requestLogger := h.logger.With(
 		slog.String("request_id", requestID),
@@ -336,14 +377,22 @@ func formatRetryAfter(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
-func (h *Handler) planRequest(req runtime.Request, inbound config.InboundSpec, client config.ClientSpec) (runtime.ExecutionPlan, error) {
-	return h.router.Plan(runtime.RouteContext{
+func (h *Handler) planRequest(ctx context.Context, req runtime.Request, inbound config.InboundSpec, client config.ClientSpec) (runtime.ExecutionPlan, error) {
+	startedAt := time.Now()
+	plan, err := h.router.Plan(runtime.RouteContext{
 		Request:         req,
 		ClientName:      client.Name,
 		InboundName:     inbound.Name,
 		InboundProtocol: inbound.Protocol,
 		ActiveTag:       client.Tag,
 	})
+	attrs := map[string]string{"inbound": inbound.Name, "active_tag": client.Tag}
+	if len(plan.Steps) > 0 {
+		attrs["matched_rule"] = plan.MatchedRule
+		attrs["outbound"] = plan.Steps[0].OutboundName
+	}
+	latency.RecordSpan(ctx, "route_plan", startedAt, attrs)
+	return plan, err
 }
 
 func gatewayError(err error) (int, string) {

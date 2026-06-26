@@ -84,7 +84,7 @@ func (anthropicMessagesCodec) Handle(h *Handler, w http.ResponseWriter, r *http.
 	}
 	debugSnapshot.Runtime = debugRuntimeRequest(internalReq)
 
-	plan, err := h.planRequest(internalReq, inbound, client)
+	plan, err := h.planRequest(r.Context(), internalReq, inbound, client)
 	if err != nil {
 		debugSnapshot.Error = err.Error()
 		if snapErr := writeInboundDebugSnapshot(debugSnapshot); snapErr != nil {

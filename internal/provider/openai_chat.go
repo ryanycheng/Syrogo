@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanycheng/Syrogo/internal/latency"
 	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
@@ -146,7 +147,13 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, req run
 		CreatedAt: time.Now().Format(time.RFC3339Nano),
 	}
 
+	upstreamStartedAt := time.Now()
 	httpResp, err := p.httpClient.Do(httpReq)
+	latency.RecordSpan(ctx, "upstream_round_trip", upstreamStartedAt, map[string]string{
+		"provider": p.providerName,
+		"protocol": "openai_chat",
+		"stream":   "true",
+	})
 	if err != nil {
 		trace.Error = err.Error()
 		appendProviderTraceSnapshot(trace)
@@ -228,9 +235,14 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, req run
 				_ = traceWriter.Close()
 			}
 		}()
+		streamReadStartedAt := time.Now()
 		for event := range events {
 			out <- event
 		}
+		latency.RecordSpan(ctx, "upstream_stream_read", streamReadStartedAt, map[string]string{
+			"provider": p.providerName,
+			"protocol": "openai_chat",
+		})
 	}()
 	return out, nil
 }
@@ -261,7 +273,12 @@ func (p *OpenAICompatibleProvider) completionWithAPIKey(ctx context.Context, req
 		CreatedAt: time.Now().Format(time.RFC3339Nano),
 	}
 
+	upstreamStartedAt := time.Now()
 	httpResp, err := p.httpClient.Do(httpReq)
+	latency.RecordSpan(ctx, "upstream_round_trip", upstreamStartedAt, map[string]string{
+		"provider": p.providerName,
+		"protocol": protocol,
+	})
 	if err != nil {
 		trace.Error = err.Error()
 		appendProviderTraceSnapshot(trace)
@@ -271,7 +288,12 @@ func (p *OpenAICompatibleProvider) completionWithAPIKey(ctx context.Context, req
 		_ = httpResp.Body.Close()
 	}()
 
+	readStartedAt := time.Now()
 	responseBody, err := io.ReadAll(httpResp.Body)
+	latency.RecordSpan(ctx, "upstream_read", readStartedAt, map[string]string{
+		"provider": p.providerName,
+		"protocol": protocol,
+	})
 	if err != nil {
 		trace.Status = httpResp.StatusCode
 		trace.Error = err.Error()

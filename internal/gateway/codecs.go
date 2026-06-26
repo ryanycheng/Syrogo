@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/ryanycheng/Syrogo/internal/latency"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
@@ -12,9 +13,11 @@ func dispatchOrWriteError(h *Handler, w http.ResponseWriter, r *http.Request, re
 	resp, err := h.dispatcher.Dispatch(r.Context(), req, plan)
 	if err != nil {
 		status, message := gatewayError(err)
+		errorKind := string(provider.NormalizeError(err))
+		latency.FromContext(r.Context()).SetErrorKind(errorKind)
 		logger.Error("request dispatch failed",
 			slog.String("model", plannedModel(plan)),
-			slog.String("error_kind", string(provider.NormalizeError(err))),
+			slog.String("error_kind", errorKind),
 			slog.Int("status", status),
 			slog.Any("error", err),
 		)

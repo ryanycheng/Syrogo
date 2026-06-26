@@ -118,7 +118,7 @@ func (openAIResponsesCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	plan, err := h.planRequest(internalReq, inbound, client)
+	plan, err := h.planRequest(r.Context(), internalReq, inbound, client)
 	if err != nil {
 		logger.Warn("request routing failed",
 			slog.String("model", req.Model),

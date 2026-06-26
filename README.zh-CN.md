@@ -460,6 +460,15 @@ curl http://127.0.0.1:23234/stats/governance \
 
 响应包含 provider health、outbound quota、client quota，以及 `client_limited`、`outbound_limited`、`outbound_quota_exceeded`、`outbound_probe_succeeded`、`provider_health_limited`、`provider_probe_succeeded` 等最近事件。处于 degraded 状态的 outbound 会在执行时被跳过，等下一次真实请求允许探测恢复时进入 `probing`。
 
+也可以使用同一个 admin token 查看最近请求的 latency timeline：
+
+```bash
+curl http://127.0.0.1:23234/stats/latency \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+```
+
+返回内容包含请求元信息、HTTP status、总耗时，以及 `route_plan`、`provider_dispatch`、`upstream_round_trip`、`upstream_read`、`upstream_stream_read`、`egress_write` 等阶段 span。配置 outbound proxy 时，`upstream_round_trip` 统计的是 Syrogo 到代理并收到响应头的耗时；代理到真实上游的内部耗时会包含在这段等待中，除非代理自身额外暴露指标，否则 Syrogo 侧无法继续拆分。
+
 ### 15. 校验配置变更
 
 使用 accounting admin token 可以在替换线上配置文件前，先 dry-run 校验一份 YAML 配置：
