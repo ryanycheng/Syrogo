@@ -205,6 +205,13 @@ func (d *Dispatcher) QueryLatency() latency.Snapshot {
 	return d.latencyStore.Snapshot()
 }
 
+func (d *Dispatcher) QueryLatencySummary() latency.Summary {
+	if d.latencyStore == nil {
+		return latency.Summary{}
+	}
+	return d.latencyStore.Summary()
+}
+
 func (d *Dispatcher) Close(ctx context.Context) error {
 	return d.store.Close(ctx)
 }

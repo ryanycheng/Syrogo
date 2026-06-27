@@ -467,7 +467,14 @@ curl http://127.0.0.1:23234/stats/latency \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-返回内容包含请求元信息、HTTP status、总耗时，以及 `route_plan`、`provider_dispatch`、`upstream_round_trip`、`upstream_read`、`upstream_stream_read`、`egress_write` 等阶段 span。配置 outbound proxy 时，`upstream_round_trip` 统计的是 Syrogo 到代理并收到响应头的耗时；代理到真实上游的内部耗时会包含在这段等待中，除非代理自身额外暴露指标，否则 Syrogo 侧无法继续拆分。
+如果要查看当前延迟分布的聚合摘要，可以查询 summary 端点：
+
+```bash
+curl http://127.0.0.1:23234/stats/latency/summary \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+```
+
+Timeline 响应包含请求元信息、HTTP status、总耗时，以及 `route_plan`、`provider_dispatch`、`upstream_round_trip`、`upstream_read`、`upstream_stream_read`、`egress_write` 等阶段 span。Summary 响应会对最近请求的总耗时和各阶段 span 聚合输出 `count`、`avg_ms`、`p50_ms`、`p95_ms`、`p99_ms`、`max_ms`。配置 outbound proxy 时，`upstream_round_trip` 统计的是 Syrogo 到代理并收到响应头的耗时；代理到真实上游的内部耗时会包含在这段等待中，除非代理自身额外暴露指标，否则 Syrogo 侧无法继续拆分。
 
 ### 15. 校验配置变更
 

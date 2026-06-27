@@ -384,6 +384,21 @@ func TestLatencyStatsRequiresAdminToken(t *testing.T) {
 	}
 }
 
+func TestLatencySummaryStatsRequiresAdminToken(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/stats/latency/summary", nil))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
 func TestLatencyStatsReturnsRecordedRequest(t *testing.T) {
 	providers := map[string]provider.Provider{"mock": provider.NewMock("mock")}
 	r, err := router.New(testRoutingConfig(), providers, testOutbounds())
@@ -414,6 +429,39 @@ func TestLatencyStatsReturnsRecordedRequest(t *testing.T) {
 	bodyText := stats.Body.String()
 	if !strings.Contains(bodyText, `"path":"/v1/chat/completions"`) || !strings.Contains(bodyText, `"inbound":"openai-entry"`) || !strings.Contains(bodyText, `"name":"route_plan"`) || !strings.Contains(bodyText, `"name":"provider_dispatch"`) {
 		t.Fatalf("body = %s, want recorded latency trace", bodyText)
+	}
+}
+
+func TestLatencySummaryStatsReturnsAggregates(t *testing.T) {
+	providers := map[string]provider.Provider{"mock": provider.NewMock("mock")}
+	r, err := router.New(testRoutingConfig(), providers, testOutbounds())
+	if err != nil {
+		t.Fatalf("router.New() error = %v", err)
+	}
+	latencyStore := latency.NewStore(10)
+	dispatcher := execution.NewDispatcherWithStoreQuotaHealthEventsAndLatency(accounting.NewMemoryStore(), nil, nil, nil, latencyStore)
+	h := NewWithClientQuotaEventsAndLatency(r, dispatcher, testInbounds(), nil, nil, latencyStore, config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`)
+	request := httptest.NewRecorder()
+	mux.ServeHTTP(request, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+	if request.Code != http.StatusOK {
+		t.Fatalf("request status = %d, want 200, body=%s", request.Code, request.Body.String())
+	}
+
+	statsReq := httptest.NewRequest(http.MethodGet, "/stats/latency/summary", nil)
+	statsReq.Header.Set("Authorization", "Bearer admin-token")
+	stats := httptest.NewRecorder()
+	mux.ServeHTTP(stats, statsReq)
+	if stats.Code != http.StatusOK {
+		t.Fatalf("stats status = %d, want 200, body=%s", stats.Code, stats.Body.String())
+	}
+	bodyText := stats.Body.String()
+	if !strings.Contains(bodyText, `"count":1`) || !strings.Contains(bodyText, `"total"`) || !strings.Contains(bodyText, `"p95_ms"`) || !strings.Contains(bodyText, `"route_plan"`) || !strings.Contains(bodyText, `"provider_dispatch"`) {
+		t.Fatalf("body = %s, want latency summary aggregates", bodyText)
 	}
 }
 func TestGovernanceStatsReturnsQuotaAndEvents(t *testing.T) {

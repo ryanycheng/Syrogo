@@ -467,7 +467,14 @@ curl http://127.0.0.1:23234/stats/latency \
   -H 'Authorization: Bearer <accounting-admin-token>'
 ```
 
-The response includes request metadata, HTTP status, total duration, and spans such as `route_plan`, `provider_dispatch`, `upstream_round_trip`, `upstream_read`, `upstream_stream_read`, and `egress_write`. When an outbound uses a proxy, `upstream_round_trip` measures the Syrogo-to-proxy path until response headers arrive; proxy-to-upstream work is included in that wait unless the proxy exposes its own metrics.
+For a compact view of the current latency distribution, query the summary endpoint:
+
+```bash
+curl http://127.0.0.1:23234/stats/latency/summary \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+```
+
+The timeline response includes request metadata, HTTP status, total duration, and spans such as `route_plan`, `provider_dispatch`, `upstream_round_trip`, `upstream_read`, `upstream_stream_read`, and `egress_write`. The summary response aggregates recent requests into `count`, `avg_ms`, `p50_ms`, `p95_ms`, `p99_ms`, and `max_ms` for total latency and each span. When an outbound uses a proxy, `upstream_round_trip` measures the Syrogo-to-proxy path until response headers arrive; proxy-to-upstream work is included in that wait unless the proxy exposes its own metrics.
 
 ### 15. Validate config changes
 

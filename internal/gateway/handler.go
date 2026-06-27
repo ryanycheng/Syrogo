@@ -102,6 +102,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/stats/quota", h.handleQuotaStats)
 	mux.HandleFunc("/stats/client-quota", h.handleClientQuotaStats)
 	mux.HandleFunc("/stats/governance", h.handleGovernanceStats)
+	mux.HandleFunc("/stats/latency/summary", h.handleLatencySummaryStats)
 	mux.HandleFunc("/stats/latency", h.handleLatencyStats)
 	mux.HandleFunc("/admin/config/validate", h.handleConfigValidate)
 	mux.HandleFunc("/admin/config/update", h.handleConfigUpdate)
@@ -202,6 +203,18 @@ func (h *Handler) handleLatencyStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, h.dispatcher.QueryLatency())
+}
+
+func (h *Handler) handleLatencySummaryStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAccounting(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	writeJSON(w, http.StatusOK, h.dispatcher.QueryLatencySummary())
 }
 
 func (h *Handler) handleConfigValidate(w http.ResponseWriter, r *http.Request) {

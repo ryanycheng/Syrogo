@@ -2,6 +2,7 @@ package latency
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
@@ -48,6 +49,21 @@ type Store struct {
 
 type Snapshot struct {
 	Items []Trace `json:"items"`
+}
+
+type Summary struct {
+	Count int                    `json:"count"`
+	Total SummaryItem            `json:"total"`
+	Spans map[string]SummaryItem `json:"spans"`
+}
+
+type SummaryItem struct {
+	Count int   `json:"count"`
+	AvgMs int64 `json:"avg_ms"`
+	P50Ms int64 `json:"p50_ms"`
+	P95Ms int64 `json:"p95_ms"`
+	P99Ms int64 `json:"p99_ms"`
+	MaxMs int64 `json:"max_ms"`
 }
 
 func NewStore(limit int) *Store {
@@ -178,4 +194,59 @@ func (s *Store) Snapshot() Snapshot {
 		items[index].Spans = append([]Span(nil), trace.Spans...)
 	}
 	return Snapshot{Items: items}
+}
+
+func (s *Store) Summary() Summary {
+	snapshot := s.Snapshot()
+	totalDurations := make([]int64, 0, len(snapshot.Items))
+	spanDurations := map[string][]int64{}
+	for _, trace := range snapshot.Items {
+		totalDurations = append(totalDurations, trace.DurationMs)
+		for _, span := range trace.Spans {
+			spanDurations[span.Name] = append(spanDurations[span.Name], span.DurationMs)
+		}
+	}
+	spans := make(map[string]SummaryItem, len(spanDurations))
+	for name, durations := range spanDurations {
+		spans[name] = summarizeDurations(durations)
+	}
+	return Summary{
+		Count: len(snapshot.Items),
+		Total: summarizeDurations(totalDurations),
+		Spans: spans,
+	}
+}
+
+func summarizeDurations(durations []int64) SummaryItem {
+	if len(durations) == 0 {
+		return SummaryItem{}
+	}
+	values := append([]int64(nil), durations...)
+	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+	var sum int64
+	for _, value := range values {
+		sum += value
+	}
+	return SummaryItem{
+		Count: len(values),
+		AvgMs: sum / int64(len(values)),
+		P50Ms: percentile(values, 50),
+		P95Ms: percentile(values, 95),
+		P99Ms: percentile(values, 99),
+		MaxMs: values[len(values)-1],
+	}
+}
+
+func percentile(sorted []int64, p int) int64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	index := (len(sorted)*p + 99) / 100
+	if index < 1 {
+		index = 1
+	}
+	if index > len(sorted) {
+		index = len(sorted)
+	}
+	return sorted[index-1]
 }
