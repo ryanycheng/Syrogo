@@ -95,7 +95,7 @@ func run(configPath string, devLogEnabled bool) error {
 		return err
 	}
 
-	application, err := app.New(cfg)
+	application, err := app.NewWithOptions(cfg, app.Options{ConfigPath: configPath})
 	if err != nil {
 		return err
 	}

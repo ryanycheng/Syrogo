@@ -481,6 +481,16 @@ curl http://127.0.0.1:23234/admin/config/validate \
 
 This endpoint only parses and validates the submitted config. It does not reload or apply changes to running traffic.
 
+To validate and replace the config file used at startup, post the YAML to the update endpoint:
+
+```bash
+curl http://127.0.0.1:23234/admin/config/update \
+  -H 'Authorization: Bearer <accounting-admin-token>' \
+  --data-binary @configs/config.yaml
+```
+
+This writes the validated YAML to the active config path atomically. The response includes `"applied": false` because running traffic is not hot-reloaded yet; restart Syrogo to use the updated file.
+
 ### 16. Read usage aggregates
 
 Syrogo now exposes a dedicated accounting read-only endpoint for usage aggregates.

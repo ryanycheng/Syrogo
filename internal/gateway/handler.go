@@ -29,6 +29,7 @@ type Handler struct {
 	logger             *slog.Logger
 	accounting         config.AccountingConfig
 	latencyStore       *latency.Store
+	configPath         string
 }
 
 type loggingResponseWriter struct {
@@ -74,6 +75,10 @@ func NewWithClientQuotaAndEvents(r *router.Router, dispatcher *execution.Dispatc
 }
 
 func NewWithClientQuotaEventsAndLatency(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
+	return NewWithClientQuotaEventsLatencyAndConfig(r, dispatcher, inbounds, clientQuotaTracker, eventRecorder, latencyStore, "", accountingCfg, logger)
+}
+
+func NewWithClientQuotaEventsLatencyAndConfig(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -87,6 +92,7 @@ func NewWithClientQuotaEventsAndLatency(r *router.Router, dispatcher *execution.
 		logger:             logger,
 		accounting:         accountingCfg,
 		latencyStore:       latencyStore,
+		configPath:         configPath,
 	}
 }
 
@@ -98,6 +104,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/stats/governance", h.handleGovernanceStats)
 	mux.HandleFunc("/stats/latency", h.handleLatencyStats)
 	mux.HandleFunc("/admin/config/validate", h.handleConfigValidate)
+	mux.HandleFunc("/admin/config/update", h.handleConfigUpdate)
 	mux.HandleFunc("/", h.handleRequest)
 }
 
@@ -219,6 +226,32 @@ func (h *Handler) handleConfigValidate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+func (h *Handler) handleConfigUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAccounting(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	if h.configPath == "" {
+		writeError(w, http.StatusServiceUnavailable, "config path is not configured")
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read config: "+err.Error())
+		return
+	}
+	if err := config.WriteValidatedFile(h.configPath, body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": h.configPath, "applied": false})
+}
+
 func (h *Handler) handleByCodec(w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) bool {
 	codec, ok := h.registry.Get(inbound.Protocol)
 	if !ok {
@@ -257,6 +290,10 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/config/validate" {
 		h.handleConfigValidate(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/update" {
+		h.handleConfigUpdate(w, r)
 		return
 	}
 

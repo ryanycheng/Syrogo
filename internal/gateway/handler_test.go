@@ -186,6 +186,91 @@ func TestConfigValidateRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestConfigUpdateRequiresAdminToken(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/config/update", strings.NewReader(validGatewayConfigYAML())))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestConfigUpdateWritesValidatedConfig(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body := []byte(validGatewayConfigYAML())
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/update", "admin-token", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	written, err := os.ReadFile(h.configPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	if string(written) != string(body) {
+		t.Fatalf("written config = %q, want request body", written)
+	}
+	if !strings.Contains(w.Body.String(), `"applied":false`) {
+		t.Fatalf("body = %s, want applied false", w.Body.String())
+	}
+}
+
+func TestConfigUpdateRejectsInvalidConfigWithoutReplacingFile(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	old := []byte(validGatewayConfigYAML())
+	if err := os.WriteFile(h.configPath, old, 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/update", "admin-token", []byte("server:\n  listen: ':8080'\n")))
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	written, err := os.ReadFile(h.configPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	if string(written) != string(old) {
+		t.Fatalf("written config = %q, want original", written)
+	}
+}
+
+func TestConfigUpdateRequiresConfiguredPath(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/update", "admin-token", []byte(validGatewayConfigYAML())))
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+}
+
 func TestUsageStatsRequiresAdminToken(t *testing.T) {
 	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
 	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}

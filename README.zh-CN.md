@@ -481,6 +481,16 @@ curl http://127.0.0.1:23234/admin/config/validate \
 
 这个端点只会解析并校验提交的配置，不会 reload，也不会把变更应用到当前运行流量。
 
+如果要在校验通过后替换启动时使用的配置文件，可以把 YAML 提交到 update 端点：
+
+```bash
+curl http://127.0.0.1:23234/admin/config/update \
+  -H 'Authorization: Bearer <accounting-admin-token>' \
+  --data-binary @configs/config.yaml
+```
+
+这个端点会把校验通过的 YAML 原子写入当前启动配置路径。响应中会包含 `"applied": false`，表示当前运行流量还不会热加载；需要重启 Syrogo 才会使用新配置。
+
 ### 16. 查看 usage 聚合统计
 
 Syrogo 现在提供一个独立的 accounting 只读端点，用于查看 usage 聚合结果。

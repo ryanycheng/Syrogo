@@ -79,6 +79,65 @@ outbounds:
 	}
 }
 
+func TestWriteValidatedFileReplacesConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`
+listeners:
+  - name: public
+    listen: ":8080"
+    inbounds: [openai-entry]
+inbounds:
+  - name: openai-entry
+    protocol: openai_chat
+    path: /v1/chat/completions
+    clients:
+      - name: office-key
+        token: client-token
+        tag: office
+outbounds:
+  - name: mock
+    protocol: mock
+    tag: mock-tag
+routing:
+  rules:
+    - name: office-route
+      from_tags: [office]
+      to_tags: [mock-tag]
+      strategy: failover
+`)
+
+	if err := WriteValidatedFile(path, data); err != nil {
+		t.Fatalf("WriteValidatedFile() error = %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	if string(got) != string(data) {
+		t.Fatalf("written config = %q, want %q", got, data)
+	}
+}
+
+func TestWriteValidatedFileRejectsInvalidConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	old := []byte("old-config")
+	if err := os.WriteFile(path, old, 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	err := WriteValidatedFile(path, []byte("server:\n  listen: ':8080'\n"))
+	if err == nil {
+		t.Fatal("WriteValidatedFile() error = nil, want validation error")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	if string(got) != string(old) {
+		t.Fatalf("config changed to %q, want original", got)
+	}
+}
+
 func TestConfigValidateSuccess(t *testing.T) {
 	cfg := validConfig()
 	if err := cfg.Validate(); err != nil {

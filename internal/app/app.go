@@ -17,6 +17,10 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/server"
 )
 
+type Options struct {
+	ConfigPath string
+}
+
 type App struct {
 	Server             *server.HTTPServer
 	accountingStore    accounting.Store
@@ -25,6 +29,10 @@ type App struct {
 }
 
 func New(cfg config.Config) (*App, error) {
+	return NewWithOptions(cfg, Options{})
+}
+
+func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 	providers := make(map[string]provider.Provider, len(cfg.Outbounds))
 	registry := provider.DefaultFactoryRegistry()
 	for _, spec := range cfg.Outbounds {
@@ -62,7 +70,7 @@ func New(cfg config.Config) (*App, error) {
 	eventRecorder := quota.NewEventRecorder(cfg.Governance.Quota.Events)
 	latencyStore := latency.NewStore(200)
 	dispatcher := execution.NewDispatcherWithStoreQuotaHealthEventsAndLatency(store, outboundQuotaTracker, healthTracker, eventRecorder, latencyStore)
-	listeners := buildListeners(r, dispatcher, cfg, clientQuotaTracker, eventRecorder, latencyStore, slog.Default())
+	listeners := buildListeners(r, dispatcher, cfg, clientQuotaTracker, eventRecorder, latencyStore, opts.ConfigPath, slog.Default())
 
 	return &App{
 		Server:             server.NewListeners(listeners),
@@ -72,11 +80,11 @@ func New(cfg config.Config) (*App, error) {
 	}, nil
 }
 
-func buildListeners(r *router.Router, dispatcher *execution.Dispatcher, cfg config.Config, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, logger *slog.Logger) []server.Listener {
+func buildListeners(r *router.Router, dispatcher *execution.Dispatcher, cfg config.Config, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, logger *slog.Logger) []server.Listener {
 	listeners := make([]server.Listener, 0, len(cfg.Listeners))
 	for _, listener := range cfg.Listeners {
 		mux := http.NewServeMux()
-		gateway.NewWithClientQuotaEventsAndLatency(r, dispatcher, cfg.ListenerInbounds(listener), clientQuotaTracker, eventRecorder, latencyStore, cfg.Accounting, logger).Register(mux)
+		gateway.NewWithClientQuotaEventsLatencyAndConfig(r, dispatcher, cfg.ListenerInbounds(listener), clientQuotaTracker, eventRecorder, latencyStore, configPath, cfg.Accounting, logger).Register(mux)
 		listeners = append(listeners, server.Listener{
 			Addr:    listener.Listen,
 			Handler: mux,
