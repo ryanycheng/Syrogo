@@ -243,7 +243,7 @@ func TestParseLauncherOptionsRejectsUnsupportedAgent(t *testing.T) {
 	}
 }
 
-func TestDefaultLauncherConfigPathPrefersLocalConfig(t *testing.T) {
+func TestDefaultLauncherConfigPathPrefersInstalledConfig(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("os.Getwd() error = %v", err)
@@ -255,6 +255,15 @@ func TestDefaultLauncherConfigPathPrefersLocalConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "configs", "config.yaml"), []byte("server:\n  listen: ':23234'\n"), 0o600); err != nil {
 		t.Fatalf("os.WriteFile() error = %v", err)
 	}
+	installedPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(installedPath, []byte("server:\n  listen: ':23235'\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	oldInstalledConfigPath := installedConfigPath
+	installedConfigPath = installedPath
+	defer func() {
+		installedConfigPath = oldInstalledConfigPath
+	}()
 	if err := os.Chdir(dir); err != nil {
 		t.Fatalf("os.Chdir() error = %v", err)
 	}
@@ -264,17 +273,29 @@ func TestDefaultLauncherConfigPathPrefersLocalConfig(t *testing.T) {
 		}
 	}()
 
-	if got := defaultLauncherConfigPath(); got != filepath.Join(".", "configs", "config.yaml") {
-		t.Fatalf("defaultLauncherConfigPath() = %q, want local config", got)
+	if got := defaultLauncherConfigPath(); got != installedPath {
+		t.Fatalf("defaultLauncherConfigPath() = %q, want installed config", got)
 	}
 }
 
-func TestDefaultLauncherConfigPathFallsBackToInstalledConfig(t *testing.T) {
+func TestDefaultLauncherConfigPathFallsBackToLocalConfigForDevelopment(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("os.Getwd() error = %v", err)
 	}
 	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "configs"), 0o755); err != nil {
+		t.Fatalf("os.Mkdir() error = %v", err)
+	}
+	localPath := filepath.Join(".", "configs", "config.yaml")
+	if err := os.WriteFile(filepath.Join(dir, "configs", "config.yaml"), []byte("server:\n  listen: ':23234'\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	oldInstalledConfigPath := installedConfigPath
+	installedConfigPath = filepath.Join(t.TempDir(), "missing.yaml")
+	defer func() {
+		installedConfigPath = oldInstalledConfigPath
+	}()
 	if err := os.Chdir(dir); err != nil {
 		t.Fatalf("os.Chdir() error = %v", err)
 	}
@@ -284,8 +305,8 @@ func TestDefaultLauncherConfigPathFallsBackToInstalledConfig(t *testing.T) {
 		}
 	}()
 
-	if got := defaultLauncherConfigPath(); got != installedConfigPath {
-		t.Fatalf("defaultLauncherConfigPath() = %q, want installed config", got)
+	if got := defaultLauncherConfigPath(); got != localPath {
+		t.Fatalf("defaultLauncherConfigPath() = %q, want local config", got)
 	}
 }
 func TestMergeEnvOverridesExistingValues(t *testing.T) {

@@ -15,7 +15,9 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/config"
 )
 
-const installedConfigPath = "/opt/syrogo/config/config.yaml"
+const defaultInstalledConfigPath = "/opt/syrogo/config/config.yaml"
+
+var installedConfigPath = defaultInstalledConfigPath
 
 type launcherOptions struct {
 	ConfigPath string
@@ -170,6 +172,9 @@ func requiresLauncherFlagValue(arg string) bool {
 }
 
 func defaultLauncherConfigPath() string {
+	if _, err := os.Stat(installedConfigPath); err == nil {
+		return installedConfigPath
+	}
 	localConfig := filepath.Join(".", "configs", "config.yaml")
 	if _, err := os.Stat(localConfig); err == nil {
 		return localConfig

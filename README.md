@@ -253,7 +253,7 @@ syrogo run claude --model claude-sonnet-4-6 --dangerously-skip-permissions
 syrogo run codex exec "Reply with exactly: syrogo-ok"
 ```
 
-By default, `claude` selects one `anthropic_messages` inbound client and `codex` selects one `openai_responses` inbound client. In a source checkout, `syrogo run` uses `./configs/config.yaml` when it exists; installed binaries fall back to `/opt/syrogo/config/config.yaml`. You can also pass `--config` before or after the subcommand. Put Syrogo launcher flags before native agent arguments; once the first native agent argument appears, the rest are passed through unchanged. If there are multiple matching clients, pass `--client` or `--inbound`:
+By default, `claude` selects one `anthropic_messages` inbound client and `codex` selects one `openai_responses` inbound client. `syrogo run` uses `/opt/syrogo/config/config.yaml` when it exists; `./configs/config.yaml` is only a development fallback when the installed config is missing. You can also pass `--config` before or after the subcommand. Put Syrogo launcher flags before native agent arguments; once the first native agent argument appears, the rest are passed through unchanged. If there are multiple matching clients, pass `--client` or `--inbound`:
 
 ```bash
 syrogo --config /opt/syrogo/config/config.yaml run claude --client anthropic-key --base-url http://127.0.0.1:23234
