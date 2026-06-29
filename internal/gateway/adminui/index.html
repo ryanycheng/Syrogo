@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Syrogo Admin</title>
+  <link rel="stylesheet" href="/admin/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">Syrogo</p>
+      <h1>Admin Console</h1>
+    </div>
+    <label class="token-box">
+      <span>Admin UI token</span>
+      <input id="admin-token" type="password" autocomplete="off" placeholder="admin.token from config">
+    </label>
+  </header>
+
+  <nav class="tabs" aria-label="Admin sections">
+    <button class="tab active" data-target="overview">Overview</button>
+    <button class="tab" data-target="usage">Usage</button>
+    <button class="tab" data-target="quota">Quota</button>
+    <button class="tab" data-target="latency">Latency</button>
+    <button class="tab" data-target="logs">Logs</button>
+    <button class="tab" data-target="config">Config</button>
+  </nav>
+
+  <main>
+    <section id="overview" class="panel active">
+      <div class="section-title">
+        <h2>Overview</h2>
+        <button id="refresh-overview">Refresh</button>
+      </div>
+      <div class="grid">
+        <article class="card">
+          <h3>Health</h3>
+          <div id="health-status" class="status muted">Not loaded</div>
+        </article>
+        <article class="card wide">
+          <h3>Latency summary</h3>
+          <div id="latency-summary" class="summary-grid"></div>
+        </article>
+        <article class="card full">
+          <h3>Governance</h3>
+          <pre id="governance-json" class="json-block">Not loaded</pre>
+        </article>
+      </div>
+    </section>
+
+    <section id="usage" class="panel">
+      <div class="section-title">
+        <h2>Usage</h2>
+        <div class="actions">
+          <select id="usage-group-by">
+            <option value="key">key</option>
+            <option value="provider">provider</option>
+            <option value="model">model</option>
+            <option value="inbound">inbound</option>
+            <option value="outbound">outbound</option>
+            <option value="error_kind">error_kind</option>
+          </select>
+          <button id="refresh-usage">Refresh</button>
+        </div>
+      </div>
+      <div id="usage-table" class="table-wrap"></div>
+    </section>
+
+    <section id="quota" class="panel">
+      <div class="section-title">
+        <h2>Quota</h2>
+        <button id="refresh-quota">Refresh</button>
+      </div>
+      <div id="quota-table" class="table-wrap"></div>
+    </section>
+
+    <section id="latency" class="panel">
+      <div class="section-title">
+        <h2>Recent latency</h2>
+        <button id="refresh-latency">Refresh</button>
+      </div>
+      <div id="latency-table" class="table-wrap"></div>
+    </section>
+
+    <section id="logs" class="panel">
+      <div class="section-title">
+        <h2>Logs</h2>
+        <div class="actions">
+          <input id="log-lines" type="number" min="1" value="200" aria-label="Log lines">
+          <button id="refresh-logs">Refresh</button>
+        </div>
+      </div>
+      <pre id="logs-content" class="json-block">Not loaded</pre>
+    </section>
+
+    <section id="config" class="panel">
+      <div class="section-title">
+        <h2>Config</h2>
+        <div class="actions">
+          <button id="load-config">Load current</button>
+          <button id="validate-config">Validate</button>
+          <button id="update-config" class="danger">Update file</button>
+        </div>
+      </div>
+      <p class="hint">Update writes the validated YAML to the startup config path. Running traffic is not hot-reloaded yet; restart Syrogo after a successful update.</p>
+      <textarea id="config-yaml" spellcheck="false" placeholder="Paste Syrogo YAML config here"></textarea>
+      <pre id="config-result" class="json-block">No config request yet</pre>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/admin/app.js"></script>
+</body>
+</html>

@@ -476,13 +476,33 @@ curl http://127.0.0.1:23234/stats/latency/summary \
 
 Timeline 响应包含请求元信息、HTTP status、总耗时，以及 `route_plan`、`provider_dispatch`、`upstream_round_trip`、`upstream_read`、`upstream_stream_read`、`egress_write` 等阶段 span。Summary 响应会对最近请求的总耗时和各阶段 span 聚合输出 `count`、`avg_ms`、`p50_ms`、`p95_ms`、`p99_ms`、`max_ms`。配置 outbound proxy 时，`upstream_round_trip` 统计的是 Syrogo 到代理并收到响应头的耗时；代理到真实上游的内部耗时会包含在这段等待中，除非代理自身额外暴露指标，否则 Syrogo 侧无法继续拆分。
 
+也可以打开内置 Admin UI，在浏览器中查看 health、usage、quota、latency、logs 和 config 操作：
+
+```text
+http://127.0.0.1:23234/admin/
+```
+
+通过独立的 `admin.token` 开启 Admin UI。这个 token 必须与业务 inbound client token、`accounting.admin_token` 都不同，因为浏览器管理入口和模型流量是不同的权限边界：
+
+```yaml
+admin:
+  enabled: true
+  token: "${SYROGO_ADMIN_UI_TOKEN}"
+  logs:
+    enabled: true
+    path: "./tmp/dev.log"
+    max_bytes: 65536
+```
+
+UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`。日志只会读取配置指定的本地日志文件，并对常见 token、key、authorization、secret 字段做脱敏。它是内置单页控制台，不需要额外前端构建步骤。
+
 ### 15. 校验配置变更
 
-使用 accounting admin token 可以在替换线上配置文件前，先 dry-run 校验一份 YAML 配置：
+使用独立 Admin UI token 或既有 accounting admin token 可以在替换线上配置文件前，先 dry-run 校验一份 YAML 配置：
 
 ```bash
 curl http://127.0.0.1:23234/admin/config/validate \
-  -H 'Authorization: Bearer <accounting-admin-token>' \
+  -H 'Authorization: Bearer <admin-ui-token-or-accounting-admin-token>' \
   --data-binary @configs/config.yaml
 ```
 
@@ -492,7 +512,7 @@ curl http://127.0.0.1:23234/admin/config/validate \
 
 ```bash
 curl http://127.0.0.1:23234/admin/config/update \
-  -H 'Authorization: Bearer <accounting-admin-token>' \
+  -H 'Authorization: Bearer <admin-ui-token-or-accounting-admin-token>' \
   --data-binary @configs/config.yaml
 ```
 

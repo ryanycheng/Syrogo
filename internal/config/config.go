@@ -21,6 +21,19 @@ type Config struct {
 	Outbounds  []OutboundSpec   `yaml:"outbounds"`
 	Accounting AccountingConfig `yaml:"accounting"`
 	Governance GovernanceConfig `yaml:"governance"`
+	Admin      AdminConfig      `yaml:"admin"`
+}
+
+type AdminConfig struct {
+	Enabled bool            `yaml:"enabled"`
+	Token   string          `yaml:"token"`
+	Logs    AdminLogsConfig `yaml:"logs"`
+}
+
+type AdminLogsConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Path     string `yaml:"path"`
+	MaxBytes int    `yaml:"max_bytes"`
 }
 
 type ServerConfig struct {
@@ -289,6 +302,10 @@ func (c Config) Validate() error {
 		}
 	}
 
+	if err := validateAdmin(c.Admin, tokens, c.Accounting); err != nil {
+		return err
+	}
+
 	if c.Accounting.Enabled {
 		if c.Accounting.Backend == "" {
 			c.Accounting.Backend = "memory"
@@ -426,6 +443,25 @@ func (c Config) Validate() error {
 	}
 
 	_ = outboundNames
+	return nil
+}
+
+func validateAdmin(cfg AdminConfig, clientTokens map[string]string, accounting AccountingConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if cfg.Token == "" {
+		return fmt.Errorf("admin.token is required when admin.enabled=true")
+	}
+	if owner, ok := clientTokens[cfg.Token]; ok {
+		return fmt.Errorf("admin.token duplicates inbound client token used by %s", owner)
+	}
+	if accounting.AdminToken != "" && cfg.Token == accounting.AdminToken {
+		return fmt.Errorf("admin.token must be different from accounting.admin_token")
+	}
+	if cfg.Logs.Enabled && cfg.Logs.MaxBytes < 0 {
+		return fmt.Errorf("admin.logs.max_bytes must not be negative")
+	}
 	return nil
 }
 

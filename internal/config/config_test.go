@@ -145,6 +145,49 @@ func TestConfigValidateSuccess(t *testing.T) {
 	}
 }
 
+func TestConfigValidateAdminRequiresToken(t *testing.T) {
+	cfg := validConfig()
+	cfg.Admin.Enabled = true
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "admin.token is required when admin.enabled=true" {
+		t.Fatalf("Validate() error = %v, want admin token error", err)
+	}
+}
+
+func TestConfigValidateAdminRejectsInboundClientToken(t *testing.T) {
+	cfg := validConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.Token = "client-token"
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "admin.token duplicates inbound client token used by openai-entry" {
+		t.Fatalf("Validate() error = %v, want duplicate client token error", err)
+	}
+}
+
+func TestConfigValidateAdminRejectsAccountingAdminToken(t *testing.T) {
+	cfg := validConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.Token = "shared-token"
+	cfg.Accounting = AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "shared-token"}
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != "admin.token must be different from accounting.admin_token" {
+		t.Fatalf("Validate() error = %v, want duplicate accounting token error", err)
+	}
+}
+
+func TestConfigValidateAdminSuccess(t *testing.T) {
+	cfg := validConfig()
+	cfg.Admin = AdminConfig{Enabled: true, Token: "admin-ui-token", Logs: AdminLogsConfig{Enabled: true, Path: "tmp/dev.log", MaxBytes: 1024}}
+	cfg.Accounting = AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "accounting-token"}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestConfigListenAddressesUsesListeners(t *testing.T) {
 	cfg := Config{
 		Listeners: []ListenerSpec{

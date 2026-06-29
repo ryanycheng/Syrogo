@@ -476,13 +476,33 @@ curl http://127.0.0.1:23234/stats/latency/summary \
 
 The timeline response includes request metadata, HTTP status, total duration, and spans such as `route_plan`, `provider_dispatch`, `upstream_round_trip`, `upstream_read`, `upstream_stream_read`, and `egress_write`. The summary response aggregates recent requests into `count`, `avg_ms`, `p50_ms`, `p95_ms`, `p99_ms`, and `max_ms` for total latency and each span. When an outbound uses a proxy, `upstream_round_trip` measures the Syrogo-to-proxy path until response headers arrive; proxy-to-upstream work is included in that wait unless the proxy exposes its own metrics.
 
+Open the built-in Admin UI for a lightweight browser view of health, usage, quota, latency, logs, and config operations:
+
+```text
+http://127.0.0.1:23234/admin/
+```
+
+Enable it with a dedicated `admin.token`. This token must be different from business inbound client tokens and from `accounting.admin_token`, because browser administration and model traffic are separate trust boundaries:
+
+```yaml
+admin:
+  enabled: true
+  token: "${SYROGO_ADMIN_UI_TOKEN}"
+  logs:
+    enabled: true
+    path: "./tmp/dev.log"
+    max_bytes: 65536
+```
+
+The UI stores the Admin UI token only in browser local storage and uses `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, and `/admin/config/update`. Logs are read only from the configured local log path and are redacted for common token, key, authorization, and secret fields. It is an embedded single-page console and does not require a frontend build step.
+
 ### 15. Validate config changes
 
-Use the accounting admin token to dry-run a YAML config before replacing a live config file:
+Use either the dedicated Admin UI token or the existing accounting admin token to dry-run a YAML config before replacing a live config file:
 
 ```bash
 curl http://127.0.0.1:23234/admin/config/validate \
-  -H 'Authorization: Bearer <accounting-admin-token>' \
+  -H 'Authorization: Bearer <admin-ui-token-or-accounting-admin-token>' \
   --data-binary @configs/config.yaml
 ```
 
@@ -492,7 +512,7 @@ To validate and replace the config file used at startup, post the YAML to the up
 
 ```bash
 curl http://127.0.0.1:23234/admin/config/update \
-  -H 'Authorization: Bearer <accounting-admin-token>' \
+  -H 'Authorization: Bearer <admin-ui-token-or-accounting-admin-token>' \
   --data-binary @configs/config.yaml
 ```
 

@@ -28,6 +28,7 @@ type Handler struct {
 	registry           *InboundRegistry
 	logger             *slog.Logger
 	accounting         config.AccountingConfig
+	admin              config.AdminConfig
 	latencyStore       *latency.Store
 	configPath         string
 }
@@ -79,6 +80,10 @@ func NewWithClientQuotaEventsAndLatency(r *router.Router, dispatcher *execution.
 }
 
 func NewWithClientQuotaEventsLatencyAndConfig(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
+	return NewWithClientQuotaEventsLatencyConfigAndAdmin(r, dispatcher, inbounds, clientQuotaTracker, eventRecorder, latencyStore, configPath, accountingCfg, config.AdminConfig{}, logger)
+}
+
+func NewWithClientQuotaEventsLatencyConfigAndAdmin(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, accountingCfg config.AccountingConfig, adminCfg config.AdminConfig, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -91,6 +96,7 @@ func NewWithClientQuotaEventsLatencyAndConfig(r *router.Router, dispatcher *exec
 		registry:           DefaultInboundRegistry(),
 		logger:             logger,
 		accounting:         accountingCfg,
+		admin:              normalizeAdminConfig(adminCfg),
 		latencyStore:       latencyStore,
 		configPath:         configPath,
 	}
@@ -104,8 +110,15 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/stats/governance", h.handleGovernanceStats)
 	mux.HandleFunc("/stats/latency/summary", h.handleLatencySummaryStats)
 	mux.HandleFunc("/stats/latency", h.handleLatencyStats)
+	mux.HandleFunc("/admin/usage", h.handleAdminUsage)
+	mux.HandleFunc("/admin/quota", h.handleAdminQuota)
+	mux.HandleFunc("/admin/logs", h.handleAdminLogs)
+	mux.HandleFunc("/admin/latency/summary", h.handleAdminLatencySummary)
+	mux.HandleFunc("/admin/latency", h.handleAdminLatency)
+	mux.HandleFunc("/admin/config", h.handleAdminConfig)
 	mux.HandleFunc("/admin/config/validate", h.handleConfigValidate)
 	mux.HandleFunc("/admin/config/update", h.handleConfigUpdate)
+	mux.Handle("/admin/", http.HandlerFunc(h.handleAdminUI))
 	mux.HandleFunc("/", h.handleRequest)
 }
 
@@ -222,7 +235,7 @@ func (h *Handler) handleConfigValidate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !h.authorizeAccounting(r) {
+	if !h.authorizeAdminOrAccounting(r) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
@@ -244,7 +257,7 @@ func (h *Handler) handleConfigUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !h.authorizeAccounting(r) {
+	if !h.authorizeAdminOrAccounting(r) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}

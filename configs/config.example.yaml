@@ -160,6 +160,14 @@ governance:
       enabled: true
       max_entries: 200
 
+admin:
+  enabled: true
+  token: "${SYROGO_ADMIN_UI_TOKEN}"
+  logs:
+    enabled: true
+    path: "./tmp/dev.log"
+    max_bytes: 65536
+
 accounting:
   enabled: true
   backend: "local_file"
