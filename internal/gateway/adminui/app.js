@@ -1,6 +1,9 @@
 const tokenInput = document.querySelector("#admin-token");
 const toast = document.querySelector("#toast");
 const savedToken = localStorage.getItem("syrogo_admin_token") || "";
+let loadedConfigPath = "";
+let loadedConfigRaw = "";
+let loadedConfigRedacted = "";
 tokenInput.value = savedToken;
 
 function adminToken() {
@@ -65,41 +68,131 @@ async function refreshOverview() {
   }
 
   try {
-    const summary = await fetchJSON("/admin/latency/summary");
-    const total = summary.total || {};
-    document.querySelector("#latency-summary").innerHTML = [
-      metric("requests", summary.count),
-      metric("avg ms", total.avg_ms),
-      metric("p50 ms", total.p50_ms),
-      metric("p95 ms", total.p95_ms),
-      metric("p99 ms", total.p99_ms),
-      metric("max ms", total.max_ms),
-    ].join("");
+    const overview = await fetchJSON("/admin/overview");
+    renderOverviewSummary(overview);
+    setJSON("#governance-json", overview);
   } catch (error) {
-    document.querySelector("#latency-summary").innerHTML = `<div class="muted">${escapeHTML(error.message)}</div>`;
-  }
-
-  try {
-    const [usage, quota] = await Promise.all([
-      fetchJSON("/admin/usage?group_by=key"),
-      fetchJSON("/admin/quota"),
-    ]);
-    setJSON("#governance-json", { usage, quota });
-  } catch (error) {
+    document.querySelector("#overview-summary").innerHTML = `<div class="muted">${escapeHTML(error.message)}</div>`;
     setJSON("#governance-json", error.message);
   }
 }
 
+function renderOverviewSummary(overview) {
+  const usage = overview.usage || {};
+  const latency = overview.latency || {};
+  const quota = overview.quota || {};
+  const health = overview.health || {};
+  const events = overview.recent_events || {};
+  const admin = overview.admin || {};
+  document.querySelector("#overview-summary").innerHTML = [
+    metric("requests", usage.request_count),
+    metric("errors", usage.error_count),
+    metric("fallbacks", usage.fallback_count),
+    metric("p95 ms", latency.p95_ms),
+    metric("p99 ms", latency.p99_ms),
+    metric("quota entries", quota.configured_quota_items),
+    metric("degraded providers", health.degraded_count),
+    metric("recent events", events.count),
+    metric("config path", admin.config_path_set ? "set" : "missing"),
+    metric("logs", admin.logs_enabled ? "enabled" : "disabled"),
+  ].join("");
+}
+
 async function refreshUsage() {
   const target = document.querySelector("#usage-table");
-  const groupBy = document.querySelector("#usage-group-by").value;
+  const params = usageParams();
+  const groupBy = params.get("group_by");
+  const windowValue = params.get("window");
+  const bucket = params.get("bucket");
+  if (windowValue !== "total" && !bucket) {
+    target.innerHTML = errorBlock(`${windowValue} usage requires a bucket.`);
+    showToast("Usage bucket is required.");
+    return;
+  }
   try {
-    const response = await fetchJSON(`/admin/usage?group_by=${encodeURIComponent(groupBy)}`);
+    const response = await fetchJSON(`/admin/usage?${params.toString()}`);
     const items = response.items || [];
-    target.innerHTML = items.length === 0 ? emptyState("No usage records.") : renderObjectTable(items);
+    const filter = [`group_by=${groupBy}`, `window=${windowValue}`];
+    if (bucket) {
+      filter.push(`bucket=${bucket}`);
+    }
+    target.innerHTML = [
+      `<div class="table-heading">${escapeHTML(filter.join(", "))}</div>`,
+      items.length === 0 ? emptyState("No usage records.") : renderObjectTable(items),
+    ].join("");
   } catch (error) {
     target.innerHTML = errorBlock(error.message);
   }
+}
+
+function usageParams() {
+  syncUsageBucketInput();
+  const params = new URLSearchParams();
+  const groupBy = document.querySelector("#usage-group-by").value;
+  const windowValue = document.querySelector("#usage-window").value;
+  const bucket = document.querySelector("#usage-bucket").value.trim();
+  params.set("group_by", groupBy);
+  params.set("window", windowValue);
+  if (windowValue !== "total" && bucket) {
+    params.set("bucket", bucket);
+  }
+  return params;
+}
+
+function syncUsageBucketInput() {
+  const windowInput = document.querySelector("#usage-window");
+  const bucketInput = document.querySelector("#usage-bucket");
+  const windowValue = windowInput.value;
+  if (windowValue === "total") {
+    bucketInput.value = "";
+    bucketInput.disabled = true;
+    bucketInput.placeholder = "not required for total";
+    return;
+  }
+  bucketInput.disabled = false;
+  bucketInput.placeholder = usageBucketPlaceholder(windowValue);
+  if (!bucketInput.value.trim()) {
+    bucketInput.value = currentUsageBucket(windowValue);
+  }
+}
+
+function usageBucketPlaceholder(windowValue) {
+  if (windowValue === "day") {
+    return "YYYY-MM-DD";
+  }
+  if (windowValue === "week") {
+    return "YYYY-Www";
+  }
+  if (windowValue === "month") {
+    return "YYYY-MM";
+  }
+  return "bucket";
+}
+
+function currentUsageBucket(windowValue) {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  if (windowValue === "day") {
+    return `${year}-${month}-${String(now.getUTCDate()).padStart(2, "0")}`;
+  }
+  if (windowValue === "month") {
+    return `${year}-${month}`;
+  }
+  if (windowValue === "week") {
+    return isoWeekBucket(now);
+  }
+  return "";
+}
+
+function isoWeekBucket(date) {
+  const day = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const weekday = day.getUTCDay() || 7;
+  day.setUTCDate(day.getUTCDate() + 4 - weekday);
+  const weekYear = day.getUTCFullYear();
+  const yearStart = new Date(Date.UTC(weekYear, 0, 1));
+  const week = Math.ceil((((day - yearStart) / 86400000) + 1) / 7);
+  return `${weekYear}-W${String(week).padStart(2, "0")}`;
 }
 
 async function refreshQuota() {
@@ -139,27 +232,69 @@ async function refreshLatency() {
 
 async function refreshLogs() {
   const target = document.querySelector("#logs-content");
-  const lines = document.querySelector("#log-lines").value || "200";
-  try {
-    const response = await fetchJSON(`/admin/logs?lines=${encodeURIComponent(lines)}`);
-    target.textContent = [
-      `path: ${response.path || ""}`,
-      `truncated: ${Boolean(response.truncated)}`,
-      "",
-      response.content || "",
-    ].join("\n");
-  } catch (error) {
-    target.textContent = error.message;
+  const meta = document.querySelector("#logs-meta");
+  const refreshButton = document.querySelector("#refresh-logs");
+  const params = new URLSearchParams();
+  const lines = document.querySelector("#log-lines").value.trim();
+  const bytes = document.querySelector("#log-bytes").value.trim();
+  if (lines) {
+    params.set("lines", lines);
   }
+  if (bytes) {
+    params.set("bytes", bytes);
+  }
+  refreshButton.disabled = true;
+  meta.innerHTML = inlineStatus("Loading logs...", "loading");
+  try {
+    const response = await fetchJSON(`/admin/logs?${params.toString()}`);
+    target.textContent = response.content || "";
+    meta.innerHTML = renderLogsMeta(response);
+    showToast("Logs refreshed.");
+  } catch (error) {
+    target.textContent = `Failed to load logs.\n${error.message}`;
+    meta.innerHTML = inlineStatus(error.message, "error");
+    showToast("Refresh logs failed.");
+  } finally {
+    refreshButton.disabled = false;
+  }
+}
+
+function renderLogsMeta(response) {
+  const truncated = Boolean(response.truncated);
+  const lineLimit = response.lines ? response.lines : "not applied";
+  return `<div class="meta-item"><span>Path</span><strong>${escapeHTML(response.path || "")}</strong></div>
+    <div class="meta-item"><span>Truncated</span><strong><span class="badge ${truncated ? "warn" : "ok"}">${truncated ? "yes" : "no"}</span></strong></div>
+    <div class="meta-item"><span>Read limit</span><strong>${escapeHTML(formatBytes(response.max_bytes || 0))}</strong></div>
+    <div class="meta-item"><span>Line limit</span><strong>${escapeHTML(lineLimit)}</strong></div>
+    <div class="meta-item"><span>Refreshed</span><strong>${escapeHTML(new Date().toLocaleString())}</strong></div>`;
+}
+
+function inlineStatus(message, kind) {
+  return `<div class="inline-status ${escapeHTML(kind)}">${escapeHTML(message)}</div>`;
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KiB`;
+  }
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 }
 
 async function loadConfig() {
   const result = document.querySelector("#config-result");
   try {
     const response = await fetchJSON("/admin/config");
-    document.querySelector("#config-yaml").value = response.content || "";
-    result.textContent = pretty({ ok: true, path: response.path });
-    showToast("Loaded current config.");
+    loadedConfigPath = response.path || "";
+    loadedConfigRaw = response.content || "";
+    loadedConfigRedacted = response.redacted_content || loadedConfigRaw;
+    document.querySelector("#config-yaml").value = loadedConfigRedacted;
+    document.querySelector("#config-diff").textContent = "Loaded redacted current config. Paste a complete config before updating.";
+    result.textContent = pretty({ ok: true, path: response.path, redacted: loadedConfigRedacted !== loadedConfigRaw });
+    showToast("Loaded redacted current config.");
   } catch (error) {
     result.textContent = error.message;
     showToast("Load config failed.");
@@ -181,6 +316,89 @@ async function submitConfig(path) {
     result.textContent = error.message;
     showToast("Config request failed.");
   }
+}
+
+function updateConfigWithConfirm() {
+  const editor = document.querySelector("#config-yaml");
+  const result = document.querySelector("#config-result");
+  const nextConfig = editor.value;
+  if (!nextConfig.trim()) {
+    result.textContent = "Config body is empty.";
+    showToast("Config body is empty.");
+    return;
+  }
+  if (nextConfig.includes("<redacted>")) {
+    result.textContent = "Config contains <redacted>. Paste a complete config before updating.";
+    showToast("Cannot update redacted config.");
+    return;
+  }
+  if (!loadedConfigRaw) {
+    document.querySelector("#config-diff").textContent = "No loaded baseline. Click Load current first for a meaningful diff preview.";
+    showToast("Load current config first for a useful diff.");
+  } else {
+    const diff = renderConfigDiff(loadedConfigRaw, nextConfig);
+    document.querySelector("#config-diff").innerHTML = diff || "No changes from loaded config.";
+  }
+  const target = loadedConfigPath || "the startup config path";
+  const confirmed = window.confirm([
+    `Update ${target}?`,
+    "",
+    "A redacted diff preview has been generated below the editor.",
+    "This will overwrite the startup config file after validation.",
+    "Running traffic is not hot-reloaded; restart Syrogo to apply the new config.",
+    "Validate first if you have not already done so.",
+  ].join("\n"));
+  if (!confirmed) {
+    result.textContent = "Config update cancelled.";
+    showToast("Config update cancelled.");
+    return;
+  }
+  submitConfig("/admin/config/update");
+}
+
+function renderConfigDiff(previous, next) {
+  const previousLines = redactConfigForPreview(previous).split("\n");
+  const nextLines = redactConfigForPreview(next).split("\n");
+  const rows = diffLines(previousLines, nextLines);
+  return rows.map((row) => `<div class="diff-line ${row.kind}">${escapeHTML(row.prefix + row.text)}</div>`).join("");
+}
+
+function diffLines(previousLines, nextLines) {
+  const dp = Array.from({ length: previousLines.length + 1 }, () => Array(nextLines.length + 1).fill(0));
+  for (let i = previousLines.length - 1; i >= 0; i -= 1) {
+    for (let j = nextLines.length - 1; j >= 0; j -= 1) {
+      dp[i][j] = previousLines[i] === nextLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const rows = [];
+  let i = 0;
+  let j = 0;
+  while (i < previousLines.length && j < nextLines.length) {
+    if (previousLines[i] === nextLines[j]) {
+      rows.push({ kind: "same", prefix: "  ", text: previousLines[i] });
+      i += 1;
+      j += 1;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      rows.push({ kind: "removed", prefix: "- ", text: previousLines[i] });
+      i += 1;
+    } else {
+      rows.push({ kind: "added", prefix: "+ ", text: nextLines[j] });
+      j += 1;
+    }
+  }
+  while (i < previousLines.length) {
+    rows.push({ kind: "removed", prefix: "- ", text: previousLines[i] });
+    i += 1;
+  }
+  while (j < nextLines.length) {
+    rows.push({ kind: "added", prefix: "+ ", text: nextLines[j] });
+    j += 1;
+  }
+  return rows;
+}
+
+function redactConfigForPreview(content) {
+  return content.split("\n").map((line) => line.replace(/^(\s*(?:token|auth_token|admin_token|api[_-]?key|secret)\s*:\s*).+$/i, '$1"<redacted>"')).join("\n");
 }
 
 function renderTraceRow(item) {
@@ -242,11 +460,13 @@ document.querySelectorAll(".tab").forEach((button) => {
 tokenInput.addEventListener("input", adminToken);
 document.querySelector("#refresh-overview").addEventListener("click", refreshOverview);
 document.querySelector("#refresh-usage").addEventListener("click", refreshUsage);
+document.querySelector("#usage-window").addEventListener("change", syncUsageBucketInput);
 document.querySelector("#refresh-quota").addEventListener("click", refreshQuota);
 document.querySelector("#refresh-latency").addEventListener("click", refreshLatency);
 document.querySelector("#refresh-logs").addEventListener("click", refreshLogs);
 document.querySelector("#load-config").addEventListener("click", loadConfig);
 document.querySelector("#validate-config").addEventListener("click", () => submitConfig("/admin/config/validate"));
-document.querySelector("#update-config").addEventListener("click", () => submitConfig("/admin/config/update"));
+document.querySelector("#update-config").addEventListener("click", updateConfigWithConfirm);
 
+syncUsageBucketInput();
 refreshOverview();

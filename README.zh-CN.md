@@ -494,7 +494,7 @@ admin:
     max_bytes: 65536
 ```
 
-UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`。日志只会读取配置指定的本地日志文件，并对常见 token、key、authorization、secret 字段做脱敏。它是内置单页控制台，不需要额外前端构建步骤。
+UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/overview`、`/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`。Overview 会展示请求、错误、fallback、latency、quota、provider health、最近治理事件，以及 config path、logs 可用性等 Admin 自检摘要卡片。Usage 支持 `group_by`、`window`、`bucket` 筛选。日志只会读取配置指定的本地日志文件，支持行数/字节限制，会展示 path、是否截断、读取上限等元信息，并对常见 token、key、authorization、secret 字段做脱敏。当前配置读取会返回脱敏展示副本，配置更新前会展示脱敏 diff preview，并要求浏览器二次确认后才写入。Admin API 操作会写入 `admin_audit` 日志，但不会记录 Authorization header、token、请求 body、配置内容或日志内容。它是内置单页控制台，不需要额外前端构建步骤。
 
 ### 15. 校验配置变更
 

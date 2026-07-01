@@ -494,7 +494,7 @@ admin:
     max_bytes: 65536
 ```
 
-The UI stores the Admin UI token only in browser local storage and uses `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, and `/admin/config/update`. Logs are read only from the configured local log path and are redacted for common token, key, authorization, and secret fields. It is an embedded single-page console and does not require a frontend build step.
+The UI stores the Admin UI token only in browser local storage and uses `/admin/overview`, `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, and `/admin/config/update`. The Overview page shows request, error, fallback, latency, quota, provider health, recent governance event, and Admin self-check summaries such as config path and log availability. Usage supports `group_by`, `window`, and `bucket` filters. Logs are read only from the configured local log path, support line/byte limits, show path/truncation/read-limit metadata, and are redacted for common token, key, authorization, and secret fields. Current config loading returns a redacted display copy, and config updates show a redacted diff preview plus browser confirmation before writing. Admin API operations emit `admin_audit` log entries without recording Authorization headers, tokens, request bodies, config content, or log content. It is an embedded single-page console and does not require a frontend build step.
 
 ### 15. Validate config changes
 

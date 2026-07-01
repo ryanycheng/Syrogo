@@ -39,11 +39,11 @@
           <div id="health-status" class="status muted">Not loaded</div>
         </article>
         <article class="card wide">
-          <h3>Latency summary</h3>
-          <div id="latency-summary" class="summary-grid"></div>
+          <h3>Admin overview</h3>
+          <div id="overview-summary" class="summary-grid"></div>
         </article>
         <article class="card full">
-          <h3>Governance</h3>
+          <h3>Details</h3>
           <pre id="governance-json" class="json-block">Not loaded</pre>
         </article>
       </div>
@@ -53,14 +53,22 @@
       <div class="section-title">
         <h2>Usage</h2>
         <div class="actions">
-          <select id="usage-group-by">
+          <select id="usage-group-by" aria-label="Usage group by">
             <option value="key">key</option>
             <option value="provider">provider</option>
             <option value="model">model</option>
             <option value="inbound">inbound</option>
+            <option value="source">source</option>
             <option value="outbound">outbound</option>
             <option value="error_kind">error_kind</option>
           </select>
+          <select id="usage-window" aria-label="Usage window">
+            <option value="total">total</option>
+            <option value="day">day</option>
+            <option value="week">week</option>
+            <option value="month">month</option>
+          </select>
+          <input id="usage-bucket" type="text" autocomplete="off" aria-label="Usage bucket" placeholder="not required for total">
           <button id="refresh-usage">Refresh</button>
         </div>
       </div>
@@ -87,9 +95,16 @@
       <div class="section-title">
         <h2>Logs</h2>
         <div class="actions">
-          <input id="log-lines" type="number" min="1" value="200" aria-label="Log lines">
+          <input id="log-lines" type="number" min="1" value="200" aria-label="Log lines" title="Maximum lines to display">
+          <input id="log-bytes" type="number" min="1" aria-label="Log max bytes" placeholder="config max bytes" title="Optional read limit in bytes">
           <button id="refresh-logs">Refresh</button>
         </div>
+      </div>
+      <div id="logs-meta" class="meta-grid">
+        <div class="meta-item"><span>Path</span><strong>Not loaded</strong></div>
+        <div class="meta-item"><span>Truncated</span><strong>No</strong></div>
+        <div class="meta-item"><span>Read limit</span><strong>Not loaded</strong></div>
+        <div class="meta-item"><span>Refreshed</span><strong>Never</strong></div>
       </div>
       <pre id="logs-content" class="json-block">Not loaded</pre>
     </section>
@@ -103,8 +118,13 @@
           <button id="update-config" class="danger">Update file</button>
         </div>
       </div>
-      <p class="hint">Update writes the validated YAML to the startup config path. Running traffic is not hot-reloaded yet; restart Syrogo after a successful update.</p>
+      <p class="hint">Load current shows a redacted copy by default. Do not submit YAML containing &lt;redacted&gt;; paste a complete config before updating. Update writes the validated YAML to the startup config path and requires a Syrogo restart.</p>
       <textarea id="config-yaml" spellcheck="false" placeholder="Paste Syrogo YAML config here"></textarea>
+      <div class="section-subtitle">
+        <h3>Diff preview</h3>
+        <span class="hint">Shown before update; sensitive values are redacted in the preview.</span>
+      </div>
+      <pre id="config-diff" class="json-block diff-block">No diff preview yet</pre>
       <pre id="config-result" class="json-block">No config request yet</pre>
     </section>
   </main>
