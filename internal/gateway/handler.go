@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/accounting"
@@ -20,17 +21,49 @@ import (
 )
 
 type Handler struct {
-	router             *router.Router
-	dispatcher         *execution.Dispatcher
-	inbounds           []config.InboundSpec
-	clientQuotaTracker *quota.Tracker
-	eventRecorder      *quota.EventRecorder
-	registry           *InboundRegistry
-	logger             *slog.Logger
-	accounting         config.AccountingConfig
-	admin              config.AdminConfig
-	latencyStore       *latency.Store
-	configPath         string
+	runtime        atomic.Value
+	registry       *InboundRegistry
+	logger         *slog.Logger
+	configReloader ConfigReloader
+
+	accounting config.AccountingConfig
+	admin      config.AdminConfig
+	configPath string
+}
+
+type ConfigReloader interface {
+	ApplyConfig(context.Context) (ReloadResult, error)
+	History() []HistoryItem
+	Rollback(context.Context, string) (ReloadResult, error)
+}
+
+type ReloadResult struct {
+	OK              bool   `json:"ok"`
+	Applied         bool   `json:"applied"`
+	RestartRequired bool   `json:"restart_required"`
+	Reason          string `json:"reason,omitempty"`
+	HistoryID       string `json:"history_id,omitempty"`
+	QuotaStateReset bool   `json:"quota_state_reset"`
+}
+
+type HistoryItem struct {
+	ID        string `json:"id"`
+	CreatedAt string `json:"created_at"`
+	Reason    string `json:"reason"`
+	Path      string `json:"path"`
+	Checksum  string `json:"checksum"`
+}
+
+type RuntimeState struct {
+	Router             *router.Router
+	Dispatcher         *execution.Dispatcher
+	Inbounds           []config.InboundSpec
+	ClientQuotaTracker *quota.Tracker
+	EventRecorder      *quota.EventRecorder
+	LatencyStore       *latency.Store
+	Accounting         config.AccountingConfig
+	Admin              config.AdminConfig
+	ConfigPath         string
 }
 
 type loggingResponseWriter struct {
@@ -87,19 +120,46 @@ func NewWithClientQuotaEventsLatencyConfigAndAdmin(r *router.Router, dispatcher 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{
-		router:             r,
-		dispatcher:         dispatcher,
-		inbounds:           append([]config.InboundSpec(nil), inbounds...),
-		clientQuotaTracker: clientQuotaTracker,
-		eventRecorder:      eventRecorder,
-		registry:           DefaultInboundRegistry(),
-		logger:             logger,
-		accounting:         accountingCfg,
-		admin:              normalizeAdminConfig(adminCfg),
-		latencyStore:       latencyStore,
-		configPath:         configPath,
+	h := &Handler{
+		registry: DefaultInboundRegistry(),
+		logger:   logger,
 	}
+	h.ApplyRuntime(RuntimeState{
+		Router:             r,
+		Dispatcher:         dispatcher,
+		Inbounds:           inbounds,
+		ClientQuotaTracker: clientQuotaTracker,
+		EventRecorder:      eventRecorder,
+		LatencyStore:       latencyStore,
+		Accounting:         accountingCfg,
+		Admin:              normalizeAdminConfig(adminCfg),
+		ConfigPath:         configPath,
+	})
+	return h
+}
+
+func (h *Handler) ApplyRuntime(state RuntimeState) {
+	state.Inbounds = append([]config.InboundSpec(nil), state.Inbounds...)
+	state.Admin = normalizeAdminConfig(state.Admin)
+	h.runtime.Store(state)
+}
+
+func (h *Handler) runtimeState() RuntimeState {
+	state, _ := h.runtime.Load().(RuntimeState)
+	if h.accounting != (config.AccountingConfig{}) {
+		state.Accounting = h.accounting
+	}
+	if h.admin != (config.AdminConfig{}) {
+		state.Admin = normalizeAdminConfig(h.admin)
+	}
+	if h.configPath != "" {
+		state.ConfigPath = h.configPath
+	}
+	return state
+}
+
+func (h *Handler) SetConfigReloader(reloader ConfigReloader) {
+	h.configReloader = reloader
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -119,6 +179,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/config", h.withAdminAudit("config_read", h.handleAdminConfig))
 	mux.HandleFunc("/admin/config/validate", h.withAdminAudit("config_validate", h.handleConfigValidate))
 	mux.HandleFunc("/admin/config/update", h.withAdminAudit("config_update", h.handleConfigUpdate))
+	mux.HandleFunc("/admin/config/apply", h.withAdminAudit("config_apply", h.handleConfigApply))
+	mux.HandleFunc("/admin/config/history", h.withAdminAudit("config_history", h.handleConfigHistory))
+	mux.HandleFunc("/admin/config/rollback", h.withAdminAudit("config_rollback", h.handleConfigRollback))
 	mux.Handle("/admin/", http.HandlerFunc(h.handleAdminUI))
 	mux.HandleFunc("/", h.handleRequest)
 }
@@ -144,7 +207,7 @@ func (h *Handler) handleUsageStats(w http.ResponseWriter, r *http.Request) {
 	if window == "" {
 		window = accounting.WindowTotal
 	}
-	items, err := h.dispatcher.QueryUsageBy(accounting.Query{
+	items, err := h.runtimeState().Dispatcher.QueryUsageBy(accounting.Query{
 		GroupBy: groupBy,
 		Window:  window,
 		Bucket:  strings.TrimSpace(r.URL.Query().Get("bucket")),
@@ -165,7 +228,7 @@ func (h *Handler) handleQuotaStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": h.dispatcher.QueryQuota()})
+	writeJSON(w, http.StatusOK, map[string]any{"items": h.runtimeState().Dispatcher.QueryQuota()})
 }
 
 func (h *Handler) handleClientQuotaStats(w http.ResponseWriter, r *http.Request) {
@@ -178,8 +241,9 @@ func (h *Handler) handleClientQuotaStats(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	items := []quota.SnapshotItem(nil)
-	if h.clientQuotaTracker != nil {
-		items = h.clientQuotaTracker.ClientSnapshot()
+	tracker := h.runtimeState().ClientQuotaTracker
+	if tracker != nil {
+		items = tracker.ClientSnapshot()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -193,17 +257,22 @@ func (h *Handler) handleGovernanceStats(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
+	state := h.runtimeState()
 	clientQuota := []quota.SnapshotItem(nil)
-	if h.clientQuotaTracker != nil {
-		clientQuota = h.clientQuotaTracker.ClientSnapshot()
+	if state.ClientQuotaTracker != nil {
+		clientQuota = state.ClientQuotaTracker.ClientSnapshot()
+	}
+	events := []quota.Event(nil)
+	if state.EventRecorder != nil {
+		events = state.EventRecorder.Snapshot()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"provider_health": h.dispatcher.QueryProviderHealth(),
+		"provider_health": state.Dispatcher.QueryProviderHealth(),
 		"quota": map[string]any{
-			"outbound": h.dispatcher.QueryQuota(),
+			"outbound": state.Dispatcher.QueryQuota(),
 			"client":   clientQuota,
 		},
-		"events": h.eventRecorder.Snapshot(),
+		"events": events,
 	})
 }
 
@@ -216,7 +285,7 @@ func (h *Handler) handleLatencyStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
-	writeJSON(w, http.StatusOK, h.dispatcher.QueryLatency())
+	writeJSON(w, http.StatusOK, h.runtimeState().Dispatcher.QueryLatency())
 }
 
 func (h *Handler) handleLatencySummaryStats(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +297,7 @@ func (h *Handler) handleLatencySummaryStats(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
-	writeJSON(w, http.StatusOK, h.dispatcher.QueryLatencySummary())
+	writeJSON(w, http.StatusOK, h.runtimeState().Dispatcher.QueryLatencySummary())
 }
 
 func (h *Handler) handleConfigValidate(w http.ResponseWriter, r *http.Request) {
@@ -262,7 +331,8 @@ func (h *Handler) handleConfigUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
-	if h.configPath == "" {
+	state := h.runtimeState()
+	if state.ConfigPath == "" {
 		writeError(w, http.StatusServiceUnavailable, "config path is not configured")
 		return
 	}
@@ -272,11 +342,11 @@ func (h *Handler) handleConfigUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "read config: "+err.Error())
 		return
 	}
-	if err := config.WriteValidatedFile(h.configPath, body); err != nil {
+	if err := config.WriteValidatedFile(state.ConfigPath, body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": h.configPath, "applied": false})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": state.ConfigPath, "applied": false})
 }
 
 func (h *Handler) handleByCodec(w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) bool {
@@ -323,11 +393,24 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		h.handleConfigUpdate(w, r)
 		return
 	}
+	if r.URL.Path == "/admin/config/apply" {
+		h.handleConfigApply(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/history" {
+		h.handleConfigHistory(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/rollback" {
+		h.handleConfigRollback(w, r)
+		return
+	}
 
 	startedAt := time.Now()
 	lw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 	requestID := startedAt.Format("20060102-150405.000000000")
-	ctx, latencyRecorder := latency.Start(r.Context(), h.latencyStore, requestID, r.Method, r.URL.Path, startedAt)
+	state := h.runtimeState()
+	ctx, latencyRecorder := latency.Start(r.Context(), state.LatencyStore, requestID, r.Method, r.URL.Path, startedAt)
 	lw.recorder = latencyRecorder
 	r = r.WithContext(withRequestID(ctx, requestID))
 	defer func() {
@@ -389,7 +472,7 @@ func (h *Handler) matchInbound(r *http.Request) (config.InboundSpec, config.Clie
 		return config.InboundSpec{}, config.ClientSpec{}, false
 	}
 
-	for _, inbound := range h.inbounds {
+	for _, inbound := range h.runtimeState().Inbounds {
 		if inbound.Path != r.URL.Path {
 			continue
 		}
@@ -411,27 +494,33 @@ func bearerToken(header string) string {
 }
 
 func (h *Handler) authorizeAccounting(r *http.Request) bool {
-	if !h.accounting.Enabled || !h.accounting.ExposeHTTP || h.accounting.AdminToken == "" {
+	accounting := h.runtimeState().Accounting
+	if !accounting.Enabled || !accounting.ExposeHTTP || accounting.AdminToken == "" {
 		return false
 	}
-	return bearerToken(r.Header.Get("Authorization")) == h.accounting.AdminToken
+	return bearerToken(r.Header.Get("Authorization")) == accounting.AdminToken
 }
 
 func (h *Handler) beforeClientRequest(clientName string) quota.Decision {
-	if h.clientQuotaTracker == nil {
+	tracker := h.runtimeState().ClientQuotaTracker
+	if tracker == nil {
 		return quota.Decision{Allowed: true}
 	}
-	return h.clientQuotaTracker.BeforeClientRequest(clientName)
+	return tracker.BeforeClientRequest(clientName)
 }
 
 func (h *Handler) recordClientRequest(clientName string) {
-	if h.clientQuotaTracker != nil {
-		h.clientQuotaTracker.RecordClientRequest(clientName)
+	tracker := h.runtimeState().ClientQuotaTracker
+	if tracker != nil {
+		tracker.RecordClientRequest(clientName)
 	}
 }
 
 func (h *Handler) recordClientLimited(clientName string, inboundName string, decision quota.Decision) {
-	h.eventRecorder.Record(quota.Event{Type: quota.EventClientLimited, Client: clientName, Inbound: inboundName, Reason: decision.Reason, RetryAfter: formatRetryAfter(decision.RetryAfter)})
+	recorder := h.runtimeState().EventRecorder
+	if recorder != nil {
+		recorder.Record(quota.Event{Type: quota.EventClientLimited, Client: clientName, Inbound: inboundName, Reason: decision.Reason, RetryAfter: formatRetryAfter(decision.RetryAfter)})
+	}
 }
 
 func formatRetryAfter(value time.Time) string {
@@ -443,7 +532,7 @@ func formatRetryAfter(value time.Time) string {
 
 func (h *Handler) planRequest(ctx context.Context, req runtime.Request, inbound config.InboundSpec, client config.ClientSpec) (runtime.ExecutionPlan, error) {
 	startedAt := time.Now()
-	plan, err := h.router.Plan(runtime.RouteContext{
+	plan, err := h.runtimeState().Router.Plan(runtime.RouteContext{
 		Request:         req,
 		ClientName:      client.Name,
 		InboundName:     inbound.Name,

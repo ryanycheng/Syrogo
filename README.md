@@ -494,7 +494,7 @@ admin:
     max_bytes: 65536
 ```
 
-The UI stores the Admin UI token only in browser local storage and uses `/admin/overview`, `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, and `/admin/config/update`. The Overview page shows request, error, fallback, latency, quota, provider health, recent governance event, and Admin self-check summaries such as config path and log availability. Usage supports `group_by`, `window`, and `bucket` filters. Logs are read only from the configured local log path, support line/byte limits, show path/truncation/read-limit metadata, and are redacted for common token, key, authorization, and secret fields. Current config loading returns a redacted display copy, and config updates show a redacted diff preview plus browser confirmation before writing. Admin API operations emit `admin_audit` log entries without recording Authorization headers, tokens, request bodies, config content, or log content. It is an embedded single-page console and does not require a frontend build step.
+The UI stores the Admin UI token only in browser local storage and uses `/admin/overview`, `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, `/admin/config/update`, `/admin/config/apply`, `/admin/config/history`, and `/admin/config/rollback`. The Overview page shows request, error, fallback, latency, quota, provider health, recent governance event, and Admin self-check summaries such as config path and log availability. Usage supports `group_by`, `window`, and `bucket` filters. Logs are read only from the configured local log path, support line/byte limits, show path/truncation/read-limit metadata, and are redacted for common token, key, authorization, and secret fields. Current config loading returns a redacted display copy; config updates show a redacted diff preview plus browser confirmation before writing; Apply hot-reloads safe runtime changes and History/Rollback keeps recent local config versions. Admin API operations emit `admin_audit` log entries without recording Authorization headers, tokens, request bodies, config content, or log content. It is an embedded single-page console and does not require a frontend build step.
 
 ### 15. Validate config changes
 
@@ -516,7 +516,14 @@ curl http://127.0.0.1:23234/admin/config/update \
   --data-binary @configs/config.yaml
 ```
 
-This writes the validated YAML to the active config path atomically. The response includes `"applied": false` because running traffic is not hot-reloaded yet; restart Syrogo to use the updated file.
+This writes the validated YAML to the active config path atomically. The response includes `"applied": false`; call `/admin/config/apply` or use the Admin UI Apply button to hot-reload safe runtime changes.
+
+```bash
+curl -X POST http://127.0.0.1:23234/admin/config/apply \
+  -H 'Authorization: Bearer <admin-ui-token>'
+```
+
+Apply rebuilds providers, routing, quota trackers, health tracking, Admin/accounting tokens, and listener-bound inbounds without restarting the listening sockets. Listener count, listen address, listener name, or listener inbound binding changes return `"restart_required": true` and keep the current runtime unchanged. Successful apply creates a local config history entry under `.syrogo-history/` next to the config file; `/admin/config/history` lists recent entries and `/admin/config/rollback` writes one back and applies it.
 
 ### 16. Read usage aggregates
 

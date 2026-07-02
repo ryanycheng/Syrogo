@@ -18,7 +18,7 @@ func (h *Handler) handleOpenAIStreaming(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	events, err := h.dispatcher.DispatchStream(r.Context(), req, plan)
+	events, err := h.runtimeState().Dispatcher.DispatchStream(r.Context(), req, plan)
 	if err != nil {
 		status, message := gatewayError(err)
 		logger.Error("stream dispatch failed",
@@ -56,7 +56,7 @@ func (h *Handler) handleOpenAIResponsesStreaming(w http.ResponseWriter, r *http.
 		return
 	}
 
-	events, err := h.dispatcher.DispatchStream(r.Context(), req, plan)
+	events, err := h.runtimeState().Dispatcher.DispatchStream(r.Context(), req, plan)
 	if err != nil {
 		status, message := gatewayError(err)
 		logger.Error("stream dispatch failed",
@@ -90,7 +90,7 @@ func (h *Handler) handleAnthropicStreaming(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	runtimeEvents, err := h.dispatcher.DispatchStream(r.Context(), req, plan)
+	runtimeEvents, err := h.runtimeState().Dispatcher.DispatchStream(r.Context(), req, plan)
 	if err != nil {
 		status, message := gatewayError(err)
 		logger.Error("stream dispatch failed",

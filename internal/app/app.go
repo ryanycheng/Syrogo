@@ -26,6 +26,23 @@ type App struct {
 	accountingStore    accounting.Store
 	dispatcher         *execution.Dispatcher
 	quotaSnapshotStore *quota.SnapshotStore
+	cfg                config.Config
+	configPath         string
+	reloadManager      *ReloadManager
+}
+
+type listenerBinding struct {
+	listener config.ListenerSpec
+	handler  *gateway.Handler
+}
+
+type appRuntime struct {
+	router             *router.Router
+	dispatcher         *execution.Dispatcher
+	clientQuotaTracker *quota.Tracker
+	eventRecorder      *quota.EventRecorder
+	latencyStore       *latency.Store
+	quotaSnapshotStore *quota.SnapshotStore
 }
 
 func New(cfg config.Config) (*App, error) {
@@ -33,34 +50,55 @@ func New(cfg config.Config) (*App, error) {
 }
 
 func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
+	store, err := newAccountingStore(cfg.Accounting)
+	if err != nil {
+		return nil, err
+	}
+	runtime, err := buildRuntime(cfg, store)
+	if err != nil {
+		return nil, err
+	}
+	listeners, bindings := buildListeners(runtime, cfg, opts.ConfigPath, slog.Default())
+	app := &App{
+		Server:             server.NewListeners(listeners),
+		accountingStore:    store,
+		dispatcher:         runtime.dispatcher,
+		quotaSnapshotStore: runtime.quotaSnapshotStore,
+		cfg:                cfg,
+		configPath:         opts.ConfigPath,
+	}
+	app.reloadManager = NewReloadManager(app, bindings)
+	for _, binding := range bindings {
+		binding.handler.SetConfigReloader(app.reloadManager)
+	}
+	return app, nil
+}
+
+func buildRuntime(cfg config.Config, store accounting.Store) (appRuntime, error) {
 	providers := make(map[string]provider.Provider, len(cfg.Outbounds))
 	registry := provider.DefaultFactoryRegistry()
 	for _, spec := range cfg.Outbounds {
 		httpClient, err := provider.NewHTTPClient(spec.Proxy)
 		if err != nil {
-			return nil, fmt.Errorf("create outbound %q http client: %w", spec.Name, err)
+			return appRuntime{}, fmt.Errorf("create outbound %q http client: %w", spec.Name, err)
 		}
 		instance, err := registry.New(spec.Protocol, spec.Name, spec.Endpoint, spec.AuthToken, spec.Capabilities, httpClient)
 		if err != nil {
-			return nil, err
+			return appRuntime{}, err
 		}
 		providers[spec.Name] = instance
 	}
 
 	r, err := router.New(cfg.Routing, providers, cfg.Outbounds)
 	if err != nil {
-		return nil, err
+		return appRuntime{}, err
 	}
 
-	store, err := newAccountingStore(cfg.Accounting)
-	if err != nil {
-		return nil, err
-	}
 	outboundQuotaTracker := quota.NewTrackerFromOutbounds(cfg.Outbounds)
 	clientQuotaTracker := quota.NewClientTrackerFromInbounds(cfg.Inbounds)
 	quotaSnapshotStore, err := quota.NewSnapshotStore(cfg.Governance.Quota.Snapshot, outboundQuotaTracker, clientQuotaTracker)
 	if err != nil {
-		return nil, err
+		return appRuntime{}, err
 	}
 	outboundNames := make([]string, 0, len(cfg.Outbounds))
 	for _, outbound := range cfg.Outbounds {
@@ -70,27 +108,42 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 	eventRecorder := quota.NewEventRecorder(cfg.Governance.Quota.Events)
 	latencyStore := latency.NewStore(200)
 	dispatcher := execution.NewDispatcherWithStoreQuotaHealthEventsAndLatency(store, outboundQuotaTracker, healthTracker, eventRecorder, latencyStore)
-	listeners := buildListeners(r, dispatcher, cfg, clientQuotaTracker, eventRecorder, latencyStore, opts.ConfigPath, slog.Default())
-
-	return &App{
-		Server:             server.NewListeners(listeners),
-		accountingStore:    store,
+	return appRuntime{
+		router:             r,
 		dispatcher:         dispatcher,
+		clientQuotaTracker: clientQuotaTracker,
+		eventRecorder:      eventRecorder,
+		latencyStore:       latencyStore,
 		quotaSnapshotStore: quotaSnapshotStore,
 	}, nil
 }
 
-func buildListeners(r *router.Router, dispatcher *execution.Dispatcher, cfg config.Config, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, logger *slog.Logger) []server.Listener {
-	listeners := make([]server.Listener, 0, len(cfg.Listeners))
-	for _, listener := range cfg.Listeners {
+func buildListeners(runtime appRuntime, cfg config.Config, configPath string, logger *slog.Logger) ([]server.Listener, []listenerBinding) {
+	listeners := normalizedListeners(cfg)
+	serverListeners := make([]server.Listener, 0, len(listeners))
+	bindings := make([]listenerBinding, 0, len(listeners))
+	for _, listener := range listeners {
 		mux := http.NewServeMux()
-		gateway.NewWithClientQuotaEventsLatencyConfigAndAdmin(r, dispatcher, cfg.ListenerInbounds(listener), clientQuotaTracker, eventRecorder, latencyStore, configPath, cfg.Accounting, cfg.Admin, logger).Register(mux)
-		listeners = append(listeners, server.Listener{
+		handler := gateway.NewWithClientQuotaEventsLatencyConfigAndAdmin(runtime.router, runtime.dispatcher, cfg.ListenerInbounds(listener), runtime.clientQuotaTracker, runtime.eventRecorder, runtime.latencyStore, configPath, cfg.Accounting, cfg.Admin, logger)
+		handler.Register(mux)
+		serverListeners = append(serverListeners, server.Listener{
 			Addr:    listener.Listen,
 			Handler: mux,
 		})
+		bindings = append(bindings, listenerBinding{listener: listener, handler: handler})
 	}
-	return listeners
+	return serverListeners, bindings
+}
+
+func normalizedListeners(cfg config.Config) []config.ListenerSpec {
+	if len(cfg.Listeners) > 0 {
+		return append([]config.ListenerSpec(nil), cfg.Listeners...)
+	}
+	inbounds := make([]string, 0, len(cfg.Inbounds))
+	for _, inbound := range cfg.Inbounds {
+		inbounds = append(inbounds, inbound.Name)
+	}
+	return []config.ListenerSpec{{Name: "default", Listen: cfg.Server.Listen, Inbounds: inbounds}}
 }
 
 func (a *App) Close(ctx context.Context) error {

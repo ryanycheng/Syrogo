@@ -116,15 +116,22 @@
           <button id="load-config">Load current</button>
           <button id="validate-config">Validate</button>
           <button id="update-config" class="danger">Update file</button>
+          <button id="apply-config">Apply current file</button>
+          <button id="load-config-history">Load history</button>
         </div>
       </div>
-      <p class="hint">Load current shows a redacted copy by default. Do not submit YAML containing &lt;redacted&gt;; paste a complete config before updating. Update writes the validated YAML to the startup config path and requires a Syrogo restart.</p>
+      <p class="hint">Load current shows a redacted copy by default. Do not submit YAML containing &lt;redacted&gt;; paste a complete config before updating. Update writes validated YAML to the startup config path. Apply hot-reloads safe runtime changes; listener changes still require restart.</p>
       <textarea id="config-yaml" spellcheck="false" placeholder="Paste Syrogo YAML config here"></textarea>
       <div class="section-subtitle">
         <h3>Diff preview</h3>
         <span class="hint">Shown before update; sensitive values are redacted in the preview.</span>
       </div>
       <pre id="config-diff" class="json-block diff-block">No diff preview yet</pre>
+      <div class="section-subtitle">
+        <h3>History</h3>
+        <span class="hint">Rollback writes the selected historical config back and applies it.</span>
+      </div>
+      <div id="config-history" class="table-wrap">No history loaded</div>
       <pre id="config-result" class="json-block">No config request yet</pre>
     </section>
   </main>

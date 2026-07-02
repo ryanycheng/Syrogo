@@ -494,7 +494,7 @@ admin:
     max_bytes: 65536
 ```
 
-UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/overview`、`/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`。Overview 会展示请求、错误、fallback、latency、quota、provider health、最近治理事件，以及 config path、logs 可用性等 Admin 自检摘要卡片。Usage 支持 `group_by`、`window`、`bucket` 筛选。日志只会读取配置指定的本地日志文件，支持行数/字节限制，会展示 path、是否截断、读取上限等元信息，并对常见 token、key、authorization、secret 字段做脱敏。当前配置读取会返回脱敏展示副本，配置更新前会展示脱敏 diff preview，并要求浏览器二次确认后才写入。Admin API 操作会写入 `admin_audit` 日志，但不会记录 Authorization header、token、请求 body、配置内容或日志内容。它是内置单页控制台，不需要额外前端构建步骤。
+UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/overview`、`/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`、`/admin/config/apply`、`/admin/config/history`、`/admin/config/rollback`。Overview 会展示请求、错误、fallback、latency、quota、provider health、最近治理事件，以及 config path、logs 可用性等 Admin 自检摘要卡片。Usage 支持 `group_by`、`window`、`bucket` 筛选。日志只会读取配置指定的本地日志文件，支持行数/字节限制，会展示 path、是否截断、读取上限等元信息，并对常见 token、key、authorization、secret 字段做脱敏。当前配置读取会返回脱敏展示副本；配置更新前会展示脱敏 diff preview，并要求浏览器二次确认后才写入；Apply 会热加载安全的运行时变更；History/Rollback 会保留并恢复最近的本地配置版本。Admin API 操作会写入 `admin_audit` 日志，但不会记录 Authorization header、token、请求 body、配置内容或日志内容。它是内置单页控制台，不需要额外前端构建步骤。
 
 ### 15. 校验配置变更
 
@@ -516,7 +516,14 @@ curl http://127.0.0.1:23234/admin/config/update \
   --data-binary @configs/config.yaml
 ```
 
-这个端点会把校验通过的 YAML 原子写入当前启动配置路径。响应中会包含 `"applied": false`，表示当前运行流量还不会热加载；需要重启 Syrogo 才会使用新配置。
+这个端点会把校验通过的 YAML 原子写入当前启动配置路径。响应中会包含 `"applied": false`；调用 `/admin/config/apply` 或在 Admin UI 点击 Apply current file 后，可以热加载安全的运行时变更。
+
+```bash
+curl -X POST http://127.0.0.1:23234/admin/config/apply \
+  -H 'Authorization: Bearer <admin-ui-token>'
+```
+
+Apply 会在不重启监听 socket 的前提下重建 provider、routing、quota tracker、health tracking、Admin/accounting token 和 listener 绑定的 inbound。listener 数量、listen 地址、listener 名称或 listener inbound 绑定发生变化时，会返回 `"restart_required": true`，并保持当前运行态不变。成功 apply 会在配置文件同目录的 `.syrogo-history/` 中创建本地配置历史；`/admin/config/history` 可以列出最近版本，`/admin/config/rollback` 可以写回指定版本并 apply。
 
 ### 16. 查看 usage 聚合统计
 

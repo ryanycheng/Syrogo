@@ -311,7 +311,7 @@ async function submitConfig(path) {
       body,
     });
     result.textContent = pretty(response);
-    showToast(path.endsWith("update") ? "Config file updated. Restart Syrogo to apply it." : "Config is valid.");
+    showToast(path.endsWith("update") ? "Config file updated. Click Apply current file to hot-reload safe changes." : "Config is valid.");
   } catch (error) {
     result.textContent = error.message;
     showToast("Config request failed.");
@@ -345,7 +345,7 @@ function updateConfigWithConfirm() {
     "",
     "A redacted diff preview has been generated below the editor.",
     "This will overwrite the startup config file after validation.",
-    "Running traffic is not hot-reloaded; restart Syrogo to apply the new config.",
+    "After updating, click Apply current file to hot-reload safe runtime changes.",
     "Validate first if you have not already done so.",
   ].join("\n"));
   if (!confirmed) {
@@ -354,6 +354,90 @@ function updateConfigWithConfirm() {
     return;
   }
   submitConfig("/admin/config/update");
+}
+
+async function applyConfigWithConfirm() {
+  const result = document.querySelector("#config-result");
+  const confirmed = window.confirm([
+    "Apply the current startup config file now?",
+    "",
+    "Safe runtime changes will be hot-reloaded.",
+    "Listener address/count/binding changes will report restart_required instead.",
+  ].join("\n"));
+  if (!confirmed) {
+    result.textContent = "Config apply cancelled.";
+    showToast("Config apply cancelled.");
+    return;
+  }
+  try {
+    const response = await fetchJSON("/admin/config/apply", { method: "POST" });
+    result.textContent = pretty(response);
+    if (response.restart_required) {
+      showToast(`Restart required: ${response.reason || "listener changed"}`);
+    } else if (response.applied) {
+      loadedConfigRaw = "";
+      showToast("Config applied.");
+      loadConfigHistory();
+    } else {
+      showToast("Config was not applied.");
+    }
+  } catch (error) {
+    result.textContent = error.message;
+    showToast("Apply config failed.");
+  }
+}
+
+async function loadConfigHistory() {
+  const target = document.querySelector("#config-history");
+  try {
+    const response = await fetchJSON("/admin/config/history");
+    const items = response.items || [];
+    target.innerHTML = items.length === 0 ? emptyState("No config history yet.") : renderHistoryTable(items);
+    showToast("Config history loaded.");
+  } catch (error) {
+    target.innerHTML = errorBlock(error.message);
+    showToast("Load config history failed.");
+  }
+}
+
+function renderHistoryTable(items) {
+  return `<table>
+    <thead><tr><th>ID</th><th>Created</th><th>Reason</th><th>Checksum</th><th>Action</th></tr></thead>
+    <tbody>${items.map((item) => `<tr>
+      <td><code>${escapeHTML(item.id || "")}</code></td>
+      <td>${escapeHTML(item.created_at || "")}</td>
+      <td>${escapeHTML(item.reason || "")}</td>
+      <td><code>${escapeHTML((item.checksum || "").slice(0, 12))}</code></td>
+      <td><button class="small" data-history-id="${escapeHTML(item.id || "")}">Rollback</button></td>
+    </tr>`).join("")}</tbody>
+  </table>`;
+}
+
+async function rollbackConfig(id) {
+  const result = document.querySelector("#config-result");
+  if (!id) {
+    showToast("Select a history item first.");
+    return;
+  }
+  if (!window.confirm(`Rollback to history item ${id}?`)) {
+    result.textContent = "Config rollback cancelled.";
+    showToast("Config rollback cancelled.");
+    return;
+  }
+  try {
+    const response = await fetchJSON("/admin/config/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    result.textContent = pretty(response);
+    showToast(response.restart_required ? "Rollback needs restart." : "Config rolled back and applied.");
+    loadConfig();
+    loadConfigHistory();
+  } catch (error) {
+    result.textContent = error.message;
+    showToast("Rollback failed.");
+  }
 }
 
 function renderConfigDiff(previous, next) {
@@ -467,6 +551,14 @@ document.querySelector("#refresh-logs").addEventListener("click", refreshLogs);
 document.querySelector("#load-config").addEventListener("click", loadConfig);
 document.querySelector("#validate-config").addEventListener("click", () => submitConfig("/admin/config/validate"));
 document.querySelector("#update-config").addEventListener("click", updateConfigWithConfirm);
+document.querySelector("#apply-config").addEventListener("click", applyConfigWithConfirm);
+document.querySelector("#load-config-history").addEventListener("click", loadConfigHistory);
+document.querySelector("#config-history").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-history-id]");
+  if (button) {
+    rollbackConfig(button.dataset.historyId);
+  }
+});
 
 syncUsageBucketInput();
 refreshOverview();

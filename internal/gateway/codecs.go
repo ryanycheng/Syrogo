@@ -10,7 +10,7 @@ import (
 )
 
 func dispatchOrWriteError(h *Handler, w http.ResponseWriter, r *http.Request, req runtime.Request, plan runtime.ExecutionPlan, logger *slog.Logger) (runtime.Response, bool) {
-	resp, err := h.dispatcher.Dispatch(r.Context(), req, plan)
+	resp, err := h.runtimeState().Dispatcher.Dispatch(r.Context(), req, plan)
 	if err != nil {
 		status, message := gatewayError(err)
 		errorKind := string(provider.NormalizeError(err))

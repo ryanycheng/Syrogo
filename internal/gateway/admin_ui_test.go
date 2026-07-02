@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -52,7 +53,7 @@ func TestAdminUIReturnsIndexHTMLWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want text/html", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"Admin UI token", "/admin/app.js", "usage-window", "usage-bucket", "log-bytes", "logs-meta", "overview-summary", "config-diff"} {
+	for _, want := range []string{"Admin UI token", "/admin/app.js", "usage-window", "usage-bucket", "log-bytes", "logs-meta", "overview-summary", "config-diff", "Apply current file", "config-history"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
@@ -75,7 +76,7 @@ func TestAdminUIReturnsStaticAssetsWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want javascript", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"/admin/usage", "/admin/logs", "/admin/overview", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes"} {
+	for _, want := range []string{"/admin/usage", "/admin/logs", "/admin/overview", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
@@ -334,5 +335,67 @@ func TestAdminAuditLogsActionWithoutSecrets(t *testing.T) {
 	text = logs.String()
 	if !strings.Contains(text, "action=logs") || !strings.Contains(text, "status=405") {
 		t.Fatalf("logs = %s, want method not allowed audit", text)
+	}
+}
+
+type fakeConfigReloader struct{}
+
+func (fakeConfigReloader) ApplyConfig(context.Context) (ReloadResult, error) {
+	return ReloadResult{OK: true, Applied: true, HistoryID: "history-1", QuotaStateReset: true}, nil
+}
+
+func (fakeConfigReloader) History() []HistoryItem {
+	return []HistoryItem{{ID: "history-1", CreatedAt: "2026-07-02T00:00:00Z", Reason: "apply", Path: "/tmp/config.yaml", Checksum: "abc"}}
+}
+
+func (fakeConfigReloader) Rollback(context.Context, string) (ReloadResult, error) {
+	return ReloadResult{OK: true, Applied: true, HistoryID: "history-2", QuotaStateReset: true}, nil
+}
+
+func TestAdminConfigApplyUsesReloader(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.SetConfigReloader(fakeConfigReloader{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/apply", "admin-ui-token", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"applied":true`) || !strings.Contains(w.Body.String(), `"history_id":"history-1"`) {
+		t.Fatalf("body = %s, want applied reload result", w.Body.String())
+	}
+}
+
+func TestAdminConfigHistoryUsesReloader(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.SetConfigReloader(fakeConfigReloader{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodGet, "/admin/config/history", "admin-ui-token", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"id":"history-1"`) {
+		t.Fatalf("body = %s, want history item", w.Body.String())
+	}
+}
+
+func TestAdminConfigRollbackUsesReloader(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.SetConfigReloader(fakeConfigReloader{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/rollback", "admin-ui-token", []byte(`{"id":"history-1"}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"applied":true`) {
+		t.Fatalf("body = %s, want applied rollback result", w.Body.String())
 	}
 }

@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"embed"
+	"encoding/json"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -26,7 +28,7 @@ const (
 var adminUIFiles embed.FS
 
 func (h *Handler) handleAdminUI(w http.ResponseWriter, r *http.Request) {
-	if !h.admin.Enabled {
+	if !h.runtimeState().Admin.Enabled {
 		http.NotFound(w, r)
 		return
 	}
@@ -60,10 +62,11 @@ func (h *Handler) withAdminAudit(action string, next http.HandlerFunc) http.Hand
 }
 
 func (h *Handler) authorizeAdmin(r *http.Request) bool {
-	if !h.admin.Enabled || h.admin.Token == "" {
+	admin := h.runtimeState().Admin
+	if !admin.Enabled || admin.Token == "" {
 		return false
 	}
-	return bearerToken(r.Header.Get("Authorization")) == h.admin.Token
+	return bearerToken(r.Header.Get("Authorization")) == admin.Token
 }
 
 func (h *Handler) authorizeAdminOrAccounting(r *http.Request) bool {
@@ -79,17 +82,18 @@ func (h *Handler) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
-	if h.configPath == "" {
+	state := h.runtimeState()
+	if state.ConfigPath == "" {
 		writeError(w, http.StatusServiceUnavailable, "config path is not configured")
 		return
 	}
-	content, err := os.ReadFile(h.configPath)
+	content, err := os.ReadFile(state.ConfigPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "read config: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"path":             h.configPath,
+		"path":             state.ConfigPath,
 		"content":          string(content),
 		"redacted_content": redactConfigContent(string(content)),
 	})
@@ -112,7 +116,7 @@ func (h *Handler) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 	if window == "" {
 		window = accounting.WindowTotal
 	}
-	items, err := h.dispatcher.QueryUsageBy(accounting.Query{
+	items, err := h.runtimeState().Dispatcher.QueryUsageBy(accounting.Query{
 		GroupBy: groupBy,
 		Window:  window,
 		Bucket:  strings.TrimSpace(r.URL.Query().Get("bucket")),
@@ -137,7 +141,8 @@ func (h *Handler) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) adminOverview() map[string]any {
-	usageItems, _ := h.dispatcher.QueryUsageBy(accounting.Query{GroupBy: "key", Window: accounting.WindowTotal})
+	state := h.runtimeState()
+	usageItems, _ := state.Dispatcher.QueryUsageBy(accounting.Query{GroupBy: "key", Window: accounting.WindowTotal})
 	usage := map[string]int{"request_count": 0, "success_count": 0, "error_count": 0, "fallback_count": 0}
 	for _, item := range usageItems {
 		usage["request_count"] += item.RequestCount
@@ -146,11 +151,11 @@ func (h *Handler) adminOverview() map[string]any {
 		usage["fallback_count"] += item.FallbackCount
 	}
 
-	latencySummary := h.dispatcher.QueryLatencySummary()
-	outboundQuota := h.dispatcher.QueryQuota()
+	latencySummary := state.Dispatcher.QueryLatencySummary()
+	outboundQuota := state.Dispatcher.QueryQuota()
 	clientQuota := []quota.SnapshotItem(nil)
-	if h.clientQuotaTracker != nil {
-		clientQuota = h.clientQuotaTracker.ClientSnapshot()
+	if state.ClientQuotaTracker != nil {
+		clientQuota = state.ClientQuotaTracker.ClientSnapshot()
 	}
 	quotaSummary := map[string]int{
 		"outbound_items":         len(outboundQuota),
@@ -160,7 +165,7 @@ func (h *Handler) adminOverview() map[string]any {
 		"configured_quota_items": len(outboundQuota) + len(clientQuota),
 	}
 
-	healthItems := h.dispatcher.QueryProviderHealth()
+	healthItems := state.Dispatcher.QueryProviderHealth()
 	health := map[string]int{"provider_count": len(healthItems), "degraded_count": 0, "probing_count": 0}
 	for _, item := range healthItems {
 		if item.State == provider.HealthDegraded {
@@ -171,8 +176,8 @@ func (h *Handler) adminOverview() map[string]any {
 		}
 	}
 	events := []quota.Event(nil)
-	if h.eventRecorder != nil {
-		events = h.eventRecorder.Snapshot()
+	if state.EventRecorder != nil {
+		events = state.EventRecorder.Snapshot()
 	}
 
 	return map[string]any{
@@ -186,12 +191,12 @@ func (h *Handler) adminOverview() map[string]any {
 		"quota":  quotaSummary,
 		"health": health,
 		"admin": map[string]any{
-			"enabled":            h.admin.Enabled,
-			"config_path_set":    h.configPath != "",
-			"logs_enabled":       h.admin.Logs.Enabled,
-			"logs_path":          h.admin.Logs.Path,
-			"logs_max_bytes":     h.admin.Logs.MaxBytes,
-			"accounting_enabled": h.accounting.Enabled && h.accounting.ExposeHTTP,
+			"enabled":            state.Admin.Enabled,
+			"config_path_set":    state.ConfigPath != "",
+			"logs_enabled":       state.Admin.Logs.Enabled,
+			"logs_path":          state.Admin.Logs.Path,
+			"logs_max_bytes":     state.Admin.Logs.MaxBytes,
+			"accounting_enabled": state.Accounting.Enabled && state.Accounting.ExposeHTTP,
 		},
 		"recent_events": map[string]any{"count": len(events), "items": events},
 	}
@@ -216,12 +221,13 @@ func (h *Handler) handleAdminQuota(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
+	state := h.runtimeState()
 	clientQuota := []quota.SnapshotItem(nil)
-	if h.clientQuotaTracker != nil {
-		clientQuota = h.clientQuotaTracker.ClientSnapshot()
+	if state.ClientQuotaTracker != nil {
+		clientQuota = state.ClientQuotaTracker.ClientSnapshot()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"outbound": h.dispatcher.QueryQuota(),
+		"outbound": state.Dispatcher.QueryQuota(),
 		"client":   clientQuota,
 	})
 }
@@ -235,7 +241,7 @@ func (h *Handler) handleAdminLatency(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
-	writeJSON(w, http.StatusOK, h.dispatcher.QueryLatency())
+	writeJSON(w, http.StatusOK, h.runtimeState().Dispatcher.QueryLatency())
 }
 
 func (h *Handler) handleAdminLatencySummary(w http.ResponseWriter, r *http.Request) {
@@ -247,7 +253,7 @@ func (h *Handler) handleAdminLatencySummary(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
-	writeJSON(w, http.StatusOK, h.dispatcher.QueryLatencySummary())
+	writeJSON(w, http.StatusOK, h.runtimeState().Dispatcher.QueryLatencySummary())
 }
 
 func (h *Handler) handleAdminLogs(w http.ResponseWriter, r *http.Request) {
@@ -259,15 +265,16 @@ func (h *Handler) handleAdminLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
-	if !h.admin.Logs.Enabled {
+	state := h.runtimeState()
+	if !state.Admin.Logs.Enabled {
 		writeError(w, http.StatusNotFound, "admin logs are not enabled")
 		return
 	}
-	path := h.admin.Logs.Path
+	path := state.Admin.Logs.Path
 	if path == "" {
 		path = defaultAdminLogPath
 	}
-	maxBytes := boundedAdminLogBytes(h.admin.Logs.MaxBytes, r.URL.Query().Get("bytes"))
+	maxBytes := boundedAdminLogBytes(state.Admin.Logs.MaxBytes, r.URL.Query().Get("bytes"))
 	content, truncated, err := readTail(path, maxBytes)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "read logs: "+err.Error())
@@ -284,6 +291,71 @@ func (h *Handler) handleAdminLogs(w http.ResponseWriter, r *http.Request) {
 		"truncated": truncated,
 		"content":   redactLogContent(content),
 	})
+}
+
+func (h *Handler) handleConfigApply(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAdmin(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	if h.configReloader == nil {
+		writeError(w, http.StatusServiceUnavailable, "config reload is not configured")
+		return
+	}
+	result, err := h.configReloader.ApplyConfig(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *Handler) handleConfigHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAdmin(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	if h.configReloader == nil {
+		writeError(w, http.StatusServiceUnavailable, "config reload is not configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": h.configReloader.History()})
+}
+
+func (h *Handler) handleConfigRollback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAdmin(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	if h.configReloader == nil {
+		writeError(w, http.StatusServiceUnavailable, "config reload is not configured")
+		return
+	}
+	var payload struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&payload); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "read rollback request: "+err.Error())
+		return
+	}
+	result, err := h.configReloader.Rollback(r.Context(), strings.TrimSpace(payload.ID))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func boundedAdminLogBytes(configured int, requested string) int {
