@@ -87,6 +87,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan run
 			"protocol": step.OutboundProtocol,
 		})
 		if err == nil {
+			latency.FromContext(ctx).SetFallbackCount(i)
 			d.recordSuccess(step.OutboundName, decision.Probe, healthDecision.Probe)
 			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, resp.Model, resp.Usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), i))
 			return resp, nil
@@ -150,6 +151,7 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 			"stream":   "true",
 		})
 		if err == nil {
+			latency.FromContext(ctx).SetFallbackCount(i)
 			return d.wrapStream(ctx, plan, step, stepReq.Model, i, startedAt, events, decision.Probe, healthDecision.Probe), nil
 		}
 

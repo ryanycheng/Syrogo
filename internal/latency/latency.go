@@ -5,6 +5,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 type contextKey string
@@ -12,19 +14,31 @@ type contextKey string
 const traceContextKey contextKey = "latency_trace"
 
 type Trace struct {
-	RequestID       string `json:"request_id"`
-	Method          string `json:"method"`
-	Path            string `json:"path"`
-	Inbound         string `json:"inbound,omitempty"`
-	InboundProtocol string `json:"inbound_protocol,omitempty"`
-	ClientName      string `json:"client_name,omitempty"`
-	ActiveTag       string `json:"active_tag,omitempty"`
-	Status          int    `json:"status"`
-	ErrorKind       string `json:"error_kind,omitempty"`
-	StartedAt       string `json:"started_at"`
-	FinishedAt      string `json:"finished_at,omitempty"`
-	DurationMs      int64  `json:"duration_ms"`
-	Spans           []Span `json:"spans"`
+	RequestID       string     `json:"request_id"`
+	Method          string     `json:"method"`
+	Path            string     `json:"path"`
+	Inbound         string     `json:"inbound,omitempty"`
+	InboundProtocol string     `json:"inbound_protocol,omitempty"`
+	ClientName      string     `json:"client_name,omitempty"`
+	ActiveTag       string     `json:"active_tag,omitempty"`
+	MatchedRule     string     `json:"matched_rule,omitempty"`
+	Strategy        string     `json:"strategy,omitempty"`
+	ResolvedToTags  []string   `json:"resolved_to_tags,omitempty"`
+	PlannedSteps    []PlanStep `json:"planned_steps,omitempty"`
+	FallbackCount   int        `json:"fallback_count,omitempty"`
+	Status          int        `json:"status"`
+	ErrorKind       string     `json:"error_kind,omitempty"`
+	StartedAt       string     `json:"started_at"`
+	FinishedAt      string     `json:"finished_at,omitempty"`
+	DurationMs      int64      `json:"duration_ms"`
+	Spans           []Span     `json:"spans"`
+}
+
+type PlanStep struct {
+	OutboundName     string `json:"outbound_name"`
+	OutboundProtocol string `json:"outbound_protocol"`
+	Model            string `json:"model,omitempty"`
+	OnError          string `json:"on_error,omitempty"`
 }
 
 type Recorder struct {
@@ -108,6 +122,36 @@ func (r *Recorder) SetRoute(inbound, protocol, clientName, activeTag string) {
 	r.trace.InboundProtocol = protocol
 	r.trace.ClientName = clientName
 	r.trace.ActiveTag = activeTag
+}
+
+func (r *Recorder) SetPlan(plan runtime.ExecutionPlan) {
+	if r == nil {
+		return
+	}
+	steps := make([]PlanStep, 0, len(plan.Steps))
+	for _, step := range plan.Steps {
+		steps = append(steps, PlanStep{
+			OutboundName:     step.OutboundName,
+			OutboundProtocol: step.OutboundProtocol,
+			Model:            step.Model,
+			OnError:          string(step.OnError),
+		})
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.trace.MatchedRule = plan.MatchedRule
+	r.trace.Strategy = string(plan.Strategy)
+	r.trace.ResolvedToTags = append([]string(nil), plan.ResolvedToTags...)
+	r.trace.PlannedSteps = steps
+}
+
+func (r *Recorder) SetFallbackCount(count int) {
+	if r == nil || count <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.trace.FallbackCount = count
 }
 
 func (r *Recorder) SetErrorKind(errorKind string) {

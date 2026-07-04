@@ -494,7 +494,7 @@ admin:
     max_bytes: 65536
 ```
 
-The UI stores the Admin UI token only in browser local storage and uses `/admin/overview`, `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, `/admin/config/update`, `/admin/config/apply`, `/admin/config/history`, and `/admin/config/rollback`. The Overview page shows request, error, fallback, latency, quota, provider health, recent governance event, and Admin self-check summaries such as config path and log availability. Usage supports `group_by`, `window`, and `bucket` filters. Logs are read only from the configured local log path, support line/byte limits, show path/truncation/read-limit metadata, and are redacted for common token, key, authorization, and secret fields. Current config loading returns a redacted display copy; config updates show a redacted diff preview plus browser confirmation before writing; Apply hot-reloads safe runtime changes and History/Rollback keeps recent local config versions. Admin API operations emit `admin_audit` log entries without recording Authorization headers, tokens, request bodies, config content, or log content. It is an embedded single-page console and does not require a frontend build step.
+The UI stores the Admin UI token only in browser local storage and uses `/admin/overview`, `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, `/admin/config/update`, `/admin/config/apply`, `/admin/config/history`, `/admin/config/history/diff`, `/admin/config/rollback`, `/admin/debug/traces`, `/admin/debug/route-dry-run`, and `/admin/debug/providers`. The Overview page shows request, error, fallback, latency, quota, provider health, recent governance event, and Admin self-check summaries such as config path and log availability. Usage supports `group_by`, `window`, and `bucket` filters. Debug shows recent traces with matched rule, routing strategy, planned steps, fallback count, spans, a side-effect-free route dry-run form, and provider health/quota/event/latency aggregates. Logs are read only from the configured local log path, support line/byte limits, show path/truncation/read-limit metadata, and are redacted for common token, key, authorization, and secret fields. Current config loading returns a redacted display copy; config updates show a redacted diff preview plus browser confirmation before writing; Apply hot-reloads safe runtime changes and History/Rollback keeps recent local config versions with redacted diff viewing. Admin API operations emit `admin_audit` log entries without recording Authorization headers, tokens, request bodies, config content, or log content. It is an embedded single-page console and does not require a frontend build step.
 
 ### 15. Validate config changes
 
@@ -523,7 +523,18 @@ curl -X POST http://127.0.0.1:23234/admin/config/apply \
   -H 'Authorization: Bearer <admin-ui-token>'
 ```
 
-Apply rebuilds providers, routing, quota trackers, health tracking, Admin/accounting tokens, and listener-bound inbounds without restarting the listening sockets. Listener count, listen address, listener name, or listener inbound binding changes return `"restart_required": true` and keep the current runtime unchanged. Successful apply creates a local config history entry under `.syrogo-history/` next to the config file; `/admin/config/history` lists recent entries and `/admin/config/rollback` writes one back and applies it.
+Apply rebuilds providers, routing, quota trackers, health tracking, Admin/accounting tokens, and listener-bound inbounds without restarting the listening sockets. Listener count, listen address, listener name, or listener inbound binding changes return `"restart_required": true` and keep the current runtime unchanged. Successful apply creates a local config history entry under `.syrogo-history/` next to the config file; `/admin/config/history` lists recent entries, `/admin/config/history/diff?id=<history-id>` returns redacted current/history YAML for comparison, and `/admin/config/rollback` writes one back and applies it.
+
+To validate routing without changing round-robin state or sending a model request, use route dry-run:
+
+```bash
+curl -X POST http://127.0.0.1:23234/admin/debug/route-dry-run \
+  -H 'Authorization: Bearer <admin-ui-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"inbound":"openai-entry","client":"office-key","model":"gpt-4"}'
+```
+
+The dry-run response includes the matched rule, strategy, resolved tags, and ordered outbound steps. It accepts only inbound/client/model/stream metadata and does not accept request bodies, headers, tokens, or replay content.
 
 ### 16. Read usage aggregates
 

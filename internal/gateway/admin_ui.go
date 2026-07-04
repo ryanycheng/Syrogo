@@ -16,6 +16,7 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/config"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/quota"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
 const (
@@ -26,6 +27,33 @@ const (
 
 //go:embed adminui/*
 var adminUIFiles embed.FS
+
+type routeDryRunRequest struct {
+	Inbound string `json:"inbound"`
+	Client  string `json:"client"`
+	Model   string `json:"model"`
+	Stream  bool   `json:"stream"`
+}
+
+type routeDryRunStep struct {
+	Index            int    `json:"index"`
+	OutboundName     string `json:"outbound_name"`
+	OutboundProtocol string `json:"outbound_protocol"`
+	Model            string `json:"model,omitempty"`
+	OnError          string `json:"on_error,omitempty"`
+}
+
+type routeDryRunResponse struct {
+	Inbound         string            `json:"inbound"`
+	InboundProtocol string            `json:"inbound_protocol"`
+	Client          string            `json:"client"`
+	ActiveTag       string            `json:"active_tag"`
+	RequestedModel  string            `json:"requested_model"`
+	MatchedRule     string            `json:"matched_rule"`
+	Strategy        string            `json:"strategy"`
+	ResolvedToTags  []string          `json:"resolved_to_tags"`
+	Steps           []routeDryRunStep `json:"steps"`
+}
 
 func (h *Handler) handleAdminUI(w http.ResponseWriter, r *http.Request) {
 	if !h.runtimeState().Admin.Enabled {
@@ -256,6 +284,87 @@ func (h *Handler) handleAdminLatencySummary(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, h.runtimeState().Dispatcher.QueryLatencySummary())
 }
 
+func (h *Handler) handleDebugTraces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAdmin(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	writeJSON(w, http.StatusOK, h.runtimeState().Dispatcher.QueryLatency())
+}
+
+func (h *Handler) handleRouteDryRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAdmin(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	var payload routeDryRunRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&payload); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "read dry-run request: "+err.Error())
+		return
+	}
+	inboundName := strings.TrimSpace(payload.Inbound)
+	clientName := strings.TrimSpace(payload.Client)
+	model := strings.TrimSpace(payload.Model)
+	if inboundName == "" || clientName == "" || model == "" {
+		writeError(w, http.StatusBadRequest, "inbound, client, and model are required")
+		return
+	}
+
+	state := h.runtimeState()
+	inbound, client, ok := findDryRunClient(state.Inbounds, inboundName, clientName)
+	if !ok {
+		writeError(w, http.StatusNotFound, "inbound or client not found")
+		return
+	}
+	plan, err := state.Router.PlanDryRun(runtime.RouteContext{
+		Request:         runtime.Request{Model: model, Stream: payload.Stream},
+		ClientName:      client.Name,
+		InboundName:     inbound.Name,
+		InboundProtocol: inbound.Protocol,
+		ActiveTag:       client.Tag,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, dryRunResponse(plan))
+}
+
+func (h *Handler) handleProviderDebug(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAdmin(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	state := h.runtimeState()
+	events := []quota.Event(nil)
+	if state.EventRecorder != nil {
+		events = state.EventRecorder.Snapshot()
+	}
+	clientQuota := []quota.SnapshotItem(nil)
+	if state.ClientQuotaTracker != nil {
+		clientQuota = state.ClientQuotaTracker.ClientSnapshot()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"health":          state.Dispatcher.QueryProviderHealth(),
+		"outbound_quota":  state.Dispatcher.QueryQuota(),
+		"client_quota":    clientQuota,
+		"events":          events,
+		"latency_summary": state.Dispatcher.QueryLatencySummary(),
+	})
+}
+
 func (h *Handler) handleAdminLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -330,6 +439,27 @@ func (h *Handler) handleConfigHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": h.configReloader.History()})
 }
 
+func (h *Handler) handleConfigHistoryDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAdmin(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	if h.configReloader == nil {
+		writeError(w, http.StatusServiceUnavailable, "config reload is not configured")
+		return
+	}
+	diff, err := h.configReloader.HistoryDiff(strings.TrimSpace(r.URL.Query().Get("id")))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, diff)
+}
+
 func (h *Handler) handleConfigRollback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -356,6 +486,45 @@ func (h *Handler) handleConfigRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func dryRunResponse(plan runtime.ExecutionPlan) routeDryRunResponse {
+	steps := make([]routeDryRunStep, 0, len(plan.Steps))
+	for i, step := range plan.Steps {
+		steps = append(steps, routeDryRunStep{
+			Index:            i,
+			OutboundName:     step.OutboundName,
+			OutboundProtocol: step.OutboundProtocol,
+			Model:            step.Model,
+			OnError:          string(step.OnError),
+		})
+	}
+	return routeDryRunResponse{
+		Inbound:         plan.InboundName,
+		InboundProtocol: plan.InboundProtocol,
+		Client:          plan.ClientName,
+		ActiveTag:       plan.ActiveTag,
+		RequestedModel:  plan.RequestedModel,
+		MatchedRule:     plan.MatchedRule,
+		Strategy:        string(plan.Strategy),
+		ResolvedToTags:  append([]string(nil), plan.ResolvedToTags...),
+		Steps:           steps,
+	}
+}
+
+func findDryRunClient(inbounds []config.InboundSpec, inboundName, clientName string) (config.InboundSpec, config.ClientSpec, bool) {
+	for _, inbound := range inbounds {
+		if inbound.Name != inboundName {
+			continue
+		}
+		for _, client := range inbound.Clients {
+			if client.Name == clientName {
+				return inbound, client, true
+			}
+		}
+		return config.InboundSpec{}, config.ClientSpec{}, false
+	}
+	return config.InboundSpec{}, config.ClientSpec{}, false
 }
 
 func boundedAdminLogBytes(configured int, requested string) int {

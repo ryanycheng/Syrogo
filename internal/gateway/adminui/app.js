@@ -408,7 +408,7 @@ function renderHistoryTable(items) {
       <td>${escapeHTML(item.created_at || "")}</td>
       <td>${escapeHTML(item.reason || "")}</td>
       <td><code>${escapeHTML((item.checksum || "").slice(0, 12))}</code></td>
-      <td><button class="small" data-history-id="${escapeHTML(item.id || "")}">Rollback</button></td>
+      <td><button class="small" data-history-diff-id="${escapeHTML(item.id || "")}">Diff</button> <button class="small" data-history-id="${escapeHTML(item.id || "")}">Rollback</button></td>
     </tr>`).join("")}</tbody>
   </table>`;
 }
@@ -437,6 +437,70 @@ async function rollbackConfig(id) {
   } catch (error) {
     result.textContent = error.message;
     showToast("Rollback failed.");
+  }
+}
+
+async function loadHistoryDiff(id) {
+  const result = document.querySelector("#config-result");
+  if (!id) {
+    showToast("Select a history item first.");
+    return;
+  }
+  try {
+    const response = await fetchJSON(`/admin/config/history/diff?id=${encodeURIComponent(id)}`);
+    document.querySelector("#config-diff").innerHTML = renderConfigDiff(response.history_content || "", response.current_content || "") || "No changes.";
+    result.textContent = pretty({ ok: true, id: response.id, redacted: true });
+    showToast("History diff loaded.");
+  } catch (error) {
+    result.textContent = error.message;
+    showToast("Load history diff failed.");
+  }
+}
+
+async function refreshTraces() {
+  const target = document.querySelector("#debug-traces-table");
+  try {
+    const snapshot = await fetchJSON("/admin/debug/traces");
+    const items = snapshot.items || [];
+    target.innerHTML = items.length === 0 ? emptyState("No recent debug traces.") : `<table>
+      <thead><tr><th>Time</th><th>Path</th><th>Client</th><th>Rule</th><th>Strategy</th><th>Fallbacks</th><th>Steps</th><th>Spans</th></tr></thead>
+      <tbody>${items.map(renderDebugTraceRow).join("")}</tbody>
+    </table>`;
+  } catch (error) {
+    target.innerHTML = errorBlock(error.message);
+  }
+}
+
+async function runRouteDryRun() {
+  const payload = {
+    inbound: document.querySelector("#dry-run-inbound").value.trim(),
+    client: document.querySelector("#dry-run-client").value.trim(),
+    model: document.querySelector("#dry-run-model").value.trim(),
+    stream: document.querySelector("#dry-run-stream").checked,
+  };
+  const target = document.querySelector("#dry-run-result");
+  try {
+    const response = await fetchJSON("/admin/debug/route-dry-run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    target.textContent = pretty(response);
+    showToast("Route dry-run completed.");
+  } catch (error) {
+    target.textContent = error.message;
+    showToast("Route dry-run failed.");
+  }
+}
+
+async function refreshProviderDebug() {
+  try {
+    const response = await fetchJSON("/admin/debug/providers");
+    setJSON("#provider-debug-json", response);
+    showToast("Provider debug refreshed.");
+  } catch (error) {
+    setJSON("#provider-debug-json", error.message);
+    showToast("Provider debug failed.");
   }
 }
 
@@ -498,6 +562,21 @@ function renderTraceRow(item) {
   </tr>`;
 }
 
+function renderDebugTraceRow(item) {
+  const steps = (item.planned_steps || []).map((step) => `${step.outbound_name} ${step.model || ""}`).join("\n");
+  const spans = (item.spans || []).map((span) => `${span.name}: ${span.duration_ms}ms`).join("\n");
+  return `<tr>
+    <td>${escapeHTML(item.started_at || "")}</td>
+    <td>${escapeHTML(item.path || "")}</td>
+    <td>${escapeHTML(item.client_name || "")}</td>
+    <td>${escapeHTML(item.matched_rule || "")}</td>
+    <td>${escapeHTML(item.strategy || "")}</td>
+    <td>${escapeHTML(item.fallback_count || 0)}</td>
+    <td><pre>${escapeHTML(steps)}</pre></td>
+    <td><pre>${escapeHTML(spans)}</pre></td>
+  </tr>`;
+}
+
 function renderObjectTable(items) {
   const headers = Array.from(items.reduce((set, item) => {
     Object.keys(item || {}).forEach((key) => set.add(key));
@@ -553,7 +632,15 @@ document.querySelector("#validate-config").addEventListener("click", () => submi
 document.querySelector("#update-config").addEventListener("click", updateConfigWithConfirm);
 document.querySelector("#apply-config").addEventListener("click", applyConfigWithConfirm);
 document.querySelector("#load-config-history").addEventListener("click", loadConfigHistory);
+document.querySelector("#refresh-debug-traces").addEventListener("click", refreshTraces);
+document.querySelector("#run-route-dry-run").addEventListener("click", runRouteDryRun);
+document.querySelector("#refresh-provider-debug").addEventListener("click", refreshProviderDebug);
 document.querySelector("#config-history").addEventListener("click", (event) => {
+  const diffButton = event.target.closest("button[data-history-diff-id]");
+  if (diffButton) {
+    loadHistoryDiff(diffButton.dataset.historyDiffId);
+    return;
+  }
   const button = event.target.closest("button[data-history-id]");
   if (button) {
     rollbackConfig(button.dataset.historyId);

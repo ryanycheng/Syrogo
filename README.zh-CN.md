@@ -494,7 +494,7 @@ admin:
     max_bytes: 65536
 ```
 
-UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/overview`、`/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`、`/admin/config/apply`、`/admin/config/history`、`/admin/config/rollback`。Overview 会展示请求、错误、fallback、latency、quota、provider health、最近治理事件，以及 config path、logs 可用性等 Admin 自检摘要卡片。Usage 支持 `group_by`、`window`、`bucket` 筛选。日志只会读取配置指定的本地日志文件，支持行数/字节限制，会展示 path、是否截断、读取上限等元信息，并对常见 token、key、authorization、secret 字段做脱敏。当前配置读取会返回脱敏展示副本；配置更新前会展示脱敏 diff preview，并要求浏览器二次确认后才写入；Apply 会热加载安全的运行时变更；History/Rollback 会保留并恢复最近的本地配置版本。Admin API 操作会写入 `admin_audit` 日志，但不会记录 Authorization header、token、请求 body、配置内容或日志内容。它是内置单页控制台，不需要额外前端构建步骤。
+UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/overview`、`/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`、`/admin/config/apply`、`/admin/config/history`、`/admin/config/history/diff`、`/admin/config/rollback`、`/admin/debug/traces`、`/admin/debug/route-dry-run`、`/admin/debug/providers`。Overview 会展示请求、错误、fallback、latency、quota、provider health、最近治理事件，以及 config path、logs 可用性等 Admin 自检摘要卡片。Usage 支持 `group_by`、`window`、`bucket` 筛选。Debug 会展示最近 trace 的 matched rule、routing strategy、planned steps、fallback count、spans，并提供无副作用 route dry-run 表单，以及 provider health/quota/event/latency 聚合信息。日志只会读取配置指定的本地日志文件，支持行数/字节限制，会展示 path、是否截断、读取上限等元信息，并对常见 token、key、authorization、secret 字段做脱敏。当前配置读取会返回脱敏展示副本；配置更新前会展示脱敏 diff preview，并要求浏览器二次确认后才写入；Apply 会热加载安全的运行时变更；History/Rollback 会保留并恢复最近的本地配置版本，并支持查看脱敏 diff。Admin API 操作会写入 `admin_audit` 日志，但不会记录 Authorization header、token、请求 body、配置内容或日志内容。它是内置单页控制台，不需要额外前端构建步骤。
 
 ### 15. 校验配置变更
 
@@ -523,7 +523,18 @@ curl -X POST http://127.0.0.1:23234/admin/config/apply \
   -H 'Authorization: Bearer <admin-ui-token>'
 ```
 
-Apply 会在不重启监听 socket 的前提下重建 provider、routing、quota tracker、health tracking、Admin/accounting token 和 listener 绑定的 inbound。listener 数量、listen 地址、listener 名称或 listener inbound 绑定发生变化时，会返回 `"restart_required": true`，并保持当前运行态不变。成功 apply 会在配置文件同目录的 `.syrogo-history/` 中创建本地配置历史；`/admin/config/history` 可以列出最近版本，`/admin/config/rollback` 可以写回指定版本并 apply。
+Apply 会在不重启监听 socket 的前提下重建 provider、routing、quota tracker、health tracking、Admin/accounting token 和 listener 绑定的 inbound。listener 数量、listen 地址、listener 名称或 listener inbound 绑定发生变化时，会返回 `"restart_required": true`，并保持当前运行态不变。成功 apply 会在配置文件同目录的 `.syrogo-history/` 中创建本地配置历史；`/admin/config/history` 可以列出最近版本，`/admin/config/history/diff?id=<history-id>` 会返回脱敏后的当前/历史 YAML 用于对比，`/admin/config/rollback` 可以写回指定版本并 apply。
+
+如果要在不改变 round-robin 状态、也不发送模型请求的前提下验证路由结果，可以使用 route dry-run：
+
+```bash
+curl -X POST http://127.0.0.1:23234/admin/debug/route-dry-run \
+  -H 'Authorization: Bearer <admin-ui-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"inbound":"openai-entry","client":"office-key","model":"gpt-4"}'
+```
+
+Dry-run 响应会包含 matched rule、strategy、resolved tags 和有序 outbound steps。它只接受 inbound/client/model/stream 元数据，不接收请求 body、header、token 或 replay 内容。
 
 ### 16. 查看 usage 聚合统计
 

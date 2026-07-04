@@ -53,6 +53,14 @@ func New(cfg config.RoutingConfig, providers map[string]provider.Provider, outbo
 }
 
 func (r *Router) Plan(ctx runtime.RouteContext) (runtime.ExecutionPlan, error) {
+	return r.plan(ctx, true)
+}
+
+func (r *Router) PlanDryRun(ctx runtime.RouteContext) (runtime.ExecutionPlan, error) {
+	return r.plan(ctx, false)
+}
+
+func (r *Router) plan(ctx runtime.RouteContext, mutate bool) (runtime.ExecutionPlan, error) {
 	for _, rule := range r.rules {
 		if !matchTag(rule.fromTags, ctx.ActiveTag) {
 			continue
@@ -61,10 +69,15 @@ func (r *Router) Plan(ctx runtime.RouteContext) (runtime.ExecutionPlan, error) {
 		ordered := append([]string(nil), rule.resolvedSet...)
 		switch rule.strategy {
 		case runtime.RoutingStrategyRoundRobin:
-			ordered = rotate(ordered, r.nextRoundRobinIndex(rule.name, len(ordered)))
+			if mutate {
+				ordered = rotate(ordered, r.nextRoundRobinIndex(rule.name, len(ordered)))
+			}
 		case runtime.RoutingStrategyWeightedRoundRobin:
-			rotated := rotate(rule.weightedResolved, r.nextRoundRobinIndex(rule.name, len(rule.weightedResolved)))
-			ordered = dedupePreserveOrder(rotated)
+			weighted := append([]string(nil), rule.weightedResolved...)
+			if mutate {
+				weighted = rotate(weighted, r.nextRoundRobinIndex(rule.name, len(weighted)))
+			}
+			ordered = dedupePreserveOrder(weighted)
 		}
 
 		steps := make([]runtime.ExecutionStep, 0, len(ordered))

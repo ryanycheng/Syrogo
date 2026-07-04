@@ -23,6 +23,7 @@
     <button class="tab" data-target="usage">Usage</button>
     <button class="tab" data-target="quota">Quota</button>
     <button class="tab" data-target="latency">Latency</button>
+    <button class="tab" data-target="debug">Debug</button>
     <button class="tab" data-target="logs">Logs</button>
     <button class="tab" data-target="config">Config</button>
   </nav>
@@ -89,6 +90,37 @@
         <button id="refresh-latency">Refresh</button>
       </div>
       <div id="latency-table" class="table-wrap"></div>
+    </section>
+
+    <section id="debug" class="panel">
+      <div class="section-title">
+        <h2>Debug</h2>
+        <div class="actions">
+          <button id="refresh-debug-traces">Refresh traces</button>
+          <button id="refresh-provider-debug">Refresh providers</button>
+        </div>
+      </div>
+      <div class="grid">
+        <article class="card full">
+          <h3>Route dry-run</h3>
+          <div class="form-grid">
+            <input id="dry-run-inbound" type="text" autocomplete="off" placeholder="inbound name">
+            <input id="dry-run-client" type="text" autocomplete="off" placeholder="client name">
+            <input id="dry-run-model" type="text" autocomplete="off" placeholder="model">
+            <label class="inline-check"><input id="dry-run-stream" type="checkbox"> stream</label>
+            <button id="run-route-dry-run">Run dry-run</button>
+          </div>
+          <pre id="dry-run-result" class="json-block">No dry-run yet</pre>
+        </article>
+        <article class="card full">
+          <h3>Request traces</h3>
+          <div id="debug-traces-table" class="table-wrap">Not loaded</div>
+        </article>
+        <article class="card full">
+          <h3>Provider debug</h3>
+          <pre id="provider-debug-json" class="json-block">Not loaded</pre>
+        </article>
+      </div>
     </section>
 
     <section id="logs" class="panel">

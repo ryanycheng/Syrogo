@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/execution"
+	"github.com/ryanycheng/Syrogo/internal/latency"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 )
 
@@ -53,7 +55,7 @@ func TestAdminUIReturnsIndexHTMLWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want text/html", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"Admin UI token", "/admin/app.js", "usage-window", "usage-bucket", "log-bytes", "logs-meta", "overview-summary", "config-diff", "Apply current file", "config-history"} {
+	for _, want := range []string{"Admin UI token", "/admin/app.js", "usage-window", "usage-bucket", "log-bytes", "logs-meta", "overview-summary", "config-diff", "Apply current file", "config-history", "Debug", "dry-run-model"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
@@ -76,7 +78,7 @@ func TestAdminUIReturnsStaticAssetsWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want javascript", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"/admin/usage", "/admin/logs", "/admin/overview", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback"} {
+	for _, want := range []string{"/admin/usage", "/admin/logs", "/admin/overview", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback", "/admin/debug/traces", "/admin/debug/route-dry-run", "/admin/debug/providers", "/admin/config/history/diff"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
@@ -348,6 +350,10 @@ func (fakeConfigReloader) History() []HistoryItem {
 	return []HistoryItem{{ID: "history-1", CreatedAt: "2026-07-02T00:00:00Z", Reason: "apply", Path: "/tmp/config.yaml", Checksum: "abc"}}
 }
 
+func (fakeConfigReloader) HistoryDiff(id string) (HistoryDiff, error) {
+	return HistoryDiff{ID: id, CurrentContent: "admin:\n  token: \"<redacted>\"\n", HistoryContent: "admin:\n  token: \"<redacted>\"\n"}, nil
+}
+
 func (fakeConfigReloader) Rollback(context.Context, string) (ReloadResult, error) {
 	return ReloadResult{OK: true, Applied: true, HistoryID: "history-2", QuotaStateReset: true}, nil
 }
@@ -397,5 +403,83 @@ func TestAdminConfigRollbackUsesReloader(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"applied":true`) {
 		t.Fatalf("body = %s, want applied rollback result", w.Body.String())
+	}
+}
+
+func TestAdminConfigHistoryDiffUsesReloader(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.SetConfigReloader(fakeConfigReloader{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodGet, "/admin/config/history/diff?id=history-1", "admin-ui-token", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"id":"history-1"`) || !strings.Contains(w.Body.String(), `redacted`) {
+		t.Fatalf("body = %s, want redacted history diff", w.Body.String())
+	}
+}
+
+func TestAdminDebugTracesReturnsLatencySnapshot(t *testing.T) {
+	store := latency.NewStore(10)
+	store.Record(latency.Trace{RequestID: "req-1", MatchedRule: "office", PlannedSteps: []latency.PlanStep{{OutboundName: "mock", OutboundProtocol: "mock"}}})
+	h := newAdminTestHandler(t)
+	state := h.runtimeState()
+	dispatcher := execution.NewDispatcherWithStoreQuotaHealthEventsAndLatency(nil, nil, nil, nil, store)
+	h.ApplyRuntime(RuntimeState{
+		Router:       state.Router,
+		Dispatcher:   dispatcher,
+		Inbounds:     state.Inbounds,
+		LatencyStore: store,
+		Admin:        state.Admin,
+	})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodGet, "/admin/debug/traces", "admin-ui-token", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"request_id":"req-1"`) || !strings.Contains(w.Body.String(), `"matched_rule":"office"`) {
+		t.Fatalf("body = %s, want trace metadata", w.Body.String())
+	}
+}
+
+func TestAdminRouteDryRunReturnsPlanWithoutToken(t *testing.T) {
+	h := newAdminTestHandler(t)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/debug/route-dry-run", "admin-ui-token", []byte(`{"inbound":"openai-entry","client":"office-key","model":"gpt-4"}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"matched_rule"`) || !strings.Contains(body, `"outbound_name"`) {
+		t.Fatalf("body = %s, want dry-run plan", body)
+	}
+	if strings.Contains(body, "client-token") {
+		t.Fatalf("body = %s, want no client token", body)
+	}
+}
+
+func TestAdminProviderDebugReturnsAggregates(t *testing.T) {
+	h := newAdminTestHandler(t)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodGet, "/admin/debug/providers", "admin-ui-token", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{`"health"`, `"outbound_quota"`, `"events"`, `"latency_summary"`} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Fatalf("body = %s, want %s", w.Body.String(), want)
+		}
 	}
 }

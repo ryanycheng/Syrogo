@@ -45,6 +45,12 @@ type HistoryItem struct {
 	Checksum  string `json:"checksum"`
 }
 
+type HistoryDiff struct {
+	ID             string `json:"id"`
+	CurrentContent string `json:"current_content"`
+	HistoryContent string `json:"history_content"`
+}
+
 type configHistory struct {
 	dir string
 }
@@ -65,6 +71,31 @@ func (m *ReloadManager) History() []gateway.HistoryItem {
 		converted = append(converted, gateway.HistoryItem(item))
 	}
 	return converted
+}
+
+func (m *ReloadManager) HistoryDiff(id string) (gateway.HistoryDiff, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.app.configPath == "" {
+		return gateway.HistoryDiff{}, errors.New("config path is not configured")
+	}
+	current, err := os.ReadFile(m.app.configPath)
+	if err != nil {
+		return gateway.HistoryDiff{}, fmt.Errorf("read current config: %w", err)
+	}
+	historyData, item, err := m.history.Read(strings.TrimSpace(id))
+	if err != nil {
+		return gateway.HistoryDiff{}, err
+	}
+	currentContent, err := redactedConfigYAML(current)
+	if err != nil {
+		return gateway.HistoryDiff{}, fmt.Errorf("parse current config: %w", err)
+	}
+	historyContent, err := redactedConfigYAML(historyData)
+	if err != nil {
+		return gateway.HistoryDiff{}, fmt.Errorf("parse history config: %w", err)
+	}
+	return gateway.HistoryDiff{ID: item.ID, CurrentContent: currentContent, HistoryContent: historyContent}, nil
 }
 
 func (m *ReloadManager) Rollback(ctx context.Context, id string) (gateway.ReloadResult, error) {
@@ -284,6 +315,28 @@ func (h *configHistory) Prune(limit int) error {
 		_ = os.Remove(filepath.Join(h.dir, item.ID+".json"))
 	}
 	return nil
+}
+
+func redactedConfigYAML(data []byte) (string, error) {
+	cfg, err := config.ParseBytes(data)
+	if err != nil {
+		return "", err
+	}
+	cfg.Admin.Token = "<redacted>"
+	cfg.Accounting.AdminToken = "<redacted>"
+	for inboundIndex := range cfg.Inbounds {
+		for clientIndex := range cfg.Inbounds[inboundIndex].Clients {
+			cfg.Inbounds[inboundIndex].Clients[clientIndex].Token = "<redacted>"
+		}
+	}
+	for outboundIndex := range cfg.Outbounds {
+		cfg.Outbounds[outboundIndex].AuthToken = "<redacted>"
+	}
+	redacted, err := yaml.Marshal(cfg)
+	if err != nil {
+		return "", err
+	}
+	return string(redacted), nil
 }
 
 func checksumHex(data []byte) string {

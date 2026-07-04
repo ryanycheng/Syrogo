@@ -34,6 +34,7 @@ type Handler struct {
 type ConfigReloader interface {
 	ApplyConfig(context.Context) (ReloadResult, error)
 	History() []HistoryItem
+	HistoryDiff(id string) (HistoryDiff, error)
 	Rollback(context.Context, string) (ReloadResult, error)
 }
 
@@ -52,6 +53,12 @@ type HistoryItem struct {
 	Reason    string `json:"reason"`
 	Path      string `json:"path"`
 	Checksum  string `json:"checksum"`
+}
+
+type HistoryDiff struct {
+	ID             string `json:"id"`
+	CurrentContent string `json:"current_content"`
+	HistoryContent string `json:"history_content"`
 }
 
 type RuntimeState struct {
@@ -181,7 +188,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/config/update", h.withAdminAudit("config_update", h.handleConfigUpdate))
 	mux.HandleFunc("/admin/config/apply", h.withAdminAudit("config_apply", h.handleConfigApply))
 	mux.HandleFunc("/admin/config/history", h.withAdminAudit("config_history", h.handleConfigHistory))
+	mux.HandleFunc("/admin/config/history/diff", h.withAdminAudit("config_history_diff", h.handleConfigHistoryDiff))
 	mux.HandleFunc("/admin/config/rollback", h.withAdminAudit("config_rollback", h.handleConfigRollback))
+	mux.HandleFunc("/admin/debug/traces", h.withAdminAudit("debug_traces", h.handleDebugTraces))
+	mux.HandleFunc("/admin/debug/route-dry-run", h.withAdminAudit("debug_route_dry_run", h.handleRouteDryRun))
+	mux.HandleFunc("/admin/debug/providers", h.withAdminAudit("debug_providers", h.handleProviderDebug))
 	mux.Handle("/admin/", http.HandlerFunc(h.handleAdminUI))
 	mux.HandleFunc("/", h.handleRequest)
 }
@@ -401,8 +412,24 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		h.handleConfigHistory(w, r)
 		return
 	}
+	if r.URL.Path == "/admin/config/history/diff" {
+		h.handleConfigHistoryDiff(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/config/rollback" {
 		h.handleConfigRollback(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/debug/traces" {
+		h.handleDebugTraces(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/debug/route-dry-run" {
+		h.handleRouteDryRun(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/debug/providers" {
+		h.handleProviderDebug(w, r)
 		return
 	}
 
@@ -543,6 +570,7 @@ func (h *Handler) planRequest(ctx context.Context, req runtime.Request, inbound 
 	if len(plan.Steps) > 0 {
 		attrs["matched_rule"] = plan.MatchedRule
 		attrs["outbound"] = plan.Steps[0].OutboundName
+		latency.FromContext(ctx).SetPlan(plan)
 	}
 	latency.RecordSpan(ctx, "route_plan", startedAt, attrs)
 	return plan, err
