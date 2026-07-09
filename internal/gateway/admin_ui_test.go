@@ -483,3 +483,117 @@ func TestAdminProviderDebugReturnsAggregates(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminConfigResourceAPIsReadRedactedResources(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	content := validGatewayConfigYAML() + `
+admin:
+  enabled: true
+  token: admin-secret
+`
+	if err := os.WriteFile(h.configPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	for _, path := range []string{"/admin/session", "/admin/config/options", "/admin/config/providers", "/admin/config/clients", "/admin/config/routes"} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, authorizedRequest(http.MethodGet, path, "admin-ui-token", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("path=%s status = %d, want 200, body=%s", path, w.Code, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "client-token") || strings.Contains(w.Body.String(), "admin-secret") {
+			t.Fatalf("path=%s body = %s, want secrets redacted", path, w.Body.String())
+		}
+	}
+}
+
+func TestAdminConfigProviderUpsertPreservesRedactedSecret(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+listeners:
+  - name: public
+    listen: ":8080"
+    inbounds: [openai-entry]
+inbounds:
+  - name: openai-entry
+    protocol: openai_chat
+    path: /v1/chat/completions
+    clients:
+      - name: office-key
+        token: client-token
+        tag: office
+outbounds:
+  - name: openai
+    protocol: openai_chat
+    endpoint: https://api.example.test/v1/chat/completions
+    auth_token: old-secret
+    tag: openai-tag
+routing:
+  rules:
+    - name: office-route
+      from_tags: [office]
+      to_tags: [openai-tag]
+      strategy: failover
+`
+	if err := os.WriteFile(h.configPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body := []byte(`{"name":"openai","protocol":"openai_chat","endpoint":"https://api.example.test/v1","auth_token":"<redacted>","tag":"openai-tag"}`)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/provider/upsert", "admin-ui-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	cfg, err := config.Load(h.configPath)
+	if err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+	if cfg.Outbounds[0].AuthToken != "old-secret" || cfg.Outbounds[0].Endpoint != "https://api.example.test/v1" {
+		t.Fatalf("outbound = %#v, want preserved token and updated endpoint", cfg.Outbounds[0])
+	}
+}
+
+func TestAdminConfigClientUpsertAndRouteDeleteWriteConfig(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(h.configPath, []byte(validGatewayConfigYAML()), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	clientBody := []byte(`{"inbound":"openai-entry","name":"mobile-key","token":"mobile-token","tag":"mobile"}`)
+	clientResp := httptest.NewRecorder()
+	mux.ServeHTTP(clientResp, authorizedRequest(http.MethodPost, "/admin/config/client/upsert", "admin-ui-token", clientBody))
+	if clientResp.Code != http.StatusOK {
+		t.Fatalf("client upsert status = %d, want 200, body=%s", clientResp.Code, clientResp.Body.String())
+	}
+
+	routeBody := []byte(`{"name":"office-route"}`)
+	routeResp := httptest.NewRecorder()
+	mux.ServeHTTP(routeResp, authorizedRequest(http.MethodPost, "/admin/config/route/delete", "admin-ui-token", routeBody))
+	if routeResp.Code != http.StatusBadRequest {
+		t.Fatalf("route delete status = %d, want 400 because config must keep at least one route", routeResp.Code)
+	}
+	if !strings.Contains(routeResp.Body.String(), "at least one routing rule is required") {
+		t.Fatalf("body = %s, want validation error", routeResp.Body.String())
+	}
+
+	cfg, err := config.Load(h.configPath)
+	if err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+	if len(cfg.Inbounds[0].Clients) != 2 || cfg.Inbounds[0].Clients[1].Name != "mobile-key" {
+		t.Fatalf("clients = %#v, want inserted client", cfg.Inbounds[0].Clients)
+	}
+	if len(cfg.Routing.Rules) != 1 {
+		t.Fatalf("rules = %#v, want failed delete to preserve config", cfg.Routing.Rules)
+	}
+}

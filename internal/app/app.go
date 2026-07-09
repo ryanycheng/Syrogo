@@ -78,6 +78,9 @@ func buildRuntime(cfg config.Config, store accounting.Store) (appRuntime, error)
 	providers := make(map[string]provider.Provider, len(cfg.Outbounds))
 	registry := provider.DefaultFactoryRegistry()
 	for _, spec := range cfg.Outbounds {
+		if !config.OutboundEnabled(spec) {
+			continue
+		}
 		httpClient, err := provider.NewHTTPClient(spec.Proxy)
 		if err != nil {
 			return appRuntime{}, fmt.Errorf("create outbound %q http client: %w", spec.Name, err)
@@ -89,19 +92,25 @@ func buildRuntime(cfg config.Config, store accounting.Store) (appRuntime, error)
 		providers[spec.Name] = instance
 	}
 
-	r, err := router.New(cfg.Routing, providers, cfg.Outbounds)
+	enabledOutbounds := make([]config.OutboundSpec, 0, len(cfg.Outbounds))
+	for _, outbound := range cfg.Outbounds {
+		if config.OutboundEnabled(outbound) {
+			enabledOutbounds = append(enabledOutbounds, outbound)
+		}
+	}
+	r, err := router.New(cfg.Routing, providers, enabledOutbounds)
 	if err != nil {
 		return appRuntime{}, err
 	}
 
-	outboundQuotaTracker := quota.NewTrackerFromOutbounds(cfg.Outbounds)
+	outboundQuotaTracker := quota.NewTrackerFromOutbounds(enabledOutbounds)
 	clientQuotaTracker := quota.NewClientTrackerFromInbounds(cfg.Inbounds)
 	quotaSnapshotStore, err := quota.NewSnapshotStore(cfg.Governance.Quota.Snapshot, outboundQuotaTracker, clientQuotaTracker)
 	if err != nil {
 		return appRuntime{}, err
 	}
-	outboundNames := make([]string, 0, len(cfg.Outbounds))
-	for _, outbound := range cfg.Outbounds {
+	outboundNames := make([]string, 0, len(enabledOutbounds))
+	for _, outbound := range enabledOutbounds {
 		outboundNames = append(outboundNames, outbound.Name)
 	}
 	healthTracker := provider.NewHealthTracker(outboundNames)

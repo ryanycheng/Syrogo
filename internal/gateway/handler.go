@@ -183,7 +183,21 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/overview", h.withAdminAudit("overview", h.handleAdminOverview))
 	mux.HandleFunc("/admin/latency/summary", h.withAdminAudit("latency_summary", h.handleAdminLatencySummary))
 	mux.HandleFunc("/admin/latency", h.withAdminAudit("latency", h.handleAdminLatency))
+	mux.HandleFunc("/admin/session", h.withAdminAudit("session", h.handleAdminSession))
 	mux.HandleFunc("/admin/config", h.withAdminAudit("config_read", h.handleAdminConfig))
+	mux.HandleFunc("/admin/config/options", h.withAdminAudit("config_options", h.handleConfigOptions))
+	mux.HandleFunc("/admin/config/providers", h.withAdminAudit("config_providers", h.handleConfigProviders))
+	mux.HandleFunc("/admin/config/providers/metrics", h.withAdminAudit("config_provider_metrics", h.handleConfigProviderMetrics))
+	mux.HandleFunc("/admin/config/provider/check", h.withAdminAudit("config_provider_check", h.handleConfigProviderCheck))
+	mux.HandleFunc("/admin/config/provider/upsert", h.withAdminAudit("config_provider_upsert", h.handleConfigProviderUpsert))
+	mux.HandleFunc("/admin/config/provider/enabled", h.withAdminAudit("config_provider_enabled", h.handleConfigProviderEnabled))
+	mux.HandleFunc("/admin/config/provider/delete", h.withAdminAudit("config_provider_delete", h.handleConfigProviderDelete))
+	mux.HandleFunc("/admin/config/clients", h.withAdminAudit("config_clients", h.handleConfigClients))
+	mux.HandleFunc("/admin/config/client/upsert", h.withAdminAudit("config_client_upsert", h.handleConfigClientUpsert))
+	mux.HandleFunc("/admin/config/client/delete", h.withAdminAudit("config_client_delete", h.handleConfigClientDelete))
+	mux.HandleFunc("/admin/config/routes", h.withAdminAudit("config_routes", h.handleConfigRoutes))
+	mux.HandleFunc("/admin/config/route/upsert", h.withAdminAudit("config_route_upsert", h.handleConfigRouteUpsert))
+	mux.HandleFunc("/admin/config/route/delete", h.withAdminAudit("config_route_delete", h.handleConfigRouteDelete))
 	mux.HandleFunc("/admin/config/validate", h.withAdminAudit("config_validate", h.handleConfigValidate))
 	mux.HandleFunc("/admin/config/update", h.withAdminAudit("config_update", h.handleConfigUpdate))
 	mux.HandleFunc("/admin/config/apply", h.withAdminAudit("config_apply", h.handleConfigApply))
@@ -394,6 +408,62 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/stats/latency" {
 		h.handleLatencyStats(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/session" {
+		h.handleAdminSession(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/options" {
+		h.handleConfigOptions(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/providers" {
+		h.handleConfigProviders(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/providers/metrics" {
+		h.handleConfigProviderMetrics(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/provider/check" {
+		h.handleConfigProviderCheck(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/provider/upsert" {
+		h.handleConfigProviderUpsert(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/provider/enabled" {
+		h.handleConfigProviderEnabled(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/provider/delete" {
+		h.handleConfigProviderDelete(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/clients" {
+		h.handleConfigClients(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/client/upsert" {
+		h.handleConfigClientUpsert(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/client/delete" {
+		h.handleConfigClientDelete(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/routes" {
+		h.handleConfigRoutes(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/route/upsert" {
+		h.handleConfigRouteUpsert(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/route/delete" {
+		h.handleConfigRouteDelete(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/config/validate" {

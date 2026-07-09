@@ -10,10 +10,13 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
+const defaultRecentRecordsLimit = 10000
+
 type MemoryStore struct {
 	mu      sync.Mutex
 	totals  map[string]map[string]StatsItem
 	windows map[Window]map[string]map[string]StatsItem
+	recent  []runtime.UsageRecord
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -31,6 +34,11 @@ func (s *MemoryStore) Record(record runtime.UsageRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.applyRecord(record)
+	s.recent = append(s.recent, record)
+	if len(s.recent) > defaultRecentRecordsLimit {
+		copy(s.recent, s.recent[len(s.recent)-defaultRecentRecordsLimit:])
+		s.recent = s.recent[:defaultRecentRecordsLimit]
+	}
 }
 
 func (s *MemoryStore) Query(query Query) ([]StatsItem, error) {
@@ -65,6 +73,28 @@ func (s *MemoryStore) Query(query Query) ([]StatsItem, error) {
 		items = append(items, item)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Value < items[j].Value })
+	return items, nil
+}
+
+func (s *MemoryStore) RecentRecords(query RecentRecordsQuery) ([]runtime.UsageRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	limit := query.Limit
+	if limit <= 0 || limit > len(s.recent) {
+		limit = len(s.recent)
+	}
+	items := make([]runtime.UsageRecord, 0, limit)
+	for i := len(s.recent) - 1; i >= 0 && len(items) < limit; i-- {
+		record := s.recent[i]
+		if !query.Since.IsZero() && recordTime(record).Before(query.Since) {
+			continue
+		}
+		items = append(items, record)
+	}
+	for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+		items[i], items[j] = items[j], items[i]
+	}
 	return items, nil
 }
 
@@ -202,6 +232,18 @@ func nonEmpty(value, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func recordTime(record runtime.UsageRecord) time.Time {
+	timestamp := record.FinishedAt
+	if timestamp == "" {
+		timestamp = record.StartedAt
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed.UTC()
 }
 
 func timeBuckets(record runtime.UsageRecord) (day, week, month string) {

@@ -179,6 +179,10 @@ func (d *Dispatcher) QueryUsageBy(query accounting.Query) ([]accounting.StatsIte
 	return d.store.Query(query)
 }
 
+func (d *Dispatcher) QueryRecentUsage(query accounting.RecentRecordsQuery) ([]runtime.UsageRecord, error) {
+	return d.store.RecentRecords(query)
+}
+
 func (d *Dispatcher) QueryQuota() []quota.SnapshotItem {
 	if d.quotaTracker == nil {
 		return nil

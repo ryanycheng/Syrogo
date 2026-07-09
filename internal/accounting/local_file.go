@@ -73,6 +73,10 @@ func (s *LocalFileStore) Query(query Query) ([]StatsItem, error) {
 	return s.memory.Query(query)
 }
 
+func (s *LocalFileStore) RecentRecords(query RecentRecordsQuery) ([]runtime.UsageRecord, error) {
+	return s.memory.RecentRecords(query)
+}
+
 func (s *LocalFileStore) Close(ctx context.Context) error {
 	var err error
 	s.closeOnce.Do(func() {

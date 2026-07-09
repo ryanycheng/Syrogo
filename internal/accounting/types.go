@@ -1,6 +1,10 @@
 package accounting
 
-import "github.com/ryanycheng/Syrogo/internal/runtime"
+import (
+	"time"
+
+	"github.com/ryanycheng/Syrogo/internal/runtime"
+)
 
 type Window string
 
@@ -15,6 +19,11 @@ type Query struct {
 	GroupBy string
 	Window  Window
 	Bucket  string
+}
+
+type RecentRecordsQuery struct {
+	Since time.Time
+	Limit int
 }
 
 type StatsItem struct {

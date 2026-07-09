@@ -7,166 +7,131 @@
   <link rel="stylesheet" href="/admin/styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <div>
-      <p class="eyebrow">Syrogo</p>
-      <h1>Admin Console</h1>
+  <section id="login-view" class="login-page">
+    <div class="login-card">
+      <div class="login-brand-mark">
+        <img src="/admin/logo.png" alt="Syrogo">
+        <span>Syrogo</span>
+      </div>
+      <p class="eyebrow" data-i18n="login_eyebrow">Admin Console</p>
+      <h1 data-i18n="login_title">Sign in to Syrogo</h1>
+      <p class="muted" data-i18n="login_hint">Use the admin.token configured in your Syrogo config file.</p>
+      <label class="field">
+        <span data-i18n="admin_token">Admin UI token</span>
+        <input id="admin-token" type="password" autocomplete="current-password" placeholder="admin.token from config">
+      </label>
+      <label class="inline-check"><input id="remember-token" type="checkbox"> <span data-i18n="remember_browser">Remember this browser</span></label>
+      <button id="login-button" class="full-width" data-i18n="sign_in">Sign in</button>
+      <div class="login-footer">
+        <button class="ghost small" data-locale="en">English</button>
+        <button class="ghost small" data-locale="zh-CN">中文</button>
+      </div>
     </div>
-    <label class="token-box">
-      <span>Admin UI token</span>
-      <input id="admin-token" type="password" autocomplete="off" placeholder="admin.token from config">
-    </label>
-  </header>
+  </section>
 
-  <nav class="tabs" aria-label="Admin sections">
-    <button class="tab active" data-target="overview">Overview</button>
-    <button class="tab" data-target="usage">Usage</button>
-    <button class="tab" data-target="quota">Quota</button>
-    <button class="tab" data-target="latency">Latency</button>
-    <button class="tab" data-target="debug">Debug</button>
-    <button class="tab" data-target="logs">Logs</button>
-    <button class="tab" data-target="config">Config</button>
-  </nav>
-
-  <main>
-    <section id="overview" class="panel active">
-      <div class="section-title">
-        <h2>Overview</h2>
-        <button id="refresh-overview">Refresh</button>
+  <section id="app-view" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="/admin/logo.png" alt="Syrogo">
+        <div><strong>Syrogo</strong><span data-i18n="console">Console</span></div>
       </div>
-      <div class="grid">
-        <article class="card">
-          <h3>Health</h3>
-          <div id="health-status" class="status muted">Not loaded</div>
-        </article>
-        <article class="card wide">
-          <h3>Admin overview</h3>
-          <div id="overview-summary" class="summary-grid"></div>
-        </article>
-        <article class="card full">
-          <h3>Details</h3>
-          <pre id="governance-json" class="json-block">Not loaded</pre>
-        </article>
-      </div>
-    </section>
+      <nav class="nav" aria-label="Admin sections">
+        <button class="nav-item active" data-target="dashboard" data-i18n="dashboard">Dashboard</button>
+        <button class="nav-item" data-target="providers" data-i18n="providers">Providers</button>
+        <button class="nav-item" data-target="clients" data-i18n="clients">Clients</button>
+        <button class="nav-item" data-target="routes" data-i18n="routes_models">Routes & Models</button>
+        <button class="nav-item" data-target="usage" data-i18n="usage">Usage</button>
+        <button class="nav-item" data-target="monitoring" data-i18n="monitoring">Monitoring</button>
+        <button class="nav-item" data-target="logs" data-i18n="logs">Logs</button>
+        <button class="nav-item" data-target="config" data-i18n="system_config">System Config</button>
+        <button class="nav-item" data-target="debug" data-i18n="debug">Debug</button>
+      </nav>
+    </aside>
 
-    <section id="usage" class="panel">
-      <div class="section-title">
-        <h2>Usage</h2>
-        <div class="actions">
-          <select id="usage-group-by" aria-label="Usage group by">
-            <option value="key">key</option>
-            <option value="provider">provider</option>
-            <option value="model">model</option>
-            <option value="inbound">inbound</option>
-            <option value="source">source</option>
-            <option value="outbound">outbound</option>
-            <option value="error_kind">error_kind</option>
-          </select>
-          <select id="usage-window" aria-label="Usage window">
-            <option value="total">total</option>
-            <option value="day">day</option>
-            <option value="week">week</option>
-            <option value="month">month</option>
-          </select>
-          <input id="usage-bucket" type="text" autocomplete="off" aria-label="Usage bucket" placeholder="not required for total">
-          <button id="refresh-usage">Refresh</button>
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow" id="page-eyebrow">Syrogo</p>
+          <h1 id="page-title">Dashboard</h1>
         </div>
-      </div>
-      <div id="usage-table" class="table-wrap"></div>
-    </section>
-
-    <section id="quota" class="panel">
-      <div class="section-title">
-        <h2>Quota</h2>
-        <button id="refresh-quota">Refresh</button>
-      </div>
-      <div id="quota-table" class="table-wrap"></div>
-    </section>
-
-    <section id="latency" class="panel">
-      <div class="section-title">
-        <h2>Recent latency</h2>
-        <button id="refresh-latency">Refresh</button>
-      </div>
-      <div id="latency-table" class="table-wrap"></div>
-    </section>
-
-    <section id="debug" class="panel">
-      <div class="section-title">
-        <h2>Debug</h2>
         <div class="actions">
-          <button id="refresh-debug-traces">Refresh traces</button>
-          <button id="refresh-provider-debug">Refresh providers</button>
+          <select id="locale-select" aria-label="Language"><option value="en">English</option><option value="zh-CN">中文</option></select>
+          <button id="apply-config-global" class="secondary" data-i18n="apply_current_file">Apply current file</button>
+          <button id="logout-button" class="ghost" data-i18n="logout">Logout</button>
         </div>
-      </div>
-      <div class="grid">
-        <article class="card full">
-          <h3>Route dry-run</h3>
-          <div class="form-grid">
-            <input id="dry-run-inbound" type="text" autocomplete="off" placeholder="inbound name">
-            <input id="dry-run-client" type="text" autocomplete="off" placeholder="client name">
-            <input id="dry-run-model" type="text" autocomplete="off" placeholder="model">
-            <label class="inline-check"><input id="dry-run-stream" type="checkbox"> stream</label>
-            <button id="run-route-dry-run">Run dry-run</button>
-          </div>
-          <pre id="dry-run-result" class="json-block">No dry-run yet</pre>
-        </article>
-        <article class="card full">
-          <h3>Request traces</h3>
-          <div id="debug-traces-table" class="table-wrap">Not loaded</div>
-        </article>
-        <article class="card full">
-          <h3>Provider debug</h3>
-          <pre id="provider-debug-json" class="json-block">Not loaded</pre>
-        </article>
-      </div>
-    </section>
+      </header>
 
-    <section id="logs" class="panel">
-      <div class="section-title">
-        <h2>Logs</h2>
-        <div class="actions">
-          <input id="log-lines" type="number" min="1" value="200" aria-label="Log lines" title="Maximum lines to display">
-          <input id="log-bytes" type="number" min="1" aria-label="Log max bytes" placeholder="config max bytes" title="Optional read limit in bytes">
-          <button id="refresh-logs">Refresh</button>
-        </div>
-      </div>
-      <div id="logs-meta" class="meta-grid">
-        <div class="meta-item"><span>Path</span><strong>Not loaded</strong></div>
-        <div class="meta-item"><span>Truncated</span><strong>No</strong></div>
-        <div class="meta-item"><span>Read limit</span><strong>Not loaded</strong></div>
-        <div class="meta-item"><span>Refreshed</span><strong>Never</strong></div>
-      </div>
-      <pre id="logs-content" class="json-block">Not loaded</pre>
-    </section>
+      <section id="dashboard" class="panel active">
+        <div class="section-title"><h2 data-i18n="dashboard">Dashboard</h2><button id="refresh-overview" data-i18n="refresh">Refresh</button></div>
+        <div class="grid"><article class="card"><h3>Health</h3><div id="health-status" class="status muted">Not loaded</div></article><article class="card wide"><h3 data-i18n="admin_overview">Admin overview</h3><div id="overview-summary" class="summary-grid"></div></article><article class="card full"><h3>Details</h3><pre id="governance-json" class="json-block">Not loaded</pre></article></div>
+      </section>
 
-    <section id="config" class="panel">
-      <div class="section-title">
-        <h2>Config</h2>
-        <div class="actions">
-          <button id="load-config">Load current</button>
-          <button id="validate-config">Validate</button>
-          <button id="update-config" class="danger">Update file</button>
-          <button id="apply-config">Apply current file</button>
-          <button id="load-config-history">Load history</button>
-        </div>
+      <section id="providers" class="panel">
+        <div class="section-title"><div><h2 data-i18n="providers">Providers</h2><p class="hint">Track provider traffic, health, quota and recent 10-minute status buckets.</p></div><div class="actions"><select id="provider-hours"><option value="3">Last 3h</option><option value="6" selected>Last 6h</option><option value="12">Last 12h</option><option value="24">Last 24h</option></select><button id="refresh-providers" data-i18n="refresh">Refresh</button><button id="new-provider" data-i18n="new_provider">New provider</button></div></div>
+        <div id="provider-summary" class="summary-grid provider-summary"></div>
+        <article class="card full provider-controls"><div class="provider-controls-title"><strong>Filter providers</strong><span class="muted">Search configuration while metrics keep refreshing.</span></div><div class="actions"><input id="provider-search" type="search" placeholder="Search name, tag, endpoint"><select id="provider-protocol-filter"><option value="">All protocols</option></select><select id="provider-state-filter"><option value="">All states</option><option value="available">Available</option><option value="degraded">Degraded</option><option value="probing">Probing</option><option value="limited">Limited</option><option value="cooldown">Cooldown</option></select></div></article>
+        <div id="providers-table" class="table-wrap">Not loaded</div>
+      </section>
+
+      <section id="clients" class="panel">
+        <div class="section-title"><h2 data-i18n="clients">Clients</h2><div class="actions"><button id="refresh-clients" data-i18n="refresh">Refresh</button><button id="new-client" data-i18n="new_client">New client</button></div></div>
+        <div id="clients-table" class="table-wrap">Not loaded</div>
+      </section>
+
+      <section id="routes" class="panel">
+        <div class="section-title"><h2 data-i18n="routes_models">Routes & Models</h2><div class="actions"><button id="refresh-routes" data-i18n="refresh">Refresh</button><button id="new-route" data-i18n="new_route">New route</button></div></div>
+        <div id="routes-table" class="table-wrap">Not loaded</div>
+      </section>
+
+      <section id="usage" class="panel"><div class="section-title"><h2 data-i18n="usage">Usage</h2><div class="actions"><select id="usage-group-by"><option value="key">key</option><option value="provider">provider</option><option value="model">model</option><option value="inbound">inbound</option><option value="source">source</option><option value="outbound">outbound</option><option value="error_kind">error_kind</option></select><select id="usage-window"><option value="total">total</option><option value="day">day</option><option value="week">week</option><option value="month">month</option></select><input id="usage-bucket" type="text" placeholder="not required for total"><button id="refresh-usage" data-i18n="refresh">Refresh</button></div></div><div id="usage-table" class="table-wrap"></div></section>
+
+      <section id="monitoring" class="panel"><div class="section-title"><h2 data-i18n="monitoring">Monitoring</h2><div class="actions"><button id="refresh-quota" data-i18n="refresh_quota">Refresh quota</button><button id="refresh-latency" data-i18n="refresh_latency">Refresh latency</button></div></div><div class="grid"><article class="card full"><h3>Quota</h3><div id="quota-table" class="table-wrap"></div></article><article class="card full"><h3>Recent latency</h3><div id="latency-table" class="table-wrap"></div></article></div></section>
+
+      <section id="debug" class="panel"><div class="section-title"><h2 data-i18n="debug">Debug</h2><div class="actions"><button id="refresh-debug-traces">Refresh traces</button><button id="refresh-provider-debug">Refresh providers</button></div></div><div class="grid"><article class="card full"><h3>Route dry-run</h3><div class="form-grid"><input id="dry-run-inbound" placeholder="inbound name"><input id="dry-run-client" placeholder="client name"><input id="dry-run-model" placeholder="model"><label class="inline-check"><input id="dry-run-stream" type="checkbox"> stream</label><button id="run-route-dry-run">Run dry-run</button></div><pre id="dry-run-result" class="json-block">No dry-run yet</pre></article><article class="card full"><h3>Request traces</h3><div id="debug-traces-table" class="table-wrap">Not loaded</div></article><article class="card full"><h3>Provider debug</h3><pre id="provider-debug-json" class="json-block">Not loaded</pre></article></div></section>
+
+      <section id="logs" class="panel"><div class="section-title"><h2 data-i18n="logs">Logs</h2><div class="actions"><input id="log-lines" type="number" min="1" value="200" title="Maximum lines to display"><input id="log-bytes" type="number" min="1" placeholder="config max bytes"><button id="refresh-logs" data-i18n="refresh">Refresh</button></div></div><div id="logs-meta" class="meta-grid"><div class="meta-item"><span>Path</span><strong>Not loaded</strong></div></div><pre id="logs-content" class="json-block">Not loaded</pre></section>
+
+      <section id="config" class="panel"><div class="section-title"><h2 data-i18n="system_config">System Config</h2><div class="actions"><button id="load-config">Load current</button><button id="validate-config">Validate</button><button id="update-config" class="danger">Update file</button><button id="apply-config">Apply current file</button><button id="load-config-history">Load history</button></div></div><p class="hint">Load current shows a redacted copy by default. Do not submit YAML containing &lt;redacted&gt;; paste a complete config before updating.</p><textarea id="config-yaml" spellcheck="false" placeholder="Paste Syrogo YAML config here"></textarea><div class="section-subtitle"><h3>Diff preview</h3><span class="hint">Shown before update; sensitive values are redacted in the preview.</span></div><pre id="config-diff" class="json-block diff-block">No diff preview yet</pre><div class="section-subtitle"><h3>History</h3><span class="hint">Rollback writes the selected historical config back and applies it.</span></div><div id="config-history" class="table-wrap">No history loaded</div><pre id="config-result" class="json-block">No config request yet</pre></section>
+    </main>
+  </section>
+
+  <div id="provider-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="provider-modal-title">
+    <div class="modal-card">
+      <div class="section-title provider-modal-head"><div><p class="eyebrow">Provider</p><h2 id="provider-modal-title">新增 Provider</h2></div><button id="close-provider-modal" class="ghost small">Close</button></div>
+      <div class="provider-form-layout">
+        <section class="provider-form-section"><div class="form-section-title"><span>01</span><h3>身份与路由</h3></div><div class="provider-form"><label class="field"><span>Name</span><input id="provider-name" placeholder="openai-primary"></label><label class="field"><span>Tag</span><input id="provider-tag" placeholder="primary"></label></div></section>
+        <section class="provider-form-section"><div class="form-section-title"><span>02</span><h3>连接</h3></div><div class="provider-form"><label class="field"><span>Protocol</span><select id="provider-protocol"><option value="mock">mock</option><option value="openai_chat">openai_chat</option><option value="openai_responses">openai_responses</option><option value="anthropic_messages">anthropic_messages</option></select></label><label class="field"><span>Endpoint</span><input id="provider-endpoint" placeholder="https://api.example.com/v1"></label><label class="field wide"><span>Auth token</span><input id="provider-auth-token" type="password" placeholder="auth_token or <redacted>"></label></div><div id="provider-validate-result" class="inline-status loading hidden"></div></section>
+        <section class="provider-form-section"><div class="form-section-title"><span>03</span><h3>代理</h3></div><div class="provider-form"><label class="field wide"><span>Proxy URL</span><input id="provider-proxy-url" placeholder="http://127.0.0.1:7890"></label></div></section>
+        <section id="provider-delete-confirm" class="provider-delete-confirm hidden"><h3>删除 Provider</h3><p class="muted">输入 Provider 名称确认删除。</p><div class="provider-form"><label class="field wide"><span>Confirm name</span><input id="provider-delete-name" placeholder="Type provider name"></label></div></section>
       </div>
-      <p class="hint">Load current shows a redacted copy by default. Do not submit YAML containing &lt;redacted&gt;; paste a complete config before updating. Update writes validated YAML to the startup config path. Apply hot-reloads safe runtime changes; listener changes still require restart.</p>
-      <textarea id="config-yaml" spellcheck="false" placeholder="Paste Syrogo YAML config here"></textarea>
-      <div class="section-subtitle">
-        <h3>Diff preview</h3>
-        <span class="hint">Shown before update; sensitive values are redacted in the preview.</span>
+      <div class="actions modal-actions"><button id="test-provider-form" class="secondary small">Test</button><button id="save-provider" data-i18n="save_provider">Save provider</button><button id="delete-provider" class="danger small" data-i18n="delete_provider">Delete</button></div>
+    </div>
+  </div>
+
+  <div id="client-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="client-modal-title">
+    <div class="modal-card">
+      <div class="section-title provider-modal-head"><div><p class="eyebrow">Client</p><h2 id="client-modal-title">新增 Client</h2></div><button id="close-client-modal" class="ghost small">Close</button></div>
+      <div class="provider-form-layout">
+        <section class="provider-form-section"><div class="form-section-title"><span>01</span><h3>入口</h3></div><div class="provider-form"><label class="field wide"><span>Inbound</span><select id="client-inbound"></select></label></div></section>
+        <section class="provider-form-section"><div class="form-section-title"><span>02</span><h3>身份</h3></div><div class="provider-form"><label class="field"><span>Name</span><input id="client-name" placeholder="client name"></label><label class="field"><span>Tag</span><input id="client-tag" placeholder="tag"></label><label class="field wide"><span>Token</span><input id="client-token" type="password" placeholder="token or <redacted>"></label></div></section>
+        <section id="client-delete-confirm" class="provider-delete-confirm hidden"><h3>删除 Client</h3><p class="muted">输入 Client 名称确认删除。</p><div class="provider-form"><label class="field wide"><span>Confirm name</span><input id="client-delete-name" placeholder="Type client name"></label></div></section>
       </div>
-      <pre id="config-diff" class="json-block diff-block">No diff preview yet</pre>
-      <div class="section-subtitle">
-        <h3>History</h3>
-        <span class="hint">Rollback writes the selected historical config back and applies it.</span>
+      <div class="actions modal-actions"><button id="save-client" data-i18n="save_client">Save client</button><button id="delete-client" class="danger small" data-i18n="delete_client">Delete client</button></div>
+    </div>
+  </div>
+
+  <div id="route-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="route-modal-title">
+    <div class="modal-card route-modal-card">
+      <div class="section-title provider-modal-head"><div><p class="eyebrow">Route</p><h2 id="route-modal-title">新增 Route</h2></div><button id="close-route-modal" class="ghost small">Close</button></div>
+      <div class="provider-form-layout">
+        <section class="provider-form-section"><div class="form-section-title"><span>01</span><h3>匹配</h3></div><div class="provider-form"><label class="field"><span>Name</span><input id="route-name" placeholder="route name"></label><label class="field"><span>Strategy</span><select id="route-strategy"><option value="failover">failover</option><option value="round_robin">round_robin</option><option value="weighted_round_robin">weighted_round_robin</option></select></label><label class="field wide"><span>From tags</span><input id="route-from-tags" placeholder="from_tags comma separated"></label></div></section>
+        <section class="provider-form-section"><div class="form-section-title"><span>02</span><h3>目标</h3></div><div class="provider-form"><label class="field wide"><span>To tags</span><input id="route-to-tags" placeholder="to_tags comma separated"></label><label class="field wide"><span>Target model</span><input id="route-target-model" placeholder="target_model"></label></div></section>
+        <section class="provider-form-section"><div class="form-section-title"><span>03</span><h3>模型与权重</h3></div><div class="provider-form"><label class="field wide"><span>Model map JSON</span><textarea id="route-model-map" placeholder='{"gpt-4":"gpt-4o"}'></textarea></label><label class="field wide"><span>Weights JSON</span><textarea id="route-weights" placeholder='{"openai":1}'></textarea></label></div></section>
+        <section id="route-delete-confirm" class="provider-delete-confirm hidden"><h3>删除 Route</h3><p class="muted">输入 Route 名称确认删除。</p><div class="provider-form"><label class="field wide"><span>Confirm name</span><input id="route-delete-name" placeholder="Type route name"></label></div></section>
       </div>
-      <div id="config-history" class="table-wrap">No history loaded</div>
-      <pre id="config-result" class="json-block">No config request yet</pre>
-    </section>
-  </main>
+      <div class="actions modal-actions"><button id="save-route" data-i18n="save_route">Save route</button><button id="delete-route" class="danger small" data-i18n="delete_route">Delete route</button></div>
+    </div>
+  </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/admin/app.js"></script>

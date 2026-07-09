@@ -93,6 +93,7 @@ type OutboundSpec struct {
 	Endpoint     string               `yaml:"endpoint"`
 	AuthToken    string               `yaml:"auth_token"`
 	Tag          string               `yaml:"tag"`
+	Enabled      *bool                `yaml:"enabled"`
 	Capabilities OutboundCapabilities `yaml:"capabilities"`
 	Quota        OutboundQuotaConfig  `yaml:"quota"`
 	Proxy        OutboundProxyConfig  `yaml:"proxy"`
