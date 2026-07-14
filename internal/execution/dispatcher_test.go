@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/accounting"
+	"github.com/ryanycheng/Syrogo/internal/latency"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/runtime"
@@ -43,6 +44,19 @@ func (p *stubProvider) StreamCompletion(_ context.Context, req runtime.Request) 
 	}
 	close(ch)
 	return ch, nil
+}
+
+type controlledStreamProvider struct {
+	name   string
+	events chan runtime.StreamEvent
+}
+
+func (p *controlledStreamProvider) Name() string { return p.name }
+func (p *controlledStreamProvider) ChatCompletion(context.Context, runtime.Request) (runtime.Response, error) {
+	return runtime.Response{}, nil
+}
+func (p *controlledStreamProvider) StreamCompletion(context.Context, runtime.Request) (<-chan runtime.StreamEvent, error) {
+	return p.events, nil
 }
 
 func TestDispatchExecutesFirstOutboundStep(t *testing.T) {
@@ -424,6 +438,52 @@ func TestDispatchStreamMarksQuotaExceededCooldown(t *testing.T) {
 		t.Fatalf("Snapshot() = %#v, want cooldown", items)
 	}
 }
+func TestDispatchStreamRecordsTTFTMilestones(t *testing.T) {
+	latencyStore := latency.NewStore(10)
+	dispatcher := NewDispatcherWithStoreQuotaHealthEventsAndLatency(accounting.NewMemoryStore(), nil, nil, nil, latencyStore)
+	providerEvents := make(chan runtime.StreamEvent)
+	p := &controlledStreamProvider{name: "primary", events: providerEvents}
+	ctx, recorder := latency.Start(context.Background(), latencyStore, "req-stream", "POST", "/v1/messages", time.Now().Add(-20*time.Millisecond))
+
+	events, err := dispatcher.DispatchStream(ctx, runtime.Request{Model: "claude"}, runtime.ExecutionPlan{
+		Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundProtocol: "anthropic_messages", OutboundTarget: p, Model: "claude", OnError: runtime.FallbackAlways}},
+	})
+	if err != nil {
+		t.Fatalf("DispatchStream() error = %v", err)
+	}
+	active := latencyStore.ActiveSnapshot()
+	if len(active.Items) != 1 || active.Items[0].StreamState != latency.StreamStateWaitingFirstToken || active.Items[0].OutboundName != "primary" {
+		t.Fatalf("active before token = %#v", active.Items)
+	}
+
+	providerEvents <- runtime.StreamEvent{Type: runtime.StreamEventMessageStart}
+	if event := <-events; event.Type != runtime.StreamEventMessageStart {
+		t.Fatalf("first event = %#v", event)
+	}
+	active = latencyStore.ActiveSnapshot()
+	if active.Items[0].FirstTokenAt != "" {
+		t.Fatalf("message_start recorded first token: %#v", active.Items[0])
+	}
+
+	providerEvents <- runtime.StreamEvent{Type: runtime.StreamEventContentDelta, Delta: &runtime.ContentPart{Type: runtime.ContentPartTypeText, Text: "hello"}}
+	if event := <-events; event.Type != runtime.StreamEventContentDelta {
+		t.Fatalf("content event = %#v", event)
+	}
+	active = latencyStore.ActiveSnapshot()
+	if active.Items[0].StreamState != latency.StreamStateStreaming || active.Items[0].FirstTokenAt == "" || active.Items[0].StreamEventCount != 2 {
+		t.Fatalf("active after token = %#v", active.Items[0])
+	}
+
+	close(providerEvents)
+	for range events {
+	}
+	recorder.Finish(200, time.Now())
+	completed := latencyStore.Snapshot()
+	if len(completed.Items) != 1 || completed.Items[0].StreamState != latency.StreamStateCompleted || completed.Items[0].TTFTMs <= 0 {
+		t.Fatalf("completed trace = %#v", completed.Items)
+	}
+}
+
 func TestDispatchStreamReturnsFirstOutboundEvents(t *testing.T) {
 	dispatcher := NewDispatcher()
 	p := &stubProvider{name: "primary", streamEvents: []runtime.StreamEvent{{Type: runtime.StreamEventMessageStart, ResponseID: "chatcmpl-1", Model: "gpt-4"}}}

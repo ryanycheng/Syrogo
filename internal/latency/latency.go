@@ -13,25 +13,45 @@ type contextKey string
 
 const traceContextKey contextKey = "latency_trace"
 
+type StreamState string
+
+const (
+	StreamStateRouting           StreamState = "routing"
+	StreamStateDispatching       StreamState = "dispatching"
+	StreamStateWaitingFirstToken StreamState = "waiting_first_token"
+	StreamStateStreaming         StreamState = "streaming"
+	StreamStateCompleted         StreamState = "completed"
+	StreamStateError             StreamState = "error"
+)
+
 type Trace struct {
-	RequestID       string     `json:"request_id"`
-	Method          string     `json:"method"`
-	Path            string     `json:"path"`
-	Inbound         string     `json:"inbound,omitempty"`
-	InboundProtocol string     `json:"inbound_protocol,omitempty"`
-	ClientName      string     `json:"client_name,omitempty"`
-	ActiveTag       string     `json:"active_tag,omitempty"`
-	MatchedRule     string     `json:"matched_rule,omitempty"`
-	Strategy        string     `json:"strategy,omitempty"`
-	ResolvedToTags  []string   `json:"resolved_to_tags,omitempty"`
-	PlannedSteps    []PlanStep `json:"planned_steps,omitempty"`
-	FallbackCount   int        `json:"fallback_count,omitempty"`
-	Status          int        `json:"status"`
-	ErrorKind       string     `json:"error_kind,omitempty"`
-	StartedAt       string     `json:"started_at"`
-	FinishedAt      string     `json:"finished_at,omitempty"`
-	DurationMs      int64      `json:"duration_ms"`
-	Spans           []Span     `json:"spans"`
+	RequestID          string      `json:"request_id"`
+	Method             string      `json:"method"`
+	Path               string      `json:"path"`
+	Inbound            string      `json:"inbound,omitempty"`
+	InboundProtocol    string      `json:"inbound_protocol,omitempty"`
+	ClientName         string      `json:"client_name,omitempty"`
+	ActiveTag          string      `json:"active_tag,omitempty"`
+	MatchedRule        string      `json:"matched_rule,omitempty"`
+	Strategy           string      `json:"strategy,omitempty"`
+	ResolvedToTags     []string    `json:"resolved_to_tags,omitempty"`
+	PlannedSteps       []PlanStep  `json:"planned_steps,omitempty"`
+	FallbackCount      int         `json:"fallback_count,omitempty"`
+	Status             int         `json:"status"`
+	ErrorKind          string      `json:"error_kind,omitempty"`
+	StartedAt          string      `json:"started_at"`
+	FinishedAt         string      `json:"finished_at,omitempty"`
+	DurationMs         int64       `json:"duration_ms"`
+	Spans              []Span      `json:"spans"`
+	Streaming          bool        `json:"streaming,omitempty"`
+	StreamState        StreamState `json:"stream_state,omitempty"`
+	OutboundName       string      `json:"outbound_name,omitempty"`
+	OutboundProtocol   string      `json:"outbound_protocol,omitempty"`
+	ProviderSelectedAt string      `json:"provider_selected_at,omitempty"`
+	FirstTokenAt       string      `json:"first_token_at,omitempty"`
+	TTFTMs             int64       `json:"ttft_ms,omitempty"`
+	LastStreamEventAt  string      `json:"last_stream_event_at,omitempty"`
+	StreamEventCount   int         `json:"stream_event_count,omitempty"`
 }
 
 type PlanStep struct {
@@ -59,6 +79,7 @@ type Store struct {
 	mu     sync.Mutex
 	limit  int
 	traces []Trace
+	active map[string]Trace
 }
 
 type Snapshot struct {
@@ -84,7 +105,7 @@ func NewStore(limit int) *Store {
 	if limit <= 0 {
 		limit = 200
 	}
-	return &Store{limit: limit}
+	return &Store{limit: limit, active: make(map[string]Trace)}
 }
 
 func Start(ctx context.Context, store *Store, requestID, method, path string, startedAt time.Time) (context.Context, *Recorder) {
@@ -101,6 +122,7 @@ func Start(ctx context.Context, store *Store, requestID, method, path string, st
 		startedAt: startedAt,
 		store:     store,
 	}
+	recorder.syncActive()
 	return context.WithValue(ctx, traceContextKey, recorder), recorder
 }
 
@@ -117,6 +139,7 @@ func (r *Recorder) SetRoute(inbound, protocol, clientName, activeTag string) {
 		return
 	}
 	r.mu.Lock()
+	defer r.syncActive()
 	defer r.mu.Unlock()
 	r.trace.Inbound = inbound
 	r.trace.InboundProtocol = protocol
@@ -138,6 +161,7 @@ func (r *Recorder) SetPlan(plan runtime.ExecutionPlan) {
 		})
 	}
 	r.mu.Lock()
+	defer r.syncActive()
 	defer r.mu.Unlock()
 	r.trace.MatchedRule = plan.MatchedRule
 	r.trace.Strategy = string(plan.Strategy)
@@ -150,6 +174,7 @@ func (r *Recorder) SetFallbackCount(count int) {
 		return
 	}
 	r.mu.Lock()
+	defer r.syncActive()
 	defer r.mu.Unlock()
 	r.trace.FallbackCount = count
 }
@@ -159,6 +184,7 @@ func (r *Recorder) SetErrorKind(errorKind string) {
 		return
 	}
 	r.mu.Lock()
+	defer r.syncActive()
 	defer r.mu.Unlock()
 	r.trace.ErrorKind = errorKind
 }
@@ -185,8 +211,78 @@ func (r *Recorder) AddSpan(name string, startedAt time.Time, attrs map[string]st
 	}
 
 	r.mu.Lock()
+	defer r.syncActive()
 	defer r.mu.Unlock()
 	r.trace.Spans = append(r.trace.Spans, span)
+}
+
+func (r *Recorder) SetStreamState(state StreamState) {
+	if r == nil || state == "" {
+		return
+	}
+	r.mu.Lock()
+	r.trace.Streaming = true
+	r.trace.StreamState = state
+	r.mu.Unlock()
+	r.syncActive()
+}
+
+func (r *Recorder) SetProvider(outbound, protocol string, selectedAt time.Time) {
+	if r == nil {
+		return
+	}
+	if selectedAt.IsZero() {
+		selectedAt = time.Now()
+	}
+	r.mu.Lock()
+	r.trace.Streaming = true
+	r.trace.OutboundName = outbound
+	r.trace.OutboundProtocol = protocol
+	r.trace.ProviderSelectedAt = selectedAt.UTC().Format(time.RFC3339Nano)
+	r.mu.Unlock()
+	r.syncActive()
+}
+
+func (r *Recorder) MarkStreamEvent(at time.Time) {
+	if r == nil {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	r.mu.Lock()
+	r.trace.LastStreamEventAt = at.UTC().Format(time.RFC3339Nano)
+	r.trace.StreamEventCount++
+	r.mu.Unlock()
+	r.syncActive()
+}
+
+func (r *Recorder) MarkFirstToken(at time.Time) {
+	if r == nil {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	r.mu.Lock()
+	if r.trace.FirstTokenAt != "" {
+		r.mu.Unlock()
+		return
+	}
+	r.trace.FirstTokenAt = at.UTC().Format(time.RFC3339Nano)
+	r.trace.TTFTMs = at.Sub(r.startedAt).Milliseconds()
+	r.trace.StreamState = StreamStateStreaming
+	r.trace.Spans = append(r.trace.Spans, Span{
+		Name:       "time_to_first_token",
+		StartedAt:  r.startedAt.UTC().Format(time.RFC3339Nano),
+		DurationMs: r.trace.TTFTMs,
+		Attrs: map[string]string{
+			"outbound": r.trace.OutboundName,
+			"protocol": r.trace.OutboundProtocol,
+		},
+	})
+	r.mu.Unlock()
+	r.syncActive()
 }
 
 func (r *Recorder) Finish(status int, finishedAt time.Time) {
@@ -205,8 +301,18 @@ func (r *Recorder) Finish(status int, finishedAt time.Time) {
 	r.mu.Unlock()
 
 	if r.store != nil {
-		r.store.Record(snapshot)
+		r.store.finish(snapshot)
 	}
+}
+
+func (r *Recorder) syncActive() {
+	if r == nil || r.store == nil {
+		return
+	}
+	r.mu.Lock()
+	snapshot := cloneTrace(r.trace)
+	r.mu.Unlock()
+	r.store.updateActive(snapshot)
 }
 
 func RecordSpan(ctx context.Context, name string, startedAt time.Time, attrs map[string]string) {
@@ -219,11 +325,51 @@ func (s *Store) Record(trace Trace) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.recordLocked(cloneTrace(trace))
+}
+
+func (s *Store) updateActive(trace Trace) {
+	if s == nil || trace.RequestID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active == nil {
+		s.active = make(map[string]Trace)
+	}
+	s.active[trace.RequestID] = cloneTrace(trace)
+}
+
+func (s *Store) finish(trace Trace) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.active, trace.RequestID)
+	s.recordLocked(cloneTrace(trace))
+}
+
+func (s *Store) recordLocked(trace Trace) {
 	s.traces = append(s.traces, trace)
 	if overflow := len(s.traces) - s.limit; overflow > 0 {
 		copy(s.traces, s.traces[overflow:])
 		s.traces = s.traces[:s.limit]
 	}
+}
+
+func (s *Store) ActiveSnapshot() Snapshot {
+	if s == nil {
+		return Snapshot{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := make([]Trace, 0, len(s.active))
+	for _, trace := range s.active {
+		items = append(items, cloneTrace(trace))
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].StartedAt < items[j].StartedAt })
+	return Snapshot{Items: items}
 }
 
 func (s *Store) Snapshot() Snapshot {
@@ -234,10 +380,26 @@ func (s *Store) Snapshot() Snapshot {
 	defer s.mu.Unlock()
 	items := make([]Trace, len(s.traces))
 	for index, trace := range s.traces {
-		items[index] = trace
-		items[index].Spans = append([]Span(nil), trace.Spans...)
+		items[index] = cloneTrace(trace)
 	}
 	return Snapshot{Items: items}
+}
+
+func cloneTrace(trace Trace) Trace {
+	trace.ResolvedToTags = append([]string(nil), trace.ResolvedToTags...)
+	trace.PlannedSteps = append([]PlanStep(nil), trace.PlannedSteps...)
+	trace.Spans = append([]Span(nil), trace.Spans...)
+	for index := range trace.Spans {
+		if len(trace.Spans[index].Attrs) == 0 {
+			continue
+		}
+		attrs := make(map[string]string, len(trace.Spans[index].Attrs))
+		for key, value := range trace.Spans[index].Attrs {
+			attrs[key] = value
+		}
+		trace.Spans[index].Attrs = attrs
+	}
+	return trace
 }
 
 func (s *Store) Summary() Summary {

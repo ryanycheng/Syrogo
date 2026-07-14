@@ -40,6 +40,48 @@ func TestStoreSummaryAggregatesTotalAndSpans(t *testing.T) {
 		t.Fatalf("upstream summary = %#v", upstream)
 	}
 }
+func TestRecorderActiveStreamLifecycle(t *testing.T) {
+	store := NewStore(10)
+	startedAt := time.Now().Add(-100 * time.Millisecond)
+	_, recorder := Start(context.Background(), store, "stream-1", "POST", "/v1/messages", startedAt)
+
+	active := store.ActiveSnapshot()
+	if len(active.Items) != 1 || active.Items[0].RequestID != "stream-1" {
+		t.Fatalf("active = %#v, want started request", active.Items)
+	}
+
+	selectedAt := startedAt.Add(20 * time.Millisecond)
+	recorder.SetStreamState(StreamStateDispatching)
+	recorder.SetProvider("anthropic-primary", "anthropic_messages", selectedAt)
+	recorder.SetStreamState(StreamStateWaitingFirstToken)
+	recorder.MarkStreamEvent(startedAt.Add(40 * time.Millisecond))
+	firstTokenAt := startedAt.Add(75 * time.Millisecond)
+	recorder.MarkFirstToken(firstTokenAt)
+	recorder.MarkFirstToken(startedAt.Add(90 * time.Millisecond))
+
+	active = store.ActiveSnapshot()
+	if len(active.Items) != 1 {
+		t.Fatalf("active len = %d, want 1", len(active.Items))
+	}
+	item := active.Items[0]
+	if item.StreamState != StreamStateStreaming || item.OutboundName != "anthropic-primary" || item.TTFTMs != 75 || item.StreamEventCount != 1 {
+		t.Fatalf("active trace = %#v", item)
+	}
+	if len(item.Spans) != 1 || item.Spans[0].Name != "time_to_first_token" || item.Spans[0].DurationMs != 75 {
+		t.Fatalf("TTFT spans = %#v", item.Spans)
+	}
+
+	recorder.SetStreamState(StreamStateCompleted)
+	recorder.Finish(200, startedAt.Add(120*time.Millisecond))
+	if got := store.ActiveSnapshot(); len(got.Items) != 0 {
+		t.Fatalf("active after finish = %#v, want empty", got.Items)
+	}
+	completed := store.Snapshot()
+	if len(completed.Items) != 1 || completed.Items[0].StreamState != StreamStateCompleted || completed.Items[0].TTFTMs != 75 {
+		t.Fatalf("completed = %#v", completed.Items)
+	}
+}
+
 func TestRecorderStoresFinishedTraceWithSpans(t *testing.T) {
 	store := NewStore(10)
 	startedAt := time.Now().Add(-10 * time.Millisecond)

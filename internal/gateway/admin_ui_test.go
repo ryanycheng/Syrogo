@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ryanycheng/Syrogo/internal/accounting"
 	"github.com/ryanycheng/Syrogo/internal/config"
 	"github.com/ryanycheng/Syrogo/internal/execution"
 	"github.com/ryanycheng/Syrogo/internal/latency"
@@ -55,7 +57,7 @@ func TestAdminUIReturnsIndexHTMLWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want text/html", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"Admin UI token", "/admin/app.js", "usage-window", "usage-bucket", "log-bytes", "logs-meta", "overview-summary", "config-diff", "Apply current file", "config-history", "Debug", "dry-run-model"} {
+	for _, want := range []string{"Admin UI token", "/admin/app.js", "usage-window", "usage-bucket", "log-bytes", "logs-meta", "overview-summary", "sessions-table", "session-status-filter", "live-requests-table", "refresh-live-requests", "config-diff", "Apply current file", "config-history", "Debug", "dry-run-model"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
@@ -78,7 +80,7 @@ func TestAdminUIReturnsStaticAssetsWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want javascript", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"/admin/usage", "/admin/logs", "/admin/overview", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback", "/admin/debug/traces", "/admin/debug/route-dry-run", "/admin/debug/providers", "/admin/config/history/diff"} {
+	for _, want := range []string{"/admin/sessions", "/admin/usage", "/admin/logs", "/admin/overview", "/admin/latency/active", "refreshLiveRequests", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback", "/admin/debug/traces", "/admin/debug/route-dry-run", "/admin/debug/providers", "/admin/config/history/diff"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
@@ -139,7 +141,7 @@ func TestAdminLatencyAcceptsAdminToken(t *testing.T) {
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	for _, path := range []string{"/admin/latency", "/admin/latency/summary"} {
+	for _, path := range []string{"/admin/latency", "/admin/latency/summary", "/admin/latency/active"} {
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, authorizedRequest(http.MethodGet, path, "admin-ui-token", nil))
 		if w.Code != http.StatusOK {
@@ -159,6 +161,41 @@ func TestAdminLatencyRejectsClientToken(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestAdminActiveLatencyReturnsWaitingDuration(t *testing.T) {
+	h := newAdminTestHandler(t)
+	latencyStore := latency.NewStore(10)
+	state := h.runtimeState()
+	state.Dispatcher = execution.NewDispatcherWithStoreQuotaHealthEventsAndLatency(accounting.NewMemoryStore(), nil, nil, nil, latencyStore)
+	state.LatencyStore = latencyStore
+	h.ApplyRuntime(state)
+	ctx, recorder := latency.Start(context.Background(), latencyStore, "active-1", "POST", "/v1/messages", time.Now().Add(-2*time.Second))
+	recorder.SetRoute("anthropic-entry", "anthropic_messages", "claude-key", "office")
+	recorder.SetProvider("anthropic-primary", "anthropic_messages", time.Now().Add(-time.Second))
+	recorder.SetStreamState(latency.StreamStateWaitingFirstToken)
+	defer recorder.Finish(http.StatusOK, time.Now())
+	_ = ctx
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodGet, "/admin/latency/active", "admin-ui-token", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"request_id":"active-1"`, `"stream_state":"waiting_first_token"`, `"outbound_name":"anthropic-primary"`, `"elapsed_ms":`, `"waiting_first_token_ms":`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body = %s, want %s", body, want)
+		}
+	}
+	for _, forbidden := range []string{"client-token", "admin-ui-token", "secret", "prompt"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("body leaked %q: %s", forbidden, body)
+		}
 	}
 }
 

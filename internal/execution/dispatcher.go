@@ -144,6 +144,7 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 		}
 
 		attemptStartedAt := time.Now()
+		latency.FromContext(ctx).SetStreamState(latency.StreamStateDispatching)
 		events, err := step.OutboundTarget.StreamCompletion(ctx, stepReq)
 		latency.RecordSpan(ctx, "provider_dispatch", attemptStartedAt, map[string]string{
 			"outbound": step.OutboundName,
@@ -151,7 +152,10 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 			"stream":   "true",
 		})
 		if err == nil {
-			latency.FromContext(ctx).SetFallbackCount(i)
+			recorder := latency.FromContext(ctx)
+			recorder.SetFallbackCount(i)
+			recorder.SetProvider(step.OutboundName, step.OutboundProtocol, time.Now())
+			recorder.SetStreamState(latency.StreamStateWaitingFirstToken)
 			return d.wrapStream(ctx, plan, step, stepReq.Model, i, startedAt, events, decision.Probe, healthDecision.Probe), nil
 		}
 
@@ -211,6 +215,13 @@ func (d *Dispatcher) QueryLatency() latency.Snapshot {
 	return d.latencyStore.Snapshot()
 }
 
+func (d *Dispatcher) QueryActiveLatency() latency.Snapshot {
+	if d.latencyStore == nil {
+		return latency.Snapshot{}
+	}
+	return d.latencyStore.ActiveSnapshot()
+}
+
 func (d *Dispatcher) QueryLatencySummary() latency.Summary {
 	if d.latencyStore == nil {
 		return latency.Summary{}
@@ -229,28 +240,59 @@ func (d *Dispatcher) wrapStream(ctx context.Context, plan runtime.ExecutionPlan,
 		var usage *runtime.Usage
 		executedModel := requestedModel
 		recorded := false
-		for event := range events {
-			if event.Model != "" {
-				executedModel = event.Model
+		recorder := latency.FromContext(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				recorder.SetStreamState(latency.StreamStateError)
+				return
+			case event, ok := <-events:
+				if !ok {
+					if !recorded {
+						recorder.SetStreamState(latency.StreamStateCompleted)
+						d.recordSuccess(step.OutboundName, quotaProbe, healthProbe)
+						d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), fallbackCount))
+					}
+					return
+				}
+				recorder.MarkStreamEvent(time.Now())
+				if isFirstContentDelta(event) {
+					recorder.MarkFirstToken(time.Now())
+				}
+				if event.Model != "" {
+					executedModel = event.Model
+				}
+				if event.Usage != nil {
+					copied := *event.Usage
+					usage = &copied
+				}
+				if event.Type == runtime.StreamEventError && event.Err != nil && !recorded {
+					recorder.SetStreamState(latency.StreamStateError)
+					errorKind := provider.NormalizeError(event.Err)
+					d.recordProviderError(step.OutboundName, errorKind)
+					d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), fallbackCount))
+					recorded = true
+				}
+				select {
+				case out <- event:
+				case <-ctx.Done():
+					recorder.SetStreamState(latency.StreamStateError)
+					return
+				}
 			}
-			if event.Usage != nil {
-				copied := *event.Usage
-				usage = &copied
-			}
-			if event.Type == runtime.StreamEventError && event.Err != nil && !recorded {
-				errorKind := provider.NormalizeError(event.Err)
-				d.recordProviderError(step.OutboundName, errorKind)
-				d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), fallbackCount))
-				recorded = true
-			}
-			out <- event
-		}
-		if !recorded {
-			d.recordSuccess(step.OutboundName, quotaProbe, healthProbe)
-			d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), fallbackCount))
 		}
 	}()
 	return out
+}
+
+func isFirstContentDelta(event runtime.StreamEvent) bool {
+	if event.Type != runtime.StreamEventContentDelta {
+		return false
+	}
+	if event.Delta != nil && (event.Delta.Text != "" || len(event.Delta.Data) > 0) {
+		return true
+	}
+	return event.ToolCall != nil && (event.ToolCall.ID != "" || event.ToolCall.Name != "" || event.ToolCall.Arguments != "" || event.ToolCall.Input != "")
 }
 
 func (d *Dispatcher) beforeAttempt(outbound string) quota.Decision {

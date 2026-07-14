@@ -18,14 +18,15 @@ let resourceOptions = { inbounds: [], outbounds: [], client_tags: [], outbound_t
 let providerMetrics = [];
 let providerLiveChecks = {};
 let providerRefreshTimer = 0;
+let liveRequestsTimer = 0;
 let activeProvider = null;
 
 const i18n = {
   en: {
-    login_eyebrow: "Admin Console", login_title: "Sign in to Syrogo", login_hint: "Use the admin.token configured in your Syrogo config file.", admin_token: "Admin UI token", remember_browser: "Remember this browser", sign_in: "Sign in", console: "Console", dashboard: "Dashboard", providers: "Providers", clients: "Clients", routes_models: "Routes & Models", usage: "Usage", monitoring: "Monitoring", logs: "Logs", system_config: "System Config", debug: "Debug", apply_current_file: "Apply current file", logout: "Logout", refresh: "Refresh", admin_overview: "Admin overview", new_provider: "New provider", save_provider: "Save provider", delete_provider: "Delete", new_client: "New client", save_client: "Save client", delete_client: "Delete client", new_route: "New route", save_route: "Save route", delete_route: "Delete route", refresh_quota: "Refresh quota", refresh_latency: "Refresh latency"
+    login_eyebrow: "Admin Console", login_title: "Sign in to Syrogo", login_hint: "Use the admin.token configured in your Syrogo config file.", admin_token: "Admin UI token", remember_browser: "Remember this browser", sign_in: "Sign in", console: "Console", dashboard: "Dashboard", sessions: "Sessions", providers: "Providers", clients: "Clients", routes_models: "Routes & Models", usage: "Usage", monitoring: "Monitoring", logs: "Logs", system_config: "System Config", debug: "Debug", apply_current_file: "Apply current file", logout: "Logout", refresh: "Refresh", admin_overview: "Admin overview", new_provider: "New provider", save_provider: "Save provider", delete_provider: "Delete", new_client: "New client", save_client: "Save client", delete_client: "Delete client", new_route: "New route", save_route: "Save route", delete_route: "Delete route", refresh_quota: "Refresh quota", refresh_latency: "Refresh latency"
   },
   "zh-CN": {
-    login_eyebrow: "管理控制台", login_title: "登录 Syrogo", login_hint: "使用配置文件中的 admin.token。", admin_token: "Admin UI token", remember_browser: "记住此浏览器", sign_in: "登录", console: "控制台", dashboard: "仪表盘", providers: "Provider 配置", clients: "Clients", routes_models: "Routes & Models", usage: "Usage", monitoring: "监控", logs: "日志", system_config: "系统配置", debug: "Debug", apply_current_file: "应用当前配置", logout: "退出", refresh: "刷新", admin_overview: "管理概览", new_provider: "新增 Provider", save_provider: "保存 Provider", delete_provider: "删除", new_client: "新增 Client", save_client: "保存 Client", delete_client: "删除 Client", new_route: "新增路由", save_route: "保存路由", delete_route: "删除路由", refresh_quota: "刷新配额", refresh_latency: "刷新延迟"
+    login_eyebrow: "管理控制台", login_title: "登录 Syrogo", login_hint: "使用配置文件中的 admin.token。", admin_token: "Admin UI token", remember_browser: "记住此浏览器", sign_in: "登录", console: "控制台", dashboard: "仪表盘", sessions: "会话", providers: "Provider 配置", clients: "Clients", routes_models: "Routes & Models", usage: "Usage", monitoring: "监控", logs: "日志", system_config: "系统配置", debug: "Debug", apply_current_file: "应用当前配置", logout: "退出", refresh: "刷新", admin_overview: "管理概览", new_provider: "新增 Provider", save_provider: "保存 Provider", delete_provider: "删除", new_client: "新增 Client", save_client: "保存 Client", delete_client: "删除 Client", new_route: "新增路由", save_route: "保存路由", delete_route: "删除路由", refresh_quota: "刷新配额", refresh_latency: "刷新延迟"
   }
 };
 
@@ -111,6 +112,36 @@ function renderOverviewSummary(overview) {
   const events = overview.recent_events || {};
   const admin = overview.admin || {};
   document.querySelector("#overview-summary").innerHTML = [metric("requests", usage.request_count), metric("errors", usage.error_count), metric("fallbacks", usage.fallback_count), metric("p95 ms", latency.p95_ms), metric("p99 ms", latency.p99_ms), metric("quota entries", quota.configured_quota_items), metric("degraded providers", health.degraded_count), metric("recent events", events.count), metric("config path", admin.config_path_set ? "set" : "missing"), metric("logs", admin.logs_enabled ? "enabled" : "disabled")].join("");
+}
+
+async function refreshSessions() {
+  const params = new URLSearchParams();
+  const filters = { client: value("#session-client-filter"), status: value("#session-status-filter"), host: value("#session-host-filter"), cwd: value("#session-cwd-filter") };
+  Object.entries(filters).forEach(([key, filterValue]) => { if (filterValue) params.set(key, filterValue); });
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetchJSON(`/admin/sessions${suffix}`);
+  const items = response.items || [];
+  document.querySelector("#sessions-table").innerHTML = items.length === 0 ? emptyState("No Claude Code sessions yet. Start one with syrogo run claude inside tmux.") : renderSessionsTable(items);
+}
+
+function renderSessionsTable(items) {
+  return `<table><thead><tr><th>Status</th><th>Client</th><th>Location</th><th>Workspace</th><th>Last seen</th><th>Commands</th></tr></thead><tbody>${items.map(renderSessionRow).join("")}</tbody></table>`;
+}
+
+function renderSessionRow(item) {
+  const tmux = item.tmux || {};
+  const commands = item.commands || {};
+  const location = tmux.present ? [`session ${tmux.session || "-"}`, `window ${tmux.window_index || "-"}${tmux.window_name ? ` · ${tmux.window_name}` : ""}`, `pane ${tmux.pane_id || tmux.pane_index || "-"}`].join("<br>") : "not in tmux";
+  const workspace = `<strong>${escapeHTML(item.host || "-")}</strong><div class="muted endpoint-text">${escapeHTML(item.cwd || "-")}</div><div class="muted">${escapeHTML(item.git_branch || "")}</div>`;
+  const commandList = [commands.attach, commands.select_window, commands.select_pane].filter(Boolean).map((command) => `<code>${escapeHTML(command)}</code>`).join("<br>") || `<span class="muted">No tmux command</span>`;
+  return `<tr><td>${badge(item.status || "unknown", sessionStatusKind(item.status))}<div class="muted">${escapeHTML(item.last_event || "no hook yet")}</div></td><td><strong>${escapeHTML(item.client_name || "-")}</strong><div class="muted">${escapeHTML(item.inbound_name || "-")}</div></td><td>${location}</td><td>${workspace}<div class="muted">pid ${escapeHTML(item.pid || "-")}</div></td><td>${escapeHTML(formatDateTime(item.last_seen_at || item.started_at))}</td><td class="session-commands">${commandList}</td></tr>`;
+}
+
+function sessionStatusKind(status) {
+  if (status === "waiting_permission") return "danger";
+  if (status === "tool_running" || status === "compacting") return "warn";
+  if (status === "stopped") return "muted";
+  return "";
 }
 
 async function refreshResourceOptions() {
@@ -481,11 +512,54 @@ function renderConfigDiff(previous, next) { const previousLines = redactConfigFo
 function diffLines(previousLines, nextLines) { const dp = Array.from({ length: previousLines.length + 1 }, () => Array(nextLines.length + 1).fill(0)); for (let i = previousLines.length - 1; i >= 0; i -= 1) { for (let j = nextLines.length - 1; j >= 0; j -= 1) dp[i][j] = previousLines[i] === nextLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]); } const rows = []; let i = 0; let j = 0; while (i < previousLines.length && j < nextLines.length) { if (previousLines[i] === nextLines[j]) { rows.push({ kind: "same", prefix: "  ", text: previousLines[i++] }); j += 1; } else if (dp[i + 1][j] >= dp[i][j + 1]) rows.push({ kind: "removed", prefix: "- ", text: previousLines[i++] }); else rows.push({ kind: "added", prefix: "+ ", text: nextLines[j++] }); } while (i < previousLines.length) rows.push({ kind: "removed", prefix: "- ", text: previousLines[i++] }); while (j < nextLines.length) rows.push({ kind: "added", prefix: "+ ", text: nextLines[j++] }); return rows; }
 function redactConfigForPreview(content) { return content.split("\n").map((line) => line.replace(/^(\s*(?:token|auth_token|admin_token|api[_-]?key|secret)\s*:\s*).+$/i, '$1"<redacted>"')).join("\n"); }
 
+async function refreshLiveRequests() {
+  const response = await fetchJSON("/admin/latency/active");
+  const items = response.items || [];
+  document.querySelector("#live-requests-table").innerHTML = items.length === 0 ? `<div class="live-empty">No requests are currently running.</div>` : renderLiveRequestsTable(items);
+}
+
+function renderLiveRequestsTable(items) {
+  return `<table class="live-requests-table"><thead><tr><th>State</th><th>Client / model</th><th>Provider</th><th>Elapsed</th><th>First token</th><th>Stream</th><th>Request</th></tr></thead><tbody>${items.map(renderLiveRequestRow).join("")}</tbody></table>`;
+}
+
+function renderLiveRequestRow(item) {
+  const state = item.stream_state || "routing";
+  const stateKind = state === "waiting_first_token" ? "warn" : state === "error" ? "danger" : "";
+  const firstToken = item.first_token_at ? `${formatDuration(item.ttft_ms)} TTFT` : state === "waiting_first_token" ? `${formatDuration(item.waiting_first_token_ms)} waiting` : "not received";
+  const stream = state === "streaming" ? `${formatDuration(item.stream_idle_ms)} idle · ${escapeHTML(item.stream_event_count || 0)} events` : `${escapeHTML(item.stream_event_count || 0)} events`;
+  return `<tr><td>${badge(state, stateKind)}</td><td><strong>${escapeHTML(item.client_name || "-")}</strong><div class="muted">${escapeHTML(item.inbound || "-")} · ${escapeHTML(item.planned_steps?.[0]?.model || "-")}</div></td><td><strong>${escapeHTML(item.outbound_name || "selecting")}</strong><div class="muted">${escapeHTML(item.outbound_protocol || "-")}</div></td><td><strong>${formatDuration(item.elapsed_ms)}</strong><div class="muted">fallbacks ${escapeHTML(item.fallback_count || 0)}</div></td><td>${escapeHTML(firstToken)}</td><td>${escapeHTML(stream)}</td><td><code>${escapeHTML(item.request_id || "-")}</code><div class="muted">${escapeHTML(formatDateTime(item.started_at))}</div></td></tr>`;
+}
+
+function formatDuration(value) {
+  const milliseconds = Number(value || 0);
+  if (milliseconds < 1000) return `${milliseconds}ms`;
+  return `${(milliseconds / 1000).toFixed(milliseconds < 10000 ? 1 : 0)}s`;
+}
+
+function startLiveRequestsRefresh() {
+  stopLiveRequestsRefresh();
+  refreshLiveRequests().catch((error) => showToast(error.message));
+  liveRequestsTimer = window.setInterval(() => refreshLiveRequests().catch((error) => showToast(error.message)), 2000);
+}
+
+function stopLiveRequestsRefresh() {
+  if (liveRequestsTimer) {
+    window.clearInterval(liveRequestsTimer);
+    liveRequestsTimer = 0;
+  }
+}
+
 function formatTime(value) {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+function formatDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 function renderTraceRow(item) { const spans = (item.spans || []).map((span) => `${span.name}: ${span.duration_ms}ms`).join("\n"); return `<tr><td>${escapeHTML(item.started_at || "")}</td><td>${escapeHTML(item.path || "")}</td><td>${escapeHTML(item.inbound || "")}</td><td>${escapeHTML(item.client_name || "")}</td><td>${escapeHTML(item.status || 0)}</td><td>${escapeHTML(item.duration_ms || 0)}ms</td><td><pre>${escapeHTML(spans)}</pre></td></tr>`; }
 function renderDebugTraceRow(item) { const steps = (item.planned_steps || []).map((step) => `${step.outbound_name} ${step.model || ""}`).join("\n"); const spans = (item.spans || []).map((span) => `${span.name}: ${span.duration_ms}ms`).join("\n"); return `<tr><td>${escapeHTML(item.started_at || "")}</td><td>${escapeHTML(item.path || "")}</td><td>${escapeHTML(item.client_name || "")}</td><td>${escapeHTML(item.matched_rule || "")}</td><td>${escapeHTML(item.strategy || "")}</td><td>${escapeHTML(item.fallback_count || 0)}</td><td><pre>${escapeHTML(steps)}</pre></td><td><pre>${escapeHTML(spans)}</pre></td></tr>`; }
@@ -507,8 +581,8 @@ function stopProviderAutoRefresh() {
     providerRefreshTimer = 0;
   }
 }
-const pageTitles = { dashboard: "Dashboard", providers: "Providers", clients: "Clients", routes: "Routes & Models", usage: "Usage", monitoring: "Monitoring", logs: "Logs", config: "System Config", debug: "Debug" };
-function switchPanel(target) { document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.target === target)); document.querySelectorAll(".panel").forEach((item) => item.classList.toggle("active", item.id === target)); updatePageTitle(); if (target === "providers") { refreshProviders(); startProviderAutoRefresh(); } else { stopProviderAutoRefresh(); } if (target === "clients") refreshClients(); if (target === "routes") refreshRoutes(); if (target === "usage") refreshUsage(); if (target === "monitoring") { refreshQuota(); refreshLatency(); } if (target === "logs") refreshLogs(); if (target === "debug") { refreshTraces(); refreshProviderDebug(); } }
+const pageTitles = { dashboard: "Dashboard", sessions: "Sessions", providers: "Providers", clients: "Clients", routes: "Routes & Models", usage: "Usage", monitoring: "Monitoring", logs: "Logs", config: "System Config", debug: "Debug" };
+function switchPanel(target) { document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.target === target)); document.querySelectorAll(".panel").forEach((item) => item.classList.toggle("active", item.id === target)); updatePageTitle(); if (target === "providers") { refreshProviders(); startProviderAutoRefresh(); } else { stopProviderAutoRefresh(); } if (target === "sessions") refreshSessions(); if (target === "clients") refreshClients(); if (target === "routes") refreshRoutes(); if (target === "usage") refreshUsage(); if (target === "monitoring") { refreshQuota(); refreshLatency(); startLiveRequestsRefresh(); } else { stopLiveRequestsRefresh(); } if (target === "logs") refreshLogs(); if (target === "debug") { refreshTraces(); refreshProviderDebug(); } }
 function updatePageTitle() { const active = document.querySelector(".nav-item.active"); if (active) els.pageTitle.textContent = active.textContent || pageTitles[active.dataset.target] || "Syrogo"; }
 
 function bindEvents() {
@@ -520,6 +594,8 @@ function bindEvents() {
   document.querySelector("#apply-config-global").addEventListener("click", applyConfigWithConfirm);
   document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => switchPanel(button.dataset.target)));
   document.querySelector("#refresh-overview").addEventListener("click", refreshOverview);
+  document.querySelector("#refresh-sessions").addEventListener("click", refreshSessions);
+  ["#session-client-filter", "#session-status-filter", "#session-host-filter", "#session-cwd-filter"].forEach((selector) => document.querySelector(selector).addEventListener("input", refreshSessions));
   document.querySelector("#refresh-providers").addEventListener("click", refreshProviders);
   document.querySelector("#provider-hours").addEventListener("change", refreshProviders);
   document.querySelector("#provider-search").addEventListener("input", renderFilteredProviders);
@@ -552,6 +628,7 @@ function bindEvents() {
   document.querySelector("#routes-table").addEventListener("click", (event) => { const button = event.target.closest("button[data-route-edit]"); if (button) { fillRouteForm(JSON.parse(button.dataset.routeEdit)); return; } const row = event.target.closest("tr[data-route]"); if (row) fillRouteForm(JSON.parse(row.dataset.route)); });
   document.querySelector("#refresh-usage").addEventListener("click", refreshUsage);
   document.querySelector("#usage-window").addEventListener("change", syncUsageBucketInput);
+  document.querySelector("#refresh-live-requests").addEventListener("click", refreshLiveRequests);
   document.querySelector("#refresh-quota").addEventListener("click", refreshQuota);
   document.querySelector("#refresh-latency").addEventListener("click", refreshLatency);
   document.querySelector("#refresh-logs").addEventListener("click", refreshLogs);

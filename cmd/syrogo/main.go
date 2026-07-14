@@ -36,6 +36,8 @@ func runMain() int {
 			return runLauncher(commandArgs)
 		case "activate":
 			return runActivate(commandArgs)
+		case "session":
+			return runSession(commandArgs)
 		}
 	}
 
@@ -65,7 +67,7 @@ func runMain() int {
 
 func splitCommandArgs(args []string) (string, []string, bool) {
 	for index, arg := range args {
-		if arg != "run" && arg != "activate" {
+		if arg != "run" && arg != "activate" && arg != "session" {
 			continue
 		}
 

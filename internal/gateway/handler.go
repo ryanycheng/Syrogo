@@ -18,6 +18,7 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/router"
 	"github.com/ryanycheng/Syrogo/internal/runtime"
+	"github.com/ryanycheng/Syrogo/internal/sessions"
 )
 
 type Handler struct {
@@ -26,9 +27,10 @@ type Handler struct {
 	logger         *slog.Logger
 	configReloader ConfigReloader
 
-	accounting config.AccountingConfig
-	admin      config.AdminConfig
-	configPath string
+	accounting   config.AccountingConfig
+	admin        config.AdminConfig
+	configPath   string
+	sessionStore *sessions.Store
 }
 
 type ConfigReloader interface {
@@ -124,12 +126,20 @@ func NewWithClientQuotaEventsLatencyAndConfig(r *router.Router, dispatcher *exec
 }
 
 func NewWithClientQuotaEventsLatencyConfigAndAdmin(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, accountingCfg config.AccountingConfig, adminCfg config.AdminConfig, logger *slog.Logger) *Handler {
+	return NewWithClientQuotaEventsLatencyConfigAdminAndSessions(r, dispatcher, inbounds, clientQuotaTracker, eventRecorder, latencyStore, configPath, accountingCfg, adminCfg, nil, logger)
+}
+
+func NewWithClientQuotaEventsLatencyConfigAdminAndSessions(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, accountingCfg config.AccountingConfig, adminCfg config.AdminConfig, sessionStore *sessions.Store, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if sessionStore == nil {
+		sessionStore = sessions.NewStore()
+	}
 	h := &Handler{
-		registry: DefaultInboundRegistry(),
-		logger:   logger,
+		registry:     DefaultInboundRegistry(),
+		logger:       logger,
+		sessionStore: sessionStore,
 	}
 	h.ApplyRuntime(RuntimeState{
 		Router:             r,
@@ -177,13 +187,18 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/stats/governance", h.handleGovernanceStats)
 	mux.HandleFunc("/stats/latency/summary", h.handleLatencySummaryStats)
 	mux.HandleFunc("/stats/latency", h.handleLatencyStats)
+	mux.HandleFunc("/session/register", h.handleSessionRegister)
+	mux.HandleFunc("/session/hook-event", h.handleSessionHookEvent)
+	mux.HandleFunc("/session/stopped", h.handleSessionStopped)
 	mux.HandleFunc("/admin/usage", h.withAdminAudit("usage", h.handleAdminUsage))
 	mux.HandleFunc("/admin/quota", h.withAdminAudit("quota", h.handleAdminQuota))
 	mux.HandleFunc("/admin/logs", h.withAdminAudit("logs", h.handleAdminLogs))
 	mux.HandleFunc("/admin/overview", h.withAdminAudit("overview", h.handleAdminOverview))
 	mux.HandleFunc("/admin/latency/summary", h.withAdminAudit("latency_summary", h.handleAdminLatencySummary))
+	mux.HandleFunc("/admin/latency/active", h.withAdminAudit("latency_active", h.handleAdminActiveLatency))
 	mux.HandleFunc("/admin/latency", h.withAdminAudit("latency", h.handleAdminLatency))
 	mux.HandleFunc("/admin/session", h.withAdminAudit("session", h.handleAdminSession))
+	mux.HandleFunc("/admin/sessions", h.withAdminAudit("sessions", h.handleAdminSessions))
 	mux.HandleFunc("/admin/config", h.withAdminAudit("config_read", h.handleAdminConfig))
 	mux.HandleFunc("/admin/config/options", h.withAdminAudit("config_options", h.handleConfigOptions))
 	mux.HandleFunc("/admin/config/providers", h.withAdminAudit("config_providers", h.handleConfigProviders))

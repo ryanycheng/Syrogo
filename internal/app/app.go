@@ -15,6 +15,7 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/router"
 	"github.com/ryanycheng/Syrogo/internal/server"
+	"github.com/ryanycheng/Syrogo/internal/sessions"
 )
 
 type Options struct {
@@ -58,7 +59,8 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	listeners, bindings := buildListeners(runtime, cfg, opts.ConfigPath, slog.Default())
+	sessionStore := sessions.NewStore()
+	listeners, bindings := buildListeners(runtime, cfg, opts.ConfigPath, sessionStore, slog.Default())
 	app := &App{
 		Server:             server.NewListeners(listeners),
 		accountingStore:    store,
@@ -127,13 +129,13 @@ func buildRuntime(cfg config.Config, store accounting.Store) (appRuntime, error)
 	}, nil
 }
 
-func buildListeners(runtime appRuntime, cfg config.Config, configPath string, logger *slog.Logger) ([]server.Listener, []listenerBinding) {
+func buildListeners(runtime appRuntime, cfg config.Config, configPath string, sessionStore *sessions.Store, logger *slog.Logger) ([]server.Listener, []listenerBinding) {
 	listeners := normalizedListeners(cfg)
 	serverListeners := make([]server.Listener, 0, len(listeners))
 	bindings := make([]listenerBinding, 0, len(listeners))
 	for _, listener := range listeners {
 		mux := http.NewServeMux()
-		handler := gateway.NewWithClientQuotaEventsLatencyConfigAndAdmin(runtime.router, runtime.dispatcher, cfg.ListenerInbounds(listener), runtime.clientQuotaTracker, runtime.eventRecorder, runtime.latencyStore, configPath, cfg.Accounting, cfg.Admin, logger)
+		handler := gateway.NewWithClientQuotaEventsLatencyConfigAdminAndSessions(runtime.router, runtime.dispatcher, cfg.ListenerInbounds(listener), runtime.clientQuotaTracker, runtime.eventRecorder, runtime.latencyStore, configPath, cfg.Accounting, cfg.Admin, sessionStore, logger)
 		handler.Register(mux)
 		serverListeners = append(serverListeners, server.Listener{
 			Addr:    listener.Listen,

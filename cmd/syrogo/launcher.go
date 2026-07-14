@@ -5,12 +5,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
 )
@@ -36,6 +38,7 @@ type launchPlan struct {
 	Command string
 	Args    []string
 	Env     map[string]string
+	Client  launcherClient
 }
 
 func runLauncher(args []string) int {
@@ -212,6 +215,9 @@ func launchAgent(opts launcherOptions) error {
 	if opts.PrintEnv {
 		return printLaunchPlan(opts.Stdout, plan)
 	}
+	if plan.Command == "claude" {
+		return launchClaudeAgent(opts, plan)
+	}
 	cmd := exec.Command(plan.Command, plan.Args...)
 	cmd.Env = mergeEnv(os.Environ(), plan.Env)
 	cmd.Stdin = opts.Stdin
@@ -220,12 +226,78 @@ func launchAgent(opts launcherOptions) error {
 	return cmd.Run()
 }
 
+func launchClaudeAgent(opts launcherOptions, plan launchPlan) error {
+	sessionID := newSessionID()
+	commandPath, err := os.Executable()
+	if err != nil {
+		commandPath = "syrogo"
+	}
+	configDir, err := prepareClaudeConfigWithHooks(commandPath)
+	if err != nil {
+		return fmt.Errorf("prepare claude hooks: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(configDir) }()
+
+	env := map[string]string{}
+	maps.Copy(env, plan.Env)
+	env["CLAUDE_CONFIG_DIR"] = configDir
+	env["SYROGO_SESSION_ID"] = sessionID
+	env["SYROGO_BASE_URL"] = opts.BaseURL
+	env["SYROGO_SESSION_AUTH_TOKEN"] = plan.Client.Token
+
+	cmd := exec.Command(plan.Command, plan.Args...)
+	cmd.Env = mergeEnv(os.Environ(), env)
+	cmd.Stdin = opts.Stdin
+	cmd.Stdout = opts.Stdout
+	cmd.Stderr = opts.Stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	if err := registerClaudeSession(opts, plan, sessionID, cmd.Process.Pid); err != nil {
+		_, _ = fmt.Fprintf(opts.Stderr, "syrogo session register: %v\n", err)
+	}
+
+	waitErr := cmd.Wait()
+	exitCode := 0
+	if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+	if err := postSessionJSON(opts.BaseURL, "/session/stopped", plan.Client.Token, map[string]any{"session_id": sessionID, "exit_code": exitCode}); err != nil {
+		_, _ = fmt.Fprintf(opts.Stderr, "syrogo session stopped: %v\n", err)
+	}
+	return waitErr
+}
+
+func registerClaudeSession(opts launcherOptions, plan launchPlan, sessionID string, pid int) error {
+	host, _ := os.Hostname()
+	cwd, _ := os.Getwd()
+	request := map[string]any{
+		"session_id":   sessionID,
+		"client_name":  plan.Client.ClientName,
+		"inbound_name": plan.Client.InboundName,
+		"host":         host,
+		"pid":          pid,
+		"cwd":          cwd,
+		"git_branch":   collectGitBranch(),
+		"command":      append([]string{plan.Command}, plan.Args...),
+		"tmux":         collectTmuxInfo(),
+		"started_at":   time.Now(),
+	}
+	return postSessionJSON(opts.BaseURL, "/session/register", plan.Client.Token, request)
+}
+
+func newSessionID() string {
+	return fmt.Sprintf("cc-%d-%d", time.Now().UnixNano(), os.Getpid())
+}
+
 func buildLaunchPlan(opts launcherOptions) (launchPlan, error) {
 	if len(opts.Args) == 0 {
 		return launchPlan{}, errors.New("agent command is required")
 	}
 	agent := opts.Args[0]
 	token := opts.Token
+	client := launcherClient{Token: token}
 	if token == "" {
 		cfg, err := config.Load(opts.ConfigPath)
 		if err != nil {
@@ -235,6 +307,7 @@ func buildLaunchPlan(opts launcherOptions) (launchPlan, error) {
 		if err != nil {
 			return launchPlan{}, err
 		}
+		client = selected
 		token = selected.Token
 	}
 	if token == "" {
@@ -252,11 +325,13 @@ func buildLaunchPlan(opts launcherOptions) (launchPlan, error) {
 	default:
 		return launchPlan{}, fmt.Errorf("unsupported agent %q", agent)
 	}
-	return launchPlan{Command: agent, Args: append([]string(nil), opts.Args[1:]...), Env: env}, nil
+	return launchPlan{Command: agent, Args: append([]string(nil), opts.Args[1:]...), Env: env, Client: client}, nil
 }
 
 type launcherClient struct {
-	Token string
+	InboundName string
+	ClientName  string
+	Token       string
 }
 
 func selectLauncherClient(cfg config.Config, inboundName string, clientName string, agent string) (launcherClient, error) {
@@ -267,7 +342,7 @@ func selectLauncherClient(cfg config.Config, inboundName string, clientName stri
 	case "codex":
 		preferredProtocol = "openai_responses"
 	}
-	var matches []config.ClientSpec
+	var matches []launcherClient
 	for _, inbound := range cfg.Inbounds {
 		if inboundName != "" && inbound.Name != inboundName {
 			continue
@@ -279,7 +354,7 @@ func selectLauncherClient(cfg config.Config, inboundName string, clientName stri
 			if clientName != "" && client.Name != clientName {
 				continue
 			}
-			matches = append(matches, client)
+			matches = append(matches, launcherClient{InboundName: inbound.Name, ClientName: client.Name, Token: client.Token})
 		}
 	}
 	if len(matches) == 0 {
@@ -288,7 +363,7 @@ func selectLauncherClient(cfg config.Config, inboundName string, clientName stri
 	if len(matches) > 1 {
 		return launcherClient{}, fmt.Errorf("multiple clients matched for %s; pass --client or --inbound", agent)
 	}
-	return launcherClient{Token: matches[0].Token}, nil
+	return matches[0], nil
 }
 
 func printLaunchPlan(w io.Writer, plan launchPlan) error {
