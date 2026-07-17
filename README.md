@@ -182,6 +182,16 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 
 Without `--version` or `--archive`, the installer resolves the latest GitHub release automatically. It uses `/opt/syrogo/config/config.yaml` as the default config path, creates `/usr/local/bin/syrogo` so `syrogo run ...` is available from normal shells, and keeps the installed config unless you pass `--force-config`.
 
+If GitHub release downloads are slow or unreliable, pass a proxy to the installer itself. Wrapping only the first `curl` does not affect the release archive download that runs inside `sudo bash`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
+  | sudo bash -s -- --proxy http://127.0.0.1:7890
+
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
+  | sudo SYROGO_INSTALL_PROXY=http://127.0.0.1:7890 bash -s --
+```
+
 For complete deployment examples, see [`docs/deploy.md`](./docs/deploy.md).
 
 For current project risks and suggested next steps, see [`docs/risk.md`](./docs/risk.md).

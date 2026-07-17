@@ -21,6 +21,12 @@ FORCE_CONFIG=0
 CONFIG_INITIALIZED=0
 CONFIG_UPDATED=0
 HEALTH_URL="http://127.0.0.1:23234/healthz"
+DOWNLOAD_PROXY="${SYROGO_INSTALL_PROXY:-}"
+CURL_RETRY="${SYROGO_INSTALL_RETRY:-5}"
+CURL_CONNECT_TIMEOUT="${SYROGO_INSTALL_CONNECT_TIMEOUT:-10}"
+CURL_MAX_TIME="${SYROGO_INSTALL_MAX_TIME:-600}"
+CURL_LOW_SPEED_LIMIT="${SYROGO_INSTALL_LOW_SPEED_LIMIT:-1024}"
+CURL_LOW_SPEED_TIME="${SYROGO_INSTALL_LOW_SPEED_TIME:-60}"
 
 usage() {
   cat <<'EOF'
@@ -43,13 +49,15 @@ Options:
   --user <name>          Service user (default: syrogo)
   --install-root <path>  Install root (default: /opt/syrogo)
   --symlink <path>       Command symlink path (default: /usr/local/bin/syrogo)
+  --proxy <url>          Proxy for installer downloads, e.g. http://127.0.0.1:7890
   --health-url <url>     Health check URL (default: http://127.0.0.1:23234/healthz)
   --skip-healthcheck     Skip final health check
   -h, --help             Show this help
 
 Notes:
   - Local and remote install use the same script entrypoint.
-  - Without --version or --archive, the installer uses the latest GitHub release with a short timeout.
+  - Without --version or --archive, the installer uses the latest GitHub release.
+  - Downloads honor --proxy or SYROGO_INSTALL_PROXY; curl retry and timeout knobs use SYROGO_INSTALL_* env vars.
   - On first install, if /opt/syrogo/config/config.yaml is missing, the installer downloads config.example.yaml there.
   - With --version, the example config is fetched from the matching release tag.
   - The installer creates a symlink at /usr/local/bin/syrogo so the command is available from PATH.
@@ -66,6 +74,44 @@ log() {
 fail() {
   printf '[install] %s\n' "$*" >&2
   exit 1
+}
+
+curl_common_args() {
+  CURL_ARGS=(
+    -fL
+    --retry "$CURL_RETRY"
+    --retry-all-errors
+    --connect-timeout "$CURL_CONNECT_TIMEOUT"
+    --max-time "$CURL_MAX_TIME"
+    --speed-limit "$CURL_LOW_SPEED_LIMIT"
+    --speed-time "$CURL_LOW_SPEED_TIME"
+  )
+  if [ -n "$DOWNLOAD_PROXY" ]; then
+    CURL_ARGS+=(--proxy "$DOWNLOAD_PROXY")
+  fi
+}
+
+curl_text() {
+  local url
+  url="$1"
+  command -v curl >/dev/null 2>&1 || fail "curl is required"
+  if [ -n "$DOWNLOAD_PROXY" ]; then
+    log "using download proxy: $DOWNLOAD_PROXY"
+  fi
+  curl_common_args
+  curl -fsSL "${CURL_ARGS[@]}" "$url"
+}
+
+curl_download() {
+  local url output
+  url="$1"
+  output="$2"
+  command -v curl >/dev/null 2>&1 || fail "curl is required"
+  if [ -n "$DOWNLOAD_PROXY" ]; then
+    log "using download proxy: $DOWNLOAD_PROXY"
+  fi
+  curl_common_args
+  curl "${CURL_ARGS[@]}" "$url" -o "$output"
 }
 
 cleanup() {
@@ -132,6 +178,11 @@ parse_args() {
         SYMLINK_PATH="$2"
         shift 2
         ;;
+      --proxy)
+        [ "$#" -ge 2 ] || fail "missing value for --proxy"
+        DOWNLOAD_PROXY="$2"
+        shift 2
+        ;;
       --health-url)
         [ "$#" -ge 2 ] || fail "missing value for --health-url"
         HEALTH_URL="$2"
@@ -169,7 +220,7 @@ resolve_latest_version() {
   command -v curl >/dev/null 2>&1 || fail "curl is required to resolve the latest release"
   api_url="https://api.github.com/repos/${REPO}/releases/latest"
   log "resolving latest release from GitHub API"
-  tag="$(curl -fsSL --connect-timeout 5 --max-time 20 "$api_url" | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  tag="$(curl_text "$api_url" | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
   [ -n "$tag" ] || fail "failed to resolve latest release tag, please pass --version explicitly"
   VERSION="$tag"
   log "resolved latest release: $VERSION"
@@ -191,7 +242,7 @@ download_default_config() {
   url="$(config_init_url)"
   log "downloading example config to $DEFAULT_CONFIG_SOURCE"
   log "config source url: $url"
-  curl -fsSL "$url" -o "$DEFAULT_CONFIG_SOURCE"
+  curl_download "$url" "$DEFAULT_CONFIG_SOURCE"
   CONFIG_INITIALIZED=1
 }
 
@@ -234,7 +285,7 @@ download_archive() {
   ARCHIVE="$TMP_DIR/syrogo_${VERSION}_linux_${arch}.tar.gz"
   url="https://github.com/${REPO}/releases/download/${VERSION}/syrogo_${VERSION}_linux_${arch}.tar.gz"
   log "downloading ${url}"
-  curl -fL "$url" -o "$ARCHIVE"
+  curl_download "$url" "$ARCHIVE"
 }
 
 ensure_service_user() {

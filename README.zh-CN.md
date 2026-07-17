@@ -182,6 +182,16 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 
 如果不传 `--version` 或 `--archive`，安装器会自动解析 GitHub 上的 latest release。安装器默认使用 `/opt/syrogo/config/config.yaml` 作为配置路径，并创建 `/usr/local/bin/syrogo`，让普通 shell 可以直接执行 `syrogo run ...`；默认保留已安装配置，只有显式传 `--force-config` 才会覆盖。
 
+如果 GitHub release 下载较慢或不稳定，需要把代理传给安装器本身。只用代理包住第一段 `curl`，不会影响 `sudo bash` 内部下载 release 包的那次请求：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
+  | sudo bash -s -- --proxy http://127.0.0.1:7890
+
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
+  | sudo SYROGO_INSTALL_PROXY=http://127.0.0.1:7890 bash -s --
+```
+
 完整部署示例请见 [`docs/deploy.zh-CN.md`](./docs/deploy.zh-CN.md)。
 
 当前项目风险与建议下一步请见 [`docs/risk.zh-CN.md`](./docs/risk.zh-CN.md)。
