@@ -76,16 +76,22 @@ fail() {
   exit 1
 }
 
+curl_supports_retry_all_errors() {
+  curl --retry-all-errors --version >/dev/null 2>&1
+}
+
 curl_common_args() {
   CURL_ARGS=(
     -fL
     --retry "$CURL_RETRY"
-    --retry-all-errors
     --connect-timeout "$CURL_CONNECT_TIMEOUT"
     --max-time "$CURL_MAX_TIME"
     --speed-limit "$CURL_LOW_SPEED_LIMIT"
     --speed-time "$CURL_LOW_SPEED_TIME"
   )
+  if curl_supports_retry_all_errors; then
+    CURL_ARGS+=(--retry-all-errors)
+  fi
   if [ -n "$DOWNLOAD_PROXY" ]; then
     CURL_ARGS+=(--proxy "$DOWNLOAD_PROXY")
   fi
@@ -112,6 +118,36 @@ curl_download() {
   fi
   curl_common_args
   curl "${CURL_ARGS[@]}" "$url" -o "$output"
+}
+
+curl_download_resume() {
+  local url output attempt max_attempts
+  url="$1"
+  output="$2"
+  max_attempts="$CURL_RETRY"
+  command -v curl >/dev/null 2>&1 || fail "curl is required"
+  if [ -n "$DOWNLOAD_PROXY" ]; then
+    log "using download proxy: $DOWNLOAD_PROXY"
+  fi
+  attempt=1
+  while [ "$attempt" -le "$max_attempts" ]; do
+    CURL_ARGS=(
+      -fL
+      --connect-timeout "$CURL_CONNECT_TIMEOUT"
+      --max-time "$CURL_MAX_TIME"
+      --speed-limit "$CURL_LOW_SPEED_LIMIT"
+      --speed-time "$CURL_LOW_SPEED_TIME"
+    )
+    if [ -n "$DOWNLOAD_PROXY" ]; then
+      CURL_ARGS+=(--proxy "$DOWNLOAD_PROXY")
+    fi
+    if curl "${CURL_ARGS[@]}" -C - "$url" -o "$output"; then
+      return 0
+    fi
+    log "download attempt $attempt failed; retrying with resume"
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
 cleanup() {
@@ -285,7 +321,7 @@ download_archive() {
   ARCHIVE="$TMP_DIR/syrogo_${VERSION}_linux_${arch}.tar.gz"
   url="https://github.com/${REPO}/releases/download/${VERSION}/syrogo_${VERSION}_linux_${arch}.tar.gz"
   log "downloading ${url}"
-  curl_download "$url" "$ARCHIVE"
+  curl_download_resume "$url" "$ARCHIVE"
 }
 
 ensure_service_user() {

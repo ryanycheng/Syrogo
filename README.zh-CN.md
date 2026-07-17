@@ -182,7 +182,7 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 
 如果不传 `--version` 或 `--archive`，安装器会自动解析 GitHub 上的 latest release。安装器默认使用 `/opt/syrogo/config/config.yaml` 作为配置路径，并创建 `/usr/local/bin/syrogo`，让普通 shell 可以直接执行 `syrogo run ...`；默认保留已安装配置，只有显式传 `--force-config` 才会覆盖。
 
-如果 GitHub release 下载较慢或不稳定，需要把代理传给安装器本身。只用代理包住第一段 `curl`，不会影响 `sudo bash` 内部下载 release 包的那次请求：
+如果 GitHub release 下载较慢或不稳定，需要把代理传给安装器本身。只用代理包住第一段 `curl`，不会影响 `sudo bash` 内部下载 release 包的那次请求。网络特别慢时，可以调整 `SYROGO_INSTALL_MAX_TIME`、`SYROGO_INSTALL_RETRY`、`SYROGO_INSTALL_LOW_SPEED_LIMIT` 和 `SYROGO_INSTALL_LOW_SPEED_TIME`：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
@@ -190,6 +190,9 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master
 
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
   | sudo SYROGO_INSTALL_PROXY=http://127.0.0.1:7890 bash -s --
+
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
+  | sudo SYROGO_INSTALL_PROXY=http://127.0.0.1:7890 SYROGO_INSTALL_MAX_TIME=1800 SYROGO_INSTALL_RETRY=10 bash -s --
 ```
 
 完整部署示例请见 [`docs/deploy.zh-CN.md`](./docs/deploy.zh-CN.md)。
