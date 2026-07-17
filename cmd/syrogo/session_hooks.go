@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
 var claudeHookEvents = []string{
@@ -29,52 +28,32 @@ type claudeHookMatcher struct {
 	Hooks   []claudeHookCommand `json:"hooks"`
 }
 
-func prepareClaudeConfigWithHooks(commandPath string) (string, error) {
-	settings := readClaudeSettings()
+func prepareClaudeSettingsWithHooks(commandPath string) (string, error) {
 	hooks := map[string]any{}
-	if existing, ok := settings["hooks"].(map[string]any); ok {
-		hooks = existing
-	}
 	for _, event := range claudeHookEvents {
 		hooks[event] = appendClaudeHook(hooks[event], commandPath, event)
 	}
-	settings["hooks"] = hooks
+	settings := map[string]any{"hooks": hooks}
 
-	dir, err := os.MkdirTemp("", "syrogo-claude-config-*")
-	if err != nil {
-		return "", err
-	}
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
-		_ = os.RemoveAll(dir)
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "settings.json"), data, 0o600); err != nil {
-		_ = os.RemoveAll(dir)
-		return "", err
-	}
-	return dir, nil
-}
-
-func readClaudeSettings() map[string]any {
-	settingsPath := ""
-	if configDir := os.Getenv("CLAUDE_CONFIG_DIR"); configDir != "" {
-		settingsPath = filepath.Join(configDir, "settings.json")
-	} else if home, err := os.UserHomeDir(); err == nil && home != "" {
-		settingsPath = filepath.Join(home, ".claude", "settings.json")
-	}
-	settings := map[string]any{}
-	if settingsPath == "" {
-		return settings
-	}
-	data, err := os.ReadFile(settingsPath)
+	file, err := os.CreateTemp("", "syrogo-claude-settings-*.json")
 	if err != nil {
-		return settings
+		return "", err
 	}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return map[string]any{}
+	settingsPath := file.Name()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		_ = os.Remove(settingsPath)
+		return "", err
 	}
-	return settings
+	if err := file.Close(); err != nil {
+		_ = os.Remove(settingsPath)
+		return "", err
+	}
+	return settingsPath, nil
 }
 
 func appendClaudeHook(existing any, commandPath string, event string) []claudeHookMatcher {

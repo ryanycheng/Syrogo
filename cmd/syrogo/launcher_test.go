@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -307,6 +309,78 @@ func TestDefaultLauncherConfigPathFallsBackToLocalConfigForDevelopment(t *testin
 
 	if got := defaultLauncherConfigPath(); got != localPath {
 		t.Fatalf("defaultLauncherConfigPath() = %q, want local config", got)
+	}
+}
+
+func TestLaunchAgentInjectsClaudeHooksWithSettingsOverlay(t *testing.T) {
+	binDir := t.TempDir()
+	capturePath := filepath.Join(t.TempDir(), "capture.txt")
+	settingsSeenPath := filepath.Join(t.TempDir(), "settings-path.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := "#!/bin/sh\n" +
+		"printf 'args=%s\\n' \"$*\" > \"$CAPTURE_PATH\"\n" +
+		"printf 'claude_config_dir=%s\\n' \"$CLAUDE_CONFIG_DIR\" >> \"$CAPTURE_PATH\"\n" +
+		"printf 'session_id=%s\\n' \"$SYROGO_SESSION_ID\" >> \"$CAPTURE_PATH\"\n" +
+		"if [ \"$1\" = \"--settings\" ]; then printf '%s' \"$2\" > \"$SETTINGS_SEEN_PATH\"; fi\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0o755); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	var registerSeen, stoppedSeen bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/session/register":
+			registerSeen = true
+		case "/session/stopped":
+			stoppedSeen = true
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+oldPath)
+	t.Setenv("CLAUDE_CONFIG_DIR", "/persist/claude")
+	t.Setenv("CAPTURE_PATH", capturePath)
+	t.Setenv("SETTINGS_SEEN_PATH", settingsSeenPath)
+
+	err := launchAgent(launcherOptions{
+		BaseURL: server.URL,
+		Token:   "client-token",
+		Args:    []string{"claude", "--model", "claude-sonnet-4-6"},
+		Stdin:   strings.NewReader(""),
+		Stdout:  &bytes.Buffer{},
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("launchAgent() error = %v", err)
+	}
+	if !registerSeen || !stoppedSeen {
+		t.Fatalf("registerSeen=%v stoppedSeen=%v, want both true", registerSeen, stoppedSeen)
+	}
+
+	capture, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(capture) error = %v", err)
+	}
+	content := string(capture)
+	if !strings.Contains(content, "args=--settings ") || !strings.Contains(content, " --model claude-sonnet-4-6") {
+		t.Fatalf("capture = %s, want --settings before user args", content)
+	}
+	if !strings.Contains(content, "claude_config_dir=/persist/claude") {
+		t.Fatalf("capture = %s, want original CLAUDE_CONFIG_DIR preserved", content)
+	}
+
+	settingsPathBytes, err := os.ReadFile(settingsSeenPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(settings path) error = %v", err)
+	}
+	settingsPath := string(settingsPathBytes)
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Fatalf("settings path %q still exists or stat error = %v, want removed", settingsPath, err)
 	}
 }
 func TestMergeEnvOverridesExistingValues(t *testing.T) {

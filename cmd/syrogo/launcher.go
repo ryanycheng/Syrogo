@@ -232,20 +232,20 @@ func launchClaudeAgent(opts launcherOptions, plan launchPlan) error {
 	if err != nil {
 		commandPath = "syrogo"
 	}
-	configDir, err := prepareClaudeConfigWithHooks(commandPath)
+	settingsPath, err := prepareClaudeSettingsWithHooks(commandPath)
 	if err != nil {
 		return fmt.Errorf("prepare claude hooks: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(configDir) }()
+	defer func() { _ = os.Remove(settingsPath) }()
 
 	env := map[string]string{}
 	maps.Copy(env, plan.Env)
-	env["CLAUDE_CONFIG_DIR"] = configDir
 	env["SYROGO_SESSION_ID"] = sessionID
 	env["SYROGO_BASE_URL"] = opts.BaseURL
 	env["SYROGO_SESSION_AUTH_TOKEN"] = plan.Client.Token
 
-	cmd := exec.Command(plan.Command, plan.Args...)
+	args := append([]string{"--settings", settingsPath}, plan.Args...)
+	cmd := exec.Command(plan.Command, args...)
 	cmd.Env = mergeEnv(os.Environ(), env)
 	cmd.Stdin = opts.Stdin
 	cmd.Stdout = opts.Stdout

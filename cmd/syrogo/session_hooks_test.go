@@ -9,10 +9,9 @@ import (
 	"testing"
 )
 
-func TestPrepareClaudeConfigWithHooksPreservesExistingHooks(t *testing.T) {
+func TestPrepareClaudeSettingsWithHooksWritesOverlayOnly(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	dir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("os.MkdirAll() error = %v", err)
@@ -22,13 +21,13 @@ func TestPrepareClaudeConfigWithHooksPreservesExistingHooks(t *testing.T) {
 		t.Fatalf("os.WriteFile() error = %v", err)
 	}
 
-	tmpDir, err := prepareClaudeConfigWithHooks("/usr/local/bin/syrogo")
+	settingsPath, err := prepareClaudeSettingsWithHooks("/usr/local/bin/syrogo")
 	if err != nil {
-		t.Fatalf("prepareClaudeConfigWithHooks() error = %v", err)
+		t.Fatalf("prepareClaudeSettingsWithHooks() error = %v", err)
 	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
+	defer func() { _ = os.Remove(settingsPath) }()
 
-	data, err := os.ReadFile(filepath.Join(tmpDir, "settings.json"))
+	data, err := os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatalf("os.ReadFile() error = %v", err)
 	}
@@ -36,11 +35,11 @@ func TestPrepareClaudeConfigWithHooksPreservesExistingHooks(t *testing.T) {
 	if err := json.Unmarshal(data, &settings); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if settings["theme"] != "light" {
-		t.Fatalf("settings = %#v, want preserved theme", settings)
+	if _, ok := settings["theme"]; ok {
+		t.Fatalf("settings = %#v, want hooks overlay without copied user settings", settings)
 	}
 	content := string(data)
-	if !strings.Contains(content, "existing") || !strings.Contains(content, "session hook-event") || !strings.Contains(content, "Stop") || !strings.Contains(content, "SessionStart") {
+	if strings.Contains(content, "existing") || !strings.Contains(content, "session hook-event") || !strings.Contains(content, "Stop") || !strings.Contains(content, "SessionStart") {
 		t.Fatalf("settings content = %s", content)
 	}
 }
