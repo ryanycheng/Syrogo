@@ -68,13 +68,14 @@ func TestBuildStartupBannerWithMultipleListenersAndFlags(t *testing.T) {
 		Tagline:       "AI Gateway / Semantic Router",
 		Listens:       []string{":8080", ":9090"},
 		DevLogEnabled: true,
+		DevLogPath:    "/var/log/syrogo/custom.log",
 		TraceMode:     "full",
 	})
 
 	checks := []string{
 		"version: 1.2.3",
 		"listen: :8080, :9090",
-		"dev-log: on (tmp/dev.log)",
+		"dev-log: on (/var/log/syrogo/custom.log)",
 		"trace: full",
 	}
 	for _, want := range checks {

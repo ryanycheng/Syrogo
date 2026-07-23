@@ -13,11 +13,12 @@ import (
 )
 
 type Dispatcher struct {
-	store         accounting.Store
-	quotaTracker  *quota.Tracker
-	healthTracker *provider.HealthTracker
-	eventRecorder *quota.EventRecorder
-	latencyStore  *latency.Store
+	store           accounting.Store
+	quotaTracker    *quota.Tracker
+	healthTracker   *provider.HealthTracker
+	eventRecorder   *quota.EventRecorder
+	latencyStore    *latency.Store
+	priceCalculator accounting.PriceCalculator
 }
 
 func NewDispatcher() *Dispatcher {
@@ -41,10 +42,14 @@ func NewDispatcherWithStoreQuotaHealthAndEvents(store accounting.Store, quotaTra
 }
 
 func NewDispatcherWithStoreQuotaHealthEventsAndLatency(store accounting.Store, quotaTracker *quota.Tracker, healthTracker *provider.HealthTracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store) *Dispatcher {
+	return NewDispatcherWithStoreQuotaHealthEventsLatencyAndPricing(store, quotaTracker, healthTracker, eventRecorder, latencyStore, accounting.PriceCalculator{})
+}
+
+func NewDispatcherWithStoreQuotaHealthEventsLatencyAndPricing(store accounting.Store, quotaTracker *quota.Tracker, healthTracker *provider.HealthTracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, priceCalculator accounting.PriceCalculator) *Dispatcher {
 	if store == nil {
 		store = accounting.NewMemoryStore()
 	}
-	return &Dispatcher{store: store, quotaTracker: quotaTracker, healthTracker: healthTracker, eventRecorder: eventRecorder, latencyStore: latencyStore}
+	return &Dispatcher{store: store, quotaTracker: quotaTracker, healthTracker: healthTracker, eventRecorder: eventRecorder, latencyStore: latencyStore, priceCalculator: priceCalculator}
 }
 
 func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan runtime.ExecutionPlan) (runtime.Response, error) {
@@ -89,7 +94,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan run
 		if err == nil {
 			latency.FromContext(ctx).SetFallbackCount(i)
 			d.recordSuccess(step.OutboundName, decision.Probe, healthDecision.Probe)
-			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, resp.Model, resp.Usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), i))
+			d.record(d.finalizeUsageRecord(ctx, plan, step, stepReq.Model, resp.Model, resp.Usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), i))
 			return resp, nil
 		}
 
@@ -97,14 +102,14 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan run
 		errorKind := provider.NormalizeError(err)
 		d.recordProviderError(step.OutboundName, errorKind)
 		if !provider.FallbackAllowed(string(step.OnError), errorKind, i == len(plan.Steps)-1) {
-			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), i))
+			d.record(d.finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), i))
 			return runtime.Response{}, err
 		}
 	}
 
 	if len(plan.Steps) > 0 {
 		last := plan.Steps[len(plan.Steps)-1]
-		d.record(finalizeUsageRecord(ctx, plan, last, req.Model, req.Model, nil, runtime.UsageStatusError, string(provider.NormalizeError(lastErr)), startedAt, time.Now(), len(plan.Steps)-1))
+		d.record(d.finalizeUsageRecord(ctx, plan, last, req.Model, req.Model, nil, runtime.UsageStatusError, string(provider.NormalizeError(lastErr)), startedAt, time.Now(), len(plan.Steps)-1))
 	}
 	return runtime.Response{}, lastErr
 }
@@ -163,14 +168,14 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 		errorKind := provider.NormalizeError(err)
 		d.recordProviderError(step.OutboundName, errorKind)
 		if !provider.FallbackAllowed(string(step.OnError), errorKind, i == len(plan.Steps)-1) {
-			d.record(finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), i))
+			d.record(d.finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), i))
 			return nil, err
 		}
 	}
 
 	if len(plan.Steps) > 0 {
 		last := plan.Steps[len(plan.Steps)-1]
-		d.record(finalizeUsageRecord(ctx, plan, last, req.Model, req.Model, nil, runtime.UsageStatusError, string(provider.NormalizeError(lastErr)), startedAt, time.Now(), len(plan.Steps)-1))
+		d.record(d.finalizeUsageRecord(ctx, plan, last, req.Model, req.Model, nil, runtime.UsageStatusError, string(provider.NormalizeError(lastErr)), startedAt, time.Now(), len(plan.Steps)-1))
 	}
 	return nil, lastErr
 }
@@ -251,7 +256,7 @@ func (d *Dispatcher) wrapStream(ctx context.Context, plan runtime.ExecutionPlan,
 					if !recorded {
 						recorder.SetStreamState(latency.StreamStateCompleted)
 						d.recordSuccess(step.OutboundName, quotaProbe, healthProbe)
-						d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), fallbackCount))
+						d.record(d.finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), fallbackCount))
 					}
 					return
 				}
@@ -270,7 +275,7 @@ func (d *Dispatcher) wrapStream(ctx context.Context, plan runtime.ExecutionPlan,
 					recorder.SetStreamState(latency.StreamStateError)
 					errorKind := provider.NormalizeError(event.Err)
 					d.recordProviderError(step.OutboundName, errorKind)
-					d.record(finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), fallbackCount))
+					d.record(d.finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), fallbackCount))
 					recorded = true
 				}
 				select {
@@ -353,7 +358,7 @@ func (d *Dispatcher) record(record runtime.UsageRecord) {
 	d.store.Record(record)
 }
 
-func finalizeUsageRecord(ctx context.Context, plan runtime.ExecutionPlan, step runtime.ExecutionStep, requestedModel, executedModel string, usage *runtime.Usage, status runtime.UsageStatus, errorKind string, startedAt, finishedAt time.Time, fallbackCount int) runtime.UsageRecord {
+func (d *Dispatcher) finalizeUsageRecord(ctx context.Context, plan runtime.ExecutionPlan, step runtime.ExecutionStep, requestedModel, executedModel string, usage *runtime.Usage, status runtime.UsageStatus, errorKind string, startedAt, finishedAt time.Time, fallbackCount int) runtime.UsageRecord {
 	breakdown := runtime.UsageBreakdown{RequestCount: 1}
 	usageSource := runtime.UsageSource("")
 	if usage != nil {
@@ -363,6 +368,8 @@ func finalizeUsageRecord(ctx context.Context, plan runtime.ExecutionPlan, step r
 		}
 		breakdown.InputTokens = usage.InputTokens
 		breakdown.OutputTokens = usage.OutputTokens
+		breakdown.CachedInputReadTokens = usage.CachedInputReadTokens
+		breakdown.CachedInputWriteTokens = usage.CachedInputWriteTokens
 		breakdown.TotalTokens = totalTokens
 		usageSource = usage.Source
 	}
@@ -370,6 +377,10 @@ func finalizeUsageRecord(ctx context.Context, plan runtime.ExecutionPlan, step r
 		executedModel = requestedModel
 	}
 	requestID, _ := ctx.Value(runtime.ContextKeyRequestID).(string)
+	sessionID, _ := ctx.Value(runtime.ContextKeySessionID).(string)
+	agent, _ := ctx.Value(runtime.ContextKeyAgent).(string)
+	providerName := providerName(step)
+	costUSD := d.priceCalculator.CostUSD(providerName, executedModel, breakdown)
 	return runtime.UsageRecord{
 		RequestID:        requestID,
 		ClientName:       plan.ClientName,
@@ -380,12 +391,15 @@ func finalizeUsageRecord(ctx context.Context, plan runtime.ExecutionPlan, step r
 		Strategy:         plan.Strategy,
 		OutboundName:     step.OutboundName,
 		OutboundProtocol: step.OutboundProtocol,
-		ProviderName:     providerName(step),
+		ProviderName:     providerName,
 		RequestedModel:   requestedModel,
 		ExecutedModel:    executedModel,
 		UsageSource:      usageSource,
 		Status:           status,
 		ErrorKind:        errorKind,
+		SessionID:        sessionID,
+		Agent:            agent,
+		CostUSD:          costUSD,
 		Breakdown:        breakdown,
 		StartedAt:        startedAt.UTC().Format(time.RFC3339Nano),
 		FinishedAt:       finishedAt.UTC().Format(time.RFC3339Nano),

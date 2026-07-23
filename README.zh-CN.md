@@ -505,9 +505,17 @@ admin:
     enabled: true
     path: "./tmp/dev.log"
     max_bytes: 65536
+    rotation:
+      max_size_mb: 100
+      max_files: 20
+      max_age_days: 14
+      max_total_size_mb: 1024
+      compress: true
 ```
 
-UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/overview`、`/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`、`/admin/config/apply`、`/admin/config/history`、`/admin/config/history/diff`、`/admin/config/rollback`、`/admin/debug/traces`、`/admin/debug/route-dry-run`、`/admin/debug/providers`。Overview 会展示请求、错误、fallback、latency、quota、provider health、最近治理事件，以及 config path、logs 可用性等 Admin 自检摘要卡片。Usage 支持 `group_by`、`window`、`bucket` 筛选。Debug 会展示最近 trace 的 matched rule、routing strategy、planned steps、fallback count、spans，并提供无副作用 route dry-run 表单，以及 provider health/quota/event/latency 聚合信息。日志只会读取配置指定的本地日志文件，支持行数/字节限制，会展示 path、是否截断、读取上限等元信息，并对常见 token、key、authorization、secret 字段做脱敏。当前配置读取会返回脱敏展示副本；配置更新前会展示脱敏 diff preview，并要求浏览器二次确认后才写入；Apply 会热加载安全的运行时变更；History/Rollback 会保留并恢复最近的本地配置版本，并支持查看脱敏 diff。Admin API 操作会写入 `admin_audit` 日志，但不会记录 Authorization header、token、请求 body、配置内容或日志内容。它是内置单页控制台，不需要额外前端构建步骤。
+日志会在下一次写入将超过 `max_size_mb` 时轮转，并在本地自然日首次写入时按日轮转。历史文件使用 gzip 压缩，并按保留天数、文件数量和总磁盘占用清理；当前日志文件永不删除。`/admin/logs` 会自动查询当前文件和仍保留的归档。完整落在有界近期缓存内的查询（最近 5 分钟、最多 8 MiB）优先从内存返回；cursor、历史、覆盖不完整或需要分页的查询会自动回退文件，避免遗漏结果。状态筛选支持精确状态码以及 `4xx`、`5xx` 状态族。成功的 `/admin/logs` 自动轮询不会生成 `admin_audit` 日志。
+
+UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/overview`、`/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`、`/admin/config/apply`、`/admin/config/history`、`/admin/config/history/diff`、`/admin/config/rollback`、`/admin/debug/traces`、`/admin/debug/route-dry-run`、`/admin/debug/providers`。Overview 会展示请求、错误、fallback、latency、quota、provider health、最近治理事件，以及 config path、logs 可用性等 Admin 自检摘要卡片。Usage 默认展示最近 7 个 UTC 自然日，并支持 UTC 日期范围和 `group_by` 筛选。Debug 会展示最近 trace 的 matched rule、routing strategy、planned steps、fallback count、spans，并提供无副作用 route dry-run 表单，以及 provider health/quota/event/latency 聚合信息。日志只会读取配置指定的本地日志文件，支持行数/字节限制，会展示 path、是否截断、读取上限等元信息，并对常见 token、key、authorization、secret 字段做脱敏。当前配置读取会返回脱敏展示副本；配置更新前会展示脱敏 diff preview，并要求浏览器二次确认后才写入；Apply 会热加载安全的运行时变更；History/Rollback 会保留并恢复最近的本地配置版本，并支持查看脱敏 diff。Admin API 操作会写入 `admin_audit` 日志，但不会记录 Authorization header、token、请求 body、配置内容或日志内容。它是内置单页控制台，不需要额外前端构建步骤。
 
 ### 15. 校验配置变更
 
@@ -562,6 +570,9 @@ curl http://127.0.0.1:23234/stats/usage?group_by=key \
 curl http://127.0.0.1:23234/stats/usage?group_by=provider \
   -H 'Authorization: Bearer <accounting-admin-token>'
 
+curl 'http://127.0.0.1:23234/stats/usage?group_by=key&start_date=2026-04-21&end_date=2026-04-28' \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+
 curl 'http://127.0.0.1:23234/stats/usage?group_by=key&window=day&bucket=2026-04-27' \
   -H 'Authorization: Bearer <accounting-admin-token>'
 
@@ -581,6 +592,9 @@ curl http://127.0.0.1:23234/stats/usage?group_by=error_kind \
 - `source`
 - `outbound`
 - `error_kind`
+- `date`
+- `agent`
+- `session`
 
 当前支持的 `window`：
 
@@ -591,6 +605,10 @@ curl http://127.0.0.1:23234/stats/usage?group_by=error_kind \
 
 说明：
 
+- 未提供任何时间参数时，API 默认查询最近 7 个 UTC 自然日
+- `start_date` 包含当天，`end_date` 不包含当天；两者必须同时提供，并使用严格的 UTC `YYYY-MM-DD` 格式
+- `start_date`/`end_date` 不能与旧版 `window`/`bucket` 参数混用
+- 显式传入 `window=total` 时仍查询全部历史
 - `window=total` 时可省略 `bucket`
 - `window=day` 时，`bucket` 形如 `2026-04-27`
 - `window=week` 时，`bucket` 形如 `2026-W18`
@@ -609,9 +627,12 @@ curl http://127.0.0.1:23234/stats/usage?group_by=error_kind \
       "fallback_count": 0,
       "input_tokens": 1234,
       "output_tokens": 567,
-      "cached_input_read_tokens": 0,
-      "cached_input_write_tokens": 0,
-      "total_tokens": 1801,
+      "cached_input_read_tokens": 42,
+      "cached_input_write_tokens": 8,
+      "cache_read_tokens": 42,
+      "cache_create_tokens": 8,
+      "total_tokens": 1851,
+      "cost_usd": 0.0012,
       "provider_usage_count": 12,
       "estimated_usage_count": 0,
       "last_seen_at": "2026-04-25T09:00:00Z"
@@ -624,6 +645,9 @@ curl http://127.0.0.1:23234/stats/usage?group_by=error_kind \
 
 - `clients[].name` 仍是稳定统计身份
 - `value` 的含义由 `group_by` 决定
+- `group_by=session` 会优先使用 `syrogo run claude` 注册的活跃 session，也支持显式传入 `X-Syrogo-Session-ID` / `X-Syrogo-Agent` header
+- `cost_usd` 会在执行模型命中 Syrogo 内嵌的 LiteLLM 价格快照时自动计算；`accounting.pricing` 中的条目会覆盖内嵌默认价格
+- 内嵌快照会在 `internal/accounting/pricing_default.json` 中记录 LiteLLM revision；需要更新时，先有意修改 `scripts/update_pricing.py` 中锁定的 revision，再运行 `make update-pricing`
 - `group_by=error_kind` 会把成功请求归到 `none`，失败请求归到 `quota_exceeded`、`timeout`、`upstream_server_error`、`auth_failed`、`capability_unsupported` 等分类
 - fallback 只会在 quota、timeout、临时错误或上游 5xx 等可恢复错误上继续切换；鉴权、capability 与请求结构错误会直接暴露
 - 查询始终读取内存聚合视图，不会在请求时扫盘
@@ -637,6 +661,13 @@ accounting:
   backend: "local_file"
   expose_http: true
   admin_token: "${SYROGO_ACCOUNTING_ADMIN_TOKEN}"
+  pricing:
+    - provider: "openai"
+      model: "gpt-4o-mini"
+      input_per_million_usd: 0.15
+      output_per_million_usd: 0.60
+      cache_create_per_million_usd: 0
+      cache_read_per_million_usd: 0.075
   local_file:
     dir: "./tmp/accounting"
     rotate_max_size_mb: 64

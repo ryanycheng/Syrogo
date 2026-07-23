@@ -55,9 +55,12 @@ type openAIChatResponseEnvelope struct {
 		Message      openAIChatMessage `json:"message"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		TotalTokens         int `json:"total_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details,omitempty"`
 	} `json:"usage,omitempty"`
 }
 
@@ -201,10 +204,15 @@ func usageFromOpenAIChatEnvelope(resp openAIChatResponseEnvelope) *runtime.Usage
 	if resp.Usage == nil {
 		return nil
 	}
+	cachedTokens := 0
+	if resp.Usage.PromptTokensDetails != nil {
+		cachedTokens = resp.Usage.PromptTokensDetails.CachedTokens
+	}
 	return &runtime.Usage{
-		InputTokens:  resp.Usage.PromptTokens,
-		OutputTokens: resp.Usage.CompletionTokens,
-		TotalTokens:  resp.Usage.TotalTokens,
-		Source:       runtime.UsageSourceProvider,
+		InputTokens:           resp.Usage.PromptTokens,
+		OutputTokens:          resp.Usage.CompletionTokens,
+		CachedInputReadTokens: cachedTokens,
+		TotalTokens:           resp.Usage.TotalTokens,
+		Source:                runtime.UsageSourceProvider,
 	}
 }

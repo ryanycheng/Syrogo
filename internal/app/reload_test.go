@@ -66,6 +66,49 @@ func TestReloadManagerRequiresRestartForListenerChange(t *testing.T) {
 	}
 }
 
+func TestRestartRequiredReasonForLoggingConfiguration(t *testing.T) {
+	falseValue := false
+	trueValue := true
+	base := baseConfig()
+	base.Admin.Logs = config.AdminLogsConfig{
+		Enabled:  true,
+		Path:     "tmp/dev.log",
+		MaxBytes: 65536,
+		Rotation: config.AdminLogsRotationConfig{
+			MaxSizeMB:      100,
+			MaxFiles:       20,
+			MaxAgeDays:     14,
+			MaxTotalSizeMB: 1024,
+		},
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{"path", func(c *config.Config) { c.Admin.Logs.Path = "logs/other.log" }, "logging configuration changed"},
+		{"max size", func(c *config.Config) { c.Admin.Logs.Rotation.MaxSizeMB++ }, "logging configuration changed"},
+		{"max files", func(c *config.Config) { c.Admin.Logs.Rotation.MaxFiles++ }, "logging configuration changed"},
+		{"max age", func(c *config.Config) { c.Admin.Logs.Rotation.MaxAgeDays++ }, "logging configuration changed"},
+		{"max total size", func(c *config.Config) { c.Admin.Logs.Rotation.MaxTotalSizeMB++ }, "logging configuration changed"},
+		{"effective compression", func(c *config.Config) { c.Admin.Logs.Rotation.Compress = &falseValue }, "logging configuration changed"},
+		{"nil and true compression equivalent", func(c *config.Config) { c.Admin.Logs.Rotation.Compress = &trueValue }, ""},
+		{"enabled", func(c *config.Config) { c.Admin.Logs.Enabled = false }, ""},
+		{"max bytes", func(c *config.Config) { c.Admin.Logs.MaxBytes++ }, ""},
+		{"admin token", func(c *config.Config) { c.Admin.Token = "changed" }, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			next := base
+			tc.mutate(&next)
+			if got := restartRequiredReason(base, next); got != tc.want {
+				t.Fatalf("restartRequiredReason() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReloadManagerRollbackRestoresPreviousConfig(t *testing.T) {
 	cfg := baseConfig()
 	path := writeReloadTestConfig(t, cfg)

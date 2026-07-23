@@ -204,7 +204,44 @@ func restartRequiredReason(current, next config.Config) string {
 			return "listener inbound binding changed"
 		}
 	}
+	if loggingConfigurationChanged(current.Admin.Logs, next.Admin.Logs) {
+		return "logging configuration changed"
+	}
 	return ""
+}
+
+func loggingConfigurationChanged(current, next config.AdminLogsConfig) bool {
+	current = effectiveAdminLogsConfig(current)
+	next = effectiveAdminLogsConfig(next)
+	if current.Path != next.Path {
+		return true
+	}
+	currentRotation := current.Rotation
+	nextRotation := next.Rotation
+	return currentRotation.MaxSizeMB != nextRotation.MaxSizeMB ||
+		currentRotation.MaxFiles != nextRotation.MaxFiles ||
+		currentRotation.MaxAgeDays != nextRotation.MaxAgeDays ||
+		currentRotation.MaxTotalSizeMB != nextRotation.MaxTotalSizeMB ||
+		currentRotation.CompressionEnabled() != nextRotation.CompressionEnabled()
+}
+
+func effectiveAdminLogsConfig(logs config.AdminLogsConfig) config.AdminLogsConfig {
+	if logs.Path == "" {
+		logs.Path = "tmp/dev.log"
+	}
+	if logs.Rotation.MaxSizeMB == 0 {
+		logs.Rotation.MaxSizeMB = 100
+	}
+	if logs.Rotation.MaxFiles == 0 {
+		logs.Rotation.MaxFiles = 20
+	}
+	if logs.Rotation.MaxAgeDays == 0 {
+		logs.Rotation.MaxAgeDays = 14
+	}
+	if logs.Rotation.MaxTotalSizeMB == 0 {
+		logs.Rotation.MaxTotalSizeMB = 1024
+	}
+	return logs
 }
 
 func newConfigHistory(configPath string) *configHistory {

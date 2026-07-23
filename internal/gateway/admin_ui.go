@@ -3,6 +3,7 @@ package gateway
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"net/http"
@@ -89,6 +90,27 @@ func (h *Handler) withAdminAudit(action string, next http.HandlerFunc) http.Hand
 	}
 }
 
+func (h *Handler) withAdminFailureAudit(action string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		startedAt := time.Now()
+		lw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next(lw, r)
+		if lw.statusCode < http.StatusBadRequest {
+			return
+		}
+		h.logger.Info("admin audit",
+			"event", "admin_audit",
+			"action", action,
+			"method", r.Method,
+			"path", r.URL.Path,
+			"remote", r.RemoteAddr,
+			"status", lw.statusCode,
+			"duration", time.Since(startedAt),
+			"authorized", lw.statusCode != http.StatusUnauthorized,
+		)
+	}
+}
+
 func (h *Handler) authorizeAdmin(r *http.Request) bool {
 	admin := h.runtimeState().Admin
 	if !admin.Enabled || admin.Token == "" {
@@ -136,19 +158,12 @@ func (h *Handler) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
-	groupBy := strings.TrimSpace(r.URL.Query().Get("group_by"))
-	if groupBy == "" {
-		groupBy = "key"
+	query, err := parseUsageQuery(r.URL.Query(), time.Now())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	window := accounting.Window(strings.TrimSpace(r.URL.Query().Get("window")))
-	if window == "" {
-		window = accounting.WindowTotal
-	}
-	items, err := h.runtimeState().Dispatcher.QueryUsageBy(accounting.Query{
-		GroupBy: groupBy,
-		Window:  window,
-		Bucket:  strings.TrimSpace(r.URL.Query().Get("bucket")),
-	})
+	items, err := h.runtimeState().Dispatcher.QueryUsageBy(query)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -384,21 +399,71 @@ func (h *Handler) handleAdminLogs(w http.ResponseWriter, r *http.Request) {
 		path = defaultAdminLogPath
 	}
 	maxBytes := boundedAdminLogBytes(state.Admin.Logs.MaxBytes, r.URL.Query().Get("bytes"))
-	content, truncated, err := readTail(path, maxBytes)
+	if !hasAdminLogPageQuery(r) {
+		content, truncated, err := readTail(path, maxBytes)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "read logs: "+err.Error())
+			return
+		}
+		lines := parsePositiveInt(r.URL.Query().Get("lines"))
+		if lines > 0 {
+			content = tailLines(content, lines)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"path":      path,
+			"max_bytes": maxBytes,
+			"lines":     lines,
+			"truncated": truncated,
+			"content":   redactLogContent(content),
+		})
+		return
+	}
+	query, err := parseAdminLogQuery(r.URL.Query(), maxBytes, time.Now().UTC())
 	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	page, memoryHit := adminLogPage{}, false
+	if query.Cursor == "" && h.recentLogs != nil {
+		if snapshot, covered := h.recentLogs.Snapshot(query.Since, query.Until); covered {
+			page, memoryHit = adminLogPageFromRecent(snapshot, query)
+		}
+	}
+	if !memoryHit {
+		page, err = readAdminLogPage(state.Admin.Logs, query)
+	}
+	if err != nil {
+		if errors.Is(err, errAdminLogCursorStale) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if query.Cursor != "" || strings.Contains(err.Error(), "cursor") {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "read logs: "+err.Error())
 		return
 	}
-	lines := parsePositiveInt(r.URL.Query().Get("lines"))
-	if lines > 0 {
-		content = tailLines(content, lines)
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"path":      path,
-		"max_bytes": maxBytes,
-		"lines":     lines,
-		"truncated": truncated,
-		"content":   redactLogContent(content),
+		"path":               path,
+		"source":             page.Source,
+		"max_bytes":          maxBytes,
+		"lines":              query.Limit,
+		"truncated":          page.ScanTruncated,
+		"content":            redactLogContent(page.Content),
+		"since":              page.Since,
+		"until":              page.Until,
+		"limit":              page.Limit,
+		"line_count":         page.LineCount,
+		"matched_count":      page.LineCount,
+		"scanned_line_count": page.ScannedLineCount,
+		"scanned_file_count": page.ScannedFileCount,
+		"includes_archives":  page.IncludesArchives,
+		"items":              page.Items,
+		"bytes_read":         page.BytesRead,
+		"has_more":           page.HasMore,
+		"next_cursor":        page.NextCursor,
+		"scan_truncated":     page.ScanTruncated,
 	})
 }
 

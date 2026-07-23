@@ -233,9 +233,12 @@ func TestDecodeOpenAIChatResponseMapsAssistantMessage(t *testing.T) {
 			{Message: openAIChatMessage{Role: "assistant", Content: "hello from upstream"}},
 		},
 		Usage: &struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			TotalTokens         int `json:"total_tokens"`
+			PromptTokensDetails *struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details,omitempty"`
 		}{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 	})
 	if err != nil {
@@ -1045,9 +1048,12 @@ func TestDecodeOpenAIResponsesResponseMapsTextAndToolCalls(t *testing.T) {
 			Arguments: `{"city":"shanghai"}`,
 		}},
 		Usage: &struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-			TotalTokens  int `json:"total_tokens"`
+			InputTokens        int `json:"input_tokens"`
+			OutputTokens       int `json:"output_tokens"`
+			TotalTokens        int `json:"total_tokens"`
+			InputTokensDetails *struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"input_tokens_details,omitempty"`
 		}{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
 	})
 	if err != nil {

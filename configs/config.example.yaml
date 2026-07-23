@@ -167,14 +167,28 @@ admin:
     enabled: true
     path: "./tmp/dev.log"
     max_bytes: 65536
+    rotation:
+      max_size_mb: 100
+      max_files: 20
+      max_age_days: 14
+      max_total_size_mb: 1024
+      compress: true
 
 accounting:
   enabled: true
   backend: "local_file"
   expose_http: true
-  # Use /stats/usage with group_by=key, provider, model, inbound, source, outbound, or error_kind.
+  # Use /stats/usage with group_by=key, provider, model, inbound, source, outbound, error_kind, date, agent, or session.
   # error_kind helps distinguish quota, timeout, upstream 5xx, auth, and capability failures.
   admin_token: "${SYROGO_ACCOUNTING_ADMIN_TOKEN}"
+  # Optional custom model pricing overrides the built-in defaults used for cost_usd.
+  pricing:
+    - provider: "openai"
+      model: "gpt-4o-mini"
+      input_per_million_usd: 0.15
+      output_per_million_usd: 0.60
+      cache_create_per_million_usd: 0
+      cache_read_per_million_usd: 0.075
   local_file:
     dir: "./tmp/accounting"
     rotate_max_size_mb: 64

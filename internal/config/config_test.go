@@ -188,6 +188,103 @@ func TestConfigValidateAdminSuccess(t *testing.T) {
 	}
 }
 
+func TestParseBytesAppliesAdminLogDefaults(t *testing.T) {
+	cfg, err := ParseBytes([]byte(`
+listeners:
+  - name: public
+    listen: ":8080"
+    inbounds: [openai-entry]
+inbounds:
+  - name: openai-entry
+    protocol: openai_chat
+    path: /v1/chat/completions
+    clients:
+      - name: office-key
+        token: client-token
+        tag: office
+outbounds:
+  - name: mock
+    protocol: mock
+    tag: mock-tag
+routing:
+  rules:
+    - name: office-route
+      from_tags: [office]
+      to_tags: [mock-tag]
+      strategy: failover
+admin:
+  enabled: true
+  token: admin-token
+  logs:
+    enabled: true
+`))
+	if err != nil {
+		t.Fatalf("ParseBytes() error = %v", err)
+	}
+	logs := cfg.Admin.Logs
+	if logs.Path != "tmp/dev.log" || logs.MaxBytes != 65536 {
+		t.Fatalf("logs = %#v, want default path and max bytes", logs)
+	}
+	rotation := logs.Rotation
+	if rotation.MaxSizeMB != 100 || rotation.MaxFiles != 20 || rotation.MaxAgeDays != 14 || rotation.MaxTotalSizeMB != 1024 || !rotation.CompressionEnabled() {
+		t.Fatalf("rotation = %#v, want defaults", rotation)
+	}
+}
+
+func TestParseBytesPreservesExplicitDisabledLogCompression(t *testing.T) {
+	data := []byte(`
+server:
+  listen: ":8080"
+outbounds:
+  - name: mock
+    protocol: mock
+    tag: mock-tag
+routing:
+  rules:
+    - from_tags: [office]
+      to_tags: [mock-tag]
+      strategy: failover
+admin:
+  enabled: true
+  token: admin-token
+  logs:
+    enabled: true
+    rotation:
+      compress: false
+`)
+	cfg, err := ParseBytes(data)
+	if err != nil {
+		t.Fatalf("ParseBytes() error = %v", err)
+	}
+	if cfg.Admin.Logs.Rotation.Compress == nil || cfg.Admin.Logs.Rotation.CompressionEnabled() {
+		t.Fatalf("compression = %#v, want explicit false", cfg.Admin.Logs.Rotation.Compress)
+	}
+}
+
+func TestConfigValidateAdminLogsRequiresPositiveValues(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*AdminLogsConfig)
+		wantErr string
+	}{
+		{"max_bytes", func(c *AdminLogsConfig) { c.MaxBytes = -1 }, "admin.logs.max_bytes must be greater than 0"},
+		{"max_size_mb", func(c *AdminLogsConfig) { c.Rotation.MaxSizeMB = -1 }, "admin.logs.rotation.max_size_mb must be greater than 0"},
+		{"max_files", func(c *AdminLogsConfig) { c.Rotation.MaxFiles = -1 }, "admin.logs.rotation.max_files must be greater than 0"},
+		{"max_age_days", func(c *AdminLogsConfig) { c.Rotation.MaxAgeDays = -1 }, "admin.logs.rotation.max_age_days must be greater than 0"},
+		{"max_total_size_mb", func(c *AdminLogsConfig) { c.Rotation.MaxTotalSizeMB = -1 }, "admin.logs.rotation.max_total_size_mb must be greater than 0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Admin = AdminConfig{Enabled: true, Token: "admin-token", Logs: AdminLogsConfig{Enabled: true}}
+			tc.mutate(&cfg.Admin.Logs)
+			if err := cfg.Validate(); err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("Validate() error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestConfigListenAddressesUsesListeners(t *testing.T) {
 	cfg := Config{
 		Listeners: []ListenerSpec{

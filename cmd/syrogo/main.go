@@ -13,6 +13,7 @@ import (
 
 	"github.com/ryanycheng/Syrogo/internal/app"
 	"github.com/ryanycheng/Syrogo/internal/config"
+	internallogging "github.com/ryanycheng/Syrogo/internal/logging"
 )
 
 var version = "dev"
@@ -41,24 +42,32 @@ func runMain() int {
 		}
 	}
 
+	bootstrapLogger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{}))
+	slog.SetDefault(bootstrapLogger)
+
 	configPath := flag.String("config", "./configs/config.example.yaml", "path to config file")
-	devLog := flag.Bool("dev-log", false, "write logs to stdout and ./tmp/dev.log for local development")
+	devLog := flag.Bool("dev-log", false, "write logs to stdout and the configured admin log path for local development")
 	flag.Parse()
 
-	logger, closeLogger, err := newLogger(newLoggerOptions{enableDevLog: *devLog})
+	cfg, err := config.Load(*configPath)
 	if err != nil {
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{})))
+		slog.Error("load config failed", slog.Any("error", err))
+		return 1
+	}
+	loggerOpts := newLoggerOptions{enableDevLog: *devLog, logs: cfg.Admin.Logs}
+	loggerResult, err := newLogger(loggerOpts)
+	if err != nil {
 		slog.Error("initialize logger failed", slog.Any("error", err))
 		return 1
 	}
 	defer func() {
-		if err := closeLogger(); err != nil {
+		if err := loggerResult.close(); err != nil {
 			slog.Error("close logger failed", slog.Any("error", err))
 		}
 	}()
-	slog.SetDefault(logger)
+	slog.SetDefault(loggerResult.logger)
 
-	if err := run(*configPath, *devLog); err != nil {
+	if err := run(*configPath, cfg, *devLog, devLogPath(loggerOpts), loggerResult.recentLogs); err != nil {
 		slog.Error("application exited with error", slog.Any("error", err))
 		return 1
 	}
@@ -91,13 +100,8 @@ func splitCommandArgs(args []string) (string, []string, bool) {
 	return "", nil, false
 }
 
-func run(configPath string, devLogEnabled bool) error {
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return err
-	}
-
-	application, err := app.NewWithOptions(cfg, app.Options{ConfigPath: configPath})
+func run(configPath string, cfg config.Config, devLogEnabled bool, logPath string, recentLogs *internallogging.RecentBuffer) error {
+	application, err := app.NewWithOptions(cfg, app.Options{ConfigPath: configPath, RecentLogs: recentLogs})
 	if err != nil {
 		return err
 	}
@@ -107,6 +111,7 @@ func run(configPath string, devLogEnabled bool) error {
 		Tagline:       "AI Gateway / Semantic Router",
 		Listens:       cfg.ListenAddresses(),
 		DevLogEnabled: devLogEnabled,
+		DevLogPath:    logPath,
 		TraceMode:     os.Getenv("SYROGO_TRACE"),
 	})); err != nil {
 		return fmt.Errorf("write startup banner: %w", err)
@@ -149,6 +154,7 @@ type startupBannerData struct {
 	Tagline       string
 	Listens       []string
 	DevLogEnabled bool
+	DevLogPath    string
 	TraceMode     string
 }
 
@@ -165,7 +171,7 @@ func buildStartupBanner(data startupBannerData) string {
 
 	devLogText := "off"
 	if data.DevLogEnabled {
-		devLogText = fmt.Sprintf("on (%s)", devLogPath)
+		devLogText = fmt.Sprintf("on (%s)", data.DevLogPath)
 	}
 
 	traceText := data.TraceMode

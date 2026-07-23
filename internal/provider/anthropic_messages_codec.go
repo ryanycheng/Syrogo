@@ -47,8 +47,10 @@ type anthropicMessagesEnvelope struct {
 	Content    []anthropicContentBlock `json:"content"`
 	StopReason string                  `json:"stop_reason"`
 	Usage      *struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	} `json:"usage,omitempty"`
 }
 
@@ -176,10 +178,12 @@ func decodeAnthropicMessagesResponse(resp anthropicMessagesEnvelope) (runtime.Re
 	}
 	if resp.Usage != nil {
 		response.Usage = &runtime.Usage{
-			InputTokens:  resp.Usage.InputTokens,
-			OutputTokens: resp.Usage.OutputTokens,
-			TotalTokens:  resp.Usage.InputTokens + resp.Usage.OutputTokens,
-			Source:       runtime.UsageSourceProvider,
+			InputTokens:            resp.Usage.InputTokens,
+			OutputTokens:           resp.Usage.OutputTokens,
+			CachedInputWriteTokens: resp.Usage.CacheCreationInputTokens,
+			CachedInputReadTokens:  resp.Usage.CacheReadInputTokens,
+			TotalTokens:            resp.Usage.InputTokens + resp.Usage.OutputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens,
+			Source:                 runtime.UsageSourceProvider,
 		}
 	}
 	return response, nil

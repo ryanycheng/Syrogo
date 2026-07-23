@@ -31,9 +31,22 @@ type AdminConfig struct {
 }
 
 type AdminLogsConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Path     string `yaml:"path"`
-	MaxBytes int    `yaml:"max_bytes"`
+	Enabled  bool                    `yaml:"enabled"`
+	Path     string                  `yaml:"path"`
+	MaxBytes int                     `yaml:"max_bytes"`
+	Rotation AdminLogsRotationConfig `yaml:"rotation"`
+}
+
+type AdminLogsRotationConfig struct {
+	MaxSizeMB      int   `yaml:"max_size_mb"`
+	MaxFiles       int   `yaml:"max_files"`
+	MaxAgeDays     int   `yaml:"max_age_days"`
+	MaxTotalSizeMB int   `yaml:"max_total_size_mb"`
+	Compress       *bool `yaml:"compress"`
+}
+
+func (c AdminLogsRotationConfig) CompressionEnabled() bool {
+	return c.Compress == nil || *c.Compress
 }
 
 type ServerConfig struct {
@@ -158,6 +171,16 @@ type AccountingConfig struct {
 	ExposeHTTP bool                      `yaml:"expose_http"`
 	AdminToken string                    `yaml:"admin_token"`
 	LocalFile  AccountingLocalFileConfig `yaml:"local_file"`
+	Pricing    []AccountingPriceConfig   `yaml:"pricing"`
+}
+
+type AccountingPriceConfig struct {
+	Provider                 string  `yaml:"provider" json:"provider"`
+	Model                    string  `yaml:"model" json:"model"`
+	InputPerMillionUSD       float64 `yaml:"input_per_million_usd" json:"input_per_million_usd"`
+	OutputPerMillionUSD      float64 `yaml:"output_per_million_usd" json:"output_per_million_usd"`
+	CacheCreatePerMillionUSD float64 `yaml:"cache_create_per_million_usd" json:"cache_create_per_million_usd"`
+	CacheReadPerMillionUSD   float64 `yaml:"cache_read_per_million_usd" json:"cache_read_per_million_usd"`
 }
 
 type AccountingLocalFileConfig struct {
@@ -220,6 +243,7 @@ func ParseBytes(data []byte) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("unmarshal config: %w", err)
 	}
+	cfg.applyDefaults()
 
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -228,7 +252,30 @@ func ParseBytes(data []byte) (Config, error) {
 	return cfg, nil
 }
 
+func (c *Config) applyDefaults() {
+	if c.Admin.Logs.Path == "" {
+		c.Admin.Logs.Path = "tmp/dev.log"
+	}
+	if c.Admin.Logs.MaxBytes == 0 {
+		c.Admin.Logs.MaxBytes = 65536
+	}
+	rotation := &c.Admin.Logs.Rotation
+	if rotation.MaxSizeMB == 0 {
+		rotation.MaxSizeMB = 100
+	}
+	if rotation.MaxFiles == 0 {
+		rotation.MaxFiles = 20
+	}
+	if rotation.MaxAgeDays == 0 {
+		rotation.MaxAgeDays = 14
+	}
+	if rotation.MaxTotalSizeMB == 0 {
+		rotation.MaxTotalSizeMB = 1024
+	}
+}
+
 func (c Config) Validate() error {
+	c.applyDefaults()
 	if len(c.ListenAddresses()) == 0 {
 		return fmt.Errorf("server.listen or listeners is required")
 	}
@@ -322,6 +369,9 @@ func (c Config) Validate() error {
 		}
 		if c.Accounting.ExposeHTTP && c.Accounting.AdminToken == "" {
 			return fmt.Errorf("accounting.admin_token is required when accounting.expose_http is enabled")
+		}
+		if err := validateAccountingPricing(c.Accounting.Pricing); err != nil {
+			return err
 		}
 	}
 
@@ -448,6 +498,26 @@ func (c Config) Validate() error {
 }
 
 func validateAdmin(cfg AdminConfig, clientTokens map[string]string, accounting AccountingConfig) error {
+	if cfg.Logs.Enabled {
+		if cfg.Logs.Path == "" {
+			return fmt.Errorf("admin.logs.path is required when admin.logs.enabled=true")
+		}
+		if cfg.Logs.MaxBytes <= 0 {
+			return fmt.Errorf("admin.logs.max_bytes must be greater than 0")
+		}
+		if cfg.Logs.Rotation.MaxSizeMB <= 0 {
+			return fmt.Errorf("admin.logs.rotation.max_size_mb must be greater than 0")
+		}
+		if cfg.Logs.Rotation.MaxFiles <= 0 {
+			return fmt.Errorf("admin.logs.rotation.max_files must be greater than 0")
+		}
+		if cfg.Logs.Rotation.MaxAgeDays <= 0 {
+			return fmt.Errorf("admin.logs.rotation.max_age_days must be greater than 0")
+		}
+		if cfg.Logs.Rotation.MaxTotalSizeMB <= 0 {
+			return fmt.Errorf("admin.logs.rotation.max_total_size_mb must be greater than 0")
+		}
+	}
 	if !cfg.Enabled {
 		return nil
 	}
@@ -459,9 +529,6 @@ func validateAdmin(cfg AdminConfig, clientTokens map[string]string, accounting A
 	}
 	if accounting.AdminToken != "" && cfg.Token == accounting.AdminToken {
 		return fmt.Errorf("admin.token must be different from accounting.admin_token")
-	}
-	if cfg.Logs.Enabled && cfg.Logs.MaxBytes < 0 {
-		return fmt.Errorf("admin.logs.max_bytes must not be negative")
 	}
 	return nil
 }
@@ -573,6 +640,18 @@ func validateAccountingLocalFile(cfg AccountingLocalFileConfig) error {
 	}
 	if cfg.SnapshotInterval != "" && cfg.SnapshotInterval.Duration() <= 0 {
 		return fmt.Errorf("accounting.local_file.snapshot_interval must be a positive duration")
+	}
+	return nil
+}
+
+func validateAccountingPricing(items []AccountingPriceConfig) error {
+	for i, item := range items {
+		if item.Model == "" {
+			return fmt.Errorf("accounting.pricing[%d].model is required", i)
+		}
+		if item.InputPerMillionUSD < 0 || item.OutputPerMillionUSD < 0 || item.CacheCreatePerMillionUSD < 0 || item.CacheReadPerMillionUSD < 0 {
+			return fmt.Errorf("accounting.pricing[%d] rates must be greater than or equal to 0", i)
+		}
 	}
 	return nil
 }

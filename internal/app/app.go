@@ -11,6 +11,7 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/execution"
 	"github.com/ryanycheng/Syrogo/internal/gateway"
 	"github.com/ryanycheng/Syrogo/internal/latency"
+	"github.com/ryanycheng/Syrogo/internal/logging"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/router"
@@ -20,6 +21,7 @@ import (
 
 type Options struct {
 	ConfigPath string
+	RecentLogs *logging.RecentBuffer
 }
 
 type App struct {
@@ -61,6 +63,9 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 	}
 	sessionStore := sessions.NewStore()
 	listeners, bindings := buildListeners(runtime, cfg, opts.ConfigPath, sessionStore, slog.Default())
+	for _, binding := range bindings {
+		binding.handler.SetRecentLogs(opts.RecentLogs)
+	}
 	app := &App{
 		Server:             server.NewListeners(listeners),
 		accountingStore:    store,
@@ -118,7 +123,7 @@ func buildRuntime(cfg config.Config, store accounting.Store) (appRuntime, error)
 	healthTracker := provider.NewHealthTracker(outboundNames)
 	eventRecorder := quota.NewEventRecorder(cfg.Governance.Quota.Events)
 	latencyStore := latency.NewStore(200)
-	dispatcher := execution.NewDispatcherWithStoreQuotaHealthEventsAndLatency(store, outboundQuotaTracker, healthTracker, eventRecorder, latencyStore)
+	dispatcher := execution.NewDispatcherWithStoreQuotaHealthEventsLatencyAndPricing(store, outboundQuotaTracker, healthTracker, eventRecorder, latencyStore, accounting.NewPriceCalculator(cfg.Accounting.Pricing))
 	return appRuntime{
 		router:             r,
 		dispatcher:         dispatcher,

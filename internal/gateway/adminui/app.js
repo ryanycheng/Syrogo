@@ -19,6 +19,9 @@ let providerMetrics = [];
 let providerLiveChecks = {};
 let providerRefreshTimer = 0;
 let liveRequestsTimer = 0;
+let sessionsTimer = 0;
+let sessionViewMode = localStorage.getItem("syrogo_sessions_view") || "cards";
+let sessionItems = [];
 let activeProvider = null;
 
 const i18n = {
@@ -120,27 +123,61 @@ async function refreshSessions() {
   Object.entries(filters).forEach(([key, filterValue]) => { if (filterValue) params.set(key, filterValue); });
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const response = await fetchJSON(`/admin/sessions${suffix}`);
-  const items = response.items || [];
-  document.querySelector("#sessions-table").innerHTML = items.length === 0 ? emptyState("No Claude Code sessions yet. Start one with syrogo run claude inside tmux.") : renderSessionsTable(items);
+  sessionItems = response.items || [];
+  renderSessions();
+}
+
+function renderSessions() {
+  const target = document.querySelector("#sessions-table");
+  target.classList.toggle("table-wrap", sessionViewMode === "table");
+  target.classList.toggle("sessions-card-wrap", sessionViewMode === "cards");
+  target.innerHTML = sessionItems.length === 0 ? emptyState("No Claude Code sessions yet. Start one with syrogo run claude inside tmux.") : sessionViewMode === "cards" ? renderSessionCards(sessionItems) : renderSessionsTable(sessionItems);
+  document.querySelector("#sessions-view-cards").classList.toggle("active", sessionViewMode === "cards");
+  document.querySelector("#sessions-view-table").classList.toggle("active", sessionViewMode === "table");
 }
 
 function renderSessionsTable(items) {
   return `<table><thead><tr><th>Status</th><th>Client</th><th>Location</th><th>Workspace</th><th>Last seen</th><th>Commands</th></tr></thead><tbody>${items.map(renderSessionRow).join("")}</tbody></table>`;
 }
 
-function renderSessionRow(item) {
+function renderSessionCards(items) {
+  return `<div class="session-card-grid">${items.map(renderSessionCard).join("")}</div>`;
+}
+
+function renderSessionCard(item) {
   const tmux = item.tmux || {};
   const commands = item.commands || {};
-  const location = tmux.present ? [`session ${tmux.session || "-"}`, `window ${tmux.window_index || "-"}${tmux.window_name ? ` · ${tmux.window_name}` : ""}`, `pane ${tmux.pane_id || tmux.pane_index || "-"}`].join("<br>") : "not in tmux";
-  const workspace = `<strong>${escapeHTML(item.host || "-")}</strong><div class="muted endpoint-text">${escapeHTML(item.cwd || "-")}</div><div class="muted">${escapeHTML(item.git_branch || "")}</div>`;
-  const commandList = [commands.attach, commands.select_window, commands.select_pane].filter(Boolean).map((command) => `<code>${escapeHTML(command)}</code>`).join("<br>") || `<span class="muted">No tmux command</span>`;
-  return `<tr><td>${badge(item.status || "unknown", sessionStatusKind(item.status))}<div class="muted">${escapeHTML(item.last_event || "no hook yet")}</div></td><td><strong>${escapeHTML(item.client_name || "-")}</strong><div class="muted">${escapeHTML(item.inbound_name || "-")}</div></td><td>${location}</td><td>${workspace}<div class="muted">pid ${escapeHTML(item.pid || "-")}</div></td><td>${escapeHTML(formatDateTime(item.last_seen_at || item.started_at))}</td><td class="session-commands">${commandList}</td></tr>`;
+  const status = item.status || "unknown";
+  const statusKind = sessionStatusKind(status) || "ok";
+  const location = tmux.present ? [`${escapeHTML(tmux.session || "-")}`, `w${escapeHTML(tmux.window_index || "-")}${tmux.window_name ? ` · ${escapeHTML(tmux.window_name)}` : ""}`, `p${escapeHTML(tmux.pane_id || tmux.pane_index || "-")}`].join(" / ") : "not in tmux";
+  const command = commands.attach || commands.select_window || commands.select_pane;
+  const commandHTML = command ? `<code>${escapeHTML(command)}</code>` : `<span class="muted">No tmux command</span>`;
+  return `<article class="session-card ${escapeHTML(statusKind)}"><div class="session-card-head"><div>${badge(status, statusKind)}<span>${escapeHTML(item.last_event || "no hook")}</span></div><strong>${escapeHTML(formatDateTime(item.last_seen_at || item.started_at))}</strong></div><div class="session-card-main"><h3>${escapeHTML(item.client_name || "-")}</h3><p>${escapeHTML(item.inbound_name || "-")}</p></div><div class="session-card-meta"><span>tmux</span><strong>${location}</strong><span>cwd</span><strong>${escapeHTML(item.cwd || "-")}</strong><span>host</span><strong>${escapeHTML(item.host || "-")}</strong></div><div class="session-card-commands">${commandHTML}</div></article>`;
+}
+
+function setSessionsViewMode(mode) {
+  sessionViewMode = mode;
+  localStorage.setItem("syrogo_sessions_view", mode);
+  renderSessions();
+}
+
+function startSessionsRefresh() {
+  stopSessionsRefresh();
+  refreshSessions().catch((error) => showToast(error.message));
+  sessionsTimer = window.setInterval(() => refreshSessions().catch((error) => showToast(error.message)), 2000);
+}
+
+function stopSessionsRefresh() {
+  if (sessionsTimer) {
+    window.clearInterval(sessionsTimer);
+    sessionsTimer = 0;
+  }
 }
 
 function sessionStatusKind(status) {
   if (status === "waiting_permission") return "danger";
   if (status === "tool_running" || status === "compacting") return "warn";
-  if (status === "stopped") return "muted";
+  if (status === "idle" || status === "stopped" || status === "unknown") return "muted";
   return "";
 }
 
@@ -476,16 +513,14 @@ function parseOptionalJSON(selector) { const raw = value(selector); return raw ?
 async function refreshUsage() {
   const target = document.querySelector("#usage-table");
   const params = usageParams();
-  const windowValue = params.get("window");
-  const bucket = params.get("bucket");
-  if (windowValue !== "total" && !bucket) { target.innerHTML = errorBlock(`${windowValue} usage requires a bucket.`); showToast("Usage bucket is required."); return; }
+  if (!params) { target.innerHTML = errorBlock("Select both UTC dates for a custom range."); showToast("Usage date range is incomplete."); return; }
   try { const response = await fetchJSON(`/admin/usage?${params.toString()}`); const items = response.items || []; target.innerHTML = items.length === 0 ? emptyState("No usage records.") : renderObjectTable(items); } catch (error) { target.innerHTML = errorBlock(error.message); }
 }
-function usageParams() { syncUsageBucketInput(); const params = new URLSearchParams(); const groupBy = value("#usage-group-by"); const windowValue = value("#usage-window"); const bucket = value("#usage-bucket"); params.set("group_by", groupBy); params.set("window", windowValue); if (windowValue !== "total" && bucket) params.set("bucket", bucket); return params; }
-function syncUsageBucketInput() { const windowInput = document.querySelector("#usage-window"); const bucketInput = document.querySelector("#usage-bucket"); const windowValue = windowInput.value; if (windowValue === "total") { bucketInput.value = ""; bucketInput.disabled = true; bucketInput.placeholder = "not required for total"; return; } bucketInput.disabled = false; bucketInput.placeholder = usageBucketPlaceholder(windowValue); if (!bucketInput.value.trim()) bucketInput.value = currentUsageBucket(windowValue); }
-function usageBucketPlaceholder(windowValue) { if (windowValue === "day") return "YYYY-MM-DD"; if (windowValue === "week") return "YYYY-Www"; if (windowValue === "month") return "YYYY-MM"; return "bucket"; }
-function currentUsageBucket(windowValue) { const now = new Date(); const year = now.getUTCFullYear(); const month = String(now.getUTCMonth() + 1).padStart(2, "0"); if (windowValue === "day") return `${year}-${month}-${String(now.getUTCDate()).padStart(2, "0")}`; if (windowValue === "month") return `${year}-${month}`; if (windowValue === "week") return isoWeekBucket(now); return ""; }
-function isoWeekBucket(date) { const day = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())); const weekday = day.getUTCDay() || 7; day.setUTCDate(day.getUTCDate() + 4 - weekday); const weekYear = day.getUTCFullYear(); const yearStart = new Date(Date.UTC(weekYear, 0, 1)); const week = Math.ceil((((day - yearStart) / 86400000) + 1) / 7); return `${weekYear}-W${String(week).padStart(2, "0")}`; }
+function usageParams() { const range = usageDateRange(); if (!range) return null; const params = new URLSearchParams(); params.set("group_by", value("#usage-group-by")); params.set("start_date", range.start); params.set("end_date", shiftUTCDate(range.end, 1)); return params; }
+function usageDateRange() { const preset = value("#usage-range"); if (preset === "custom") { const start = value("#usage-start-date"); const end = value("#usage-end-date"); return start && end ? { start, end } : null; } const today = utcDate(new Date()); if (preset === "month") return { start: `${today.slice(0, 8)}01`, end: today }; const days = preset === "30d" ? 30 : 7; return { start: shiftUTCDate(today, 1 - days), end: today }; }
+function utcDate(date) { return date.toISOString().slice(0, 10); }
+function shiftUTCDate(date, days) { const shifted = new Date(`${date}T00:00:00Z`); shifted.setUTCDate(shifted.getUTCDate() + days); return utcDate(shifted); }
+function syncUsageRangeInputs() { const custom = value("#usage-range") === "custom"; const start = document.querySelector("#usage-start-date"); const end = document.querySelector("#usage-end-date"); start.hidden = !custom; end.hidden = !custom; if (!custom) { start.value = ""; end.value = ""; } }
 
 async function refreshQuota() { const target = document.querySelector("#quota-table"); try { const response = await fetchJSON("/admin/quota"); target.innerHTML = [`<div class="table-heading">Outbound quota</div>`, (response.outbound || []).length === 0 ? emptyState("No outbound quota records.") : renderObjectTable(response.outbound || []), `<div class="table-heading">Client quota</div>`, (response.client || []).length === 0 ? emptyState("No client quota records.") : renderObjectTable(response.client || [])].join(""); } catch (error) { target.innerHTML = errorBlock(error.message); } }
 async function refreshLatency() { const target = document.querySelector("#latency-table"); try { const snapshot = await fetchJSON("/admin/latency"); const items = snapshot.items || []; target.innerHTML = items.length === 0 ? emptyState("No recent requests.") : `<table><thead><tr><th>Time</th><th>Path</th><th>Inbound</th><th>Client</th><th>Status</th><th>Total</th><th>Spans</th></tr></thead><tbody>${items.map(renderTraceRow).join("")}</tbody></table>`; } catch (error) { target.innerHTML = errorBlock(error.message); } }
@@ -582,7 +617,37 @@ function stopProviderAutoRefresh() {
   }
 }
 const pageTitles = { dashboard: "Dashboard", sessions: "Sessions", providers: "Providers", clients: "Clients", routes: "Routes & Models", usage: "Usage", monitoring: "Monitoring", logs: "Logs", config: "System Config", debug: "Debug" };
-function switchPanel(target) { document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.target === target)); document.querySelectorAll(".panel").forEach((item) => item.classList.toggle("active", item.id === target)); updatePageTitle(); if (target === "providers") { refreshProviders(); startProviderAutoRefresh(); } else { stopProviderAutoRefresh(); } if (target === "sessions") refreshSessions(); if (target === "clients") refreshClients(); if (target === "routes") refreshRoutes(); if (target === "usage") refreshUsage(); if (target === "monitoring") { refreshQuota(); refreshLatency(); startLiveRequestsRefresh(); } else { stopLiveRequestsRefresh(); } if (target === "logs") refreshLogs(); if (target === "debug") { refreshTraces(); refreshProviderDebug(); } }
+function switchPanel(target) {
+  document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.target === target));
+  document.querySelectorAll(".panel").forEach((item) => item.classList.toggle("active", item.id === target));
+  updatePageTitle();
+  if (target === "providers") {
+    refreshProviders();
+    startProviderAutoRefresh();
+  } else {
+    stopProviderAutoRefresh();
+  }
+  if (target === "sessions") {
+    startSessionsRefresh();
+  } else {
+    stopSessionsRefresh();
+  }
+  if (target === "clients") refreshClients();
+  if (target === "routes") refreshRoutes();
+  if (target === "usage") refreshUsage();
+  if (target === "monitoring") {
+    refreshQuota();
+    refreshLatency();
+    startLiveRequestsRefresh();
+  } else {
+    stopLiveRequestsRefresh();
+  }
+  if (target === "logs") refreshLogs();
+  if (target === "debug") {
+    refreshTraces();
+    refreshProviderDebug();
+  }
+}
 function updatePageTitle() { const active = document.querySelector(".nav-item.active"); if (active) els.pageTitle.textContent = active.textContent || pageTitles[active.dataset.target] || "Syrogo"; }
 
 function bindEvents() {
@@ -595,6 +660,8 @@ function bindEvents() {
   document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => switchPanel(button.dataset.target)));
   document.querySelector("#refresh-overview").addEventListener("click", refreshOverview);
   document.querySelector("#refresh-sessions").addEventListener("click", refreshSessions);
+  document.querySelector("#sessions-view-cards").addEventListener("click", () => setSessionsViewMode("cards"));
+  document.querySelector("#sessions-view-table").addEventListener("click", () => setSessionsViewMode("table"));
   ["#session-client-filter", "#session-status-filter", "#session-host-filter", "#session-cwd-filter"].forEach((selector) => document.querySelector(selector).addEventListener("input", refreshSessions));
   document.querySelector("#refresh-providers").addEventListener("click", refreshProviders);
   document.querySelector("#provider-hours").addEventListener("change", refreshProviders);
@@ -627,7 +694,7 @@ function bindEvents() {
   document.querySelector("#delete-route").addEventListener("click", deleteRoute);
   document.querySelector("#routes-table").addEventListener("click", (event) => { const button = event.target.closest("button[data-route-edit]"); if (button) { fillRouteForm(JSON.parse(button.dataset.routeEdit)); return; } const row = event.target.closest("tr[data-route]"); if (row) fillRouteForm(JSON.parse(row.dataset.route)); });
   document.querySelector("#refresh-usage").addEventListener("click", refreshUsage);
-  document.querySelector("#usage-window").addEventListener("change", syncUsageBucketInput);
+  document.querySelector("#usage-range").addEventListener("change", syncUsageRangeInputs);
   document.querySelector("#refresh-live-requests").addEventListener("click", refreshLiveRequests);
   document.querySelector("#refresh-quota").addEventListener("click", refreshQuota);
   document.querySelector("#refresh-latency").addEventListener("click", refreshLatency);
@@ -645,5 +712,5 @@ function bindEvents() {
 
 bindEvents();
 applyI18n();
-syncUsageBucketInput();
+syncUsageRangeInputs();
 if (currentToken()) login();

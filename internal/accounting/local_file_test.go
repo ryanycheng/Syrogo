@@ -42,6 +42,34 @@ func testUsageRecord(client string, ts time.Time) runtime.UsageRecord {
 	}
 }
 
+func TestLocalFileStoreSupportsDateRangeAfterRecovery(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testLocalFileConfig(dir)
+	store, err := NewLocalFileStore(cfg)
+	if err != nil {
+		t.Fatalf("NewLocalFileStore() error = %v", err)
+	}
+	store.Record(testUsageRecord("office-key", time.Date(2026, 4, 27, 9, 0, 0, 0, time.UTC)))
+	store.Record(testUsageRecord("office-key", time.Date(2026, 4, 28, 9, 0, 0, 0, time.UTC)))
+	store.Record(testUsageRecord("office-key", time.Date(2026, 4, 29, 9, 0, 0, 0, time.UTC)))
+	if err := store.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	recovered, err := NewLocalFileStore(cfg)
+	if err != nil {
+		t.Fatalf("NewLocalFileStore() recover error = %v", err)
+	}
+	defer func() { _ = recovered.Close(context.Background()) }()
+	items, err := recovered.Query(Query{GroupBy: "key", StartDate: "2026-04-27", EndDate: "2026-04-29"})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if len(items) != 1 || items[0].RequestCount != 2 || items[0].TotalTokens != 30 {
+		t.Fatalf("items = %#v, want recovered half-open date range", items)
+	}
+}
+
 func TestLocalFileStoreRecoversFromSnapshotAndRecords(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testLocalFileConfig(dir)

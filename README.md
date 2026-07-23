@@ -505,9 +505,17 @@ admin:
     enabled: true
     path: "./tmp/dev.log"
     max_bytes: 65536
+    rotation:
+      max_size_mb: 100
+      max_files: 20
+      max_age_days: 14
+      max_total_size_mb: 1024
+      compress: true
 ```
 
-The UI stores the Admin UI token only in browser local storage and uses `/admin/overview`, `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, `/admin/config/update`, `/admin/config/apply`, `/admin/config/history`, `/admin/config/history/diff`, `/admin/config/rollback`, `/admin/debug/traces`, `/admin/debug/route-dry-run`, and `/admin/debug/providers`. The Overview page shows request, error, fallback, latency, quota, provider health, recent governance event, and Admin self-check summaries such as config path and log availability. Usage supports `group_by`, `window`, and `bucket` filters. Debug shows recent traces with matched rule, routing strategy, planned steps, fallback count, spans, a side-effect-free route dry-run form, and provider health/quota/event/latency aggregates. Logs are read only from the configured local log path, support line/byte limits, show path/truncation/read-limit metadata, and are redacted for common token, key, authorization, and secret fields. Current config loading returns a redacted display copy; config updates show a redacted diff preview plus browser confirmation before writing; Apply hot-reloads safe runtime changes and History/Rollback keeps recent local config versions with redacted diff viewing. Admin API operations emit `admin_audit` log entries without recording Authorization headers, tokens, request bodies, config content, or log content. It is an embedded single-page console and does not require a frontend build step.
+Log files rotate before a write would exceed `max_size_mb` and at the first write on a new local calendar day. Historical files are compressed with gzip and cleaned by age, file count, and total disk usage; the active file is never removed. `/admin/logs` automatically searches the active file and retained archives. Queries fully covered by the bounded recent cache (last 5 minutes, up to 8 MiB) use memory; cursor, older, incomplete, or multi-page queries fall back to files so results are not omitted. Status filters accept exact codes and families such as `4xx` and `5xx`. Successful `/admin/logs` polling does not emit an `admin_audit` entry.
+
+The UI stores the Admin UI token only in browser local storage and uses `/admin/overview`, `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, `/admin/config/update`, `/admin/config/apply`, `/admin/config/history`, `/admin/config/history/diff`, `/admin/config/rollback`, `/admin/debug/traces`, `/admin/debug/route-dry-run`, and `/admin/debug/providers`. The Overview page shows request, error, fallback, latency, quota, provider health, recent governance event, and Admin self-check summaries such as config path and log availability. Usage defaults to the last seven UTC calendar days and supports explicit UTC date ranges plus `group_by` filters. Debug shows recent traces with matched rule, routing strategy, planned steps, fallback count, spans, a side-effect-free route dry-run form, and provider health/quota/event/latency aggregates. Logs are read only from the configured local log path, support line/byte limits, show path/truncation/read-limit metadata, and are redacted for common token, key, authorization, and secret fields. Current config loading returns a redacted display copy; config updates show a redacted diff preview plus browser confirmation before writing; Apply hot-reloads safe runtime changes and History/Rollback keeps recent local config versions with redacted diff viewing. Admin API operations emit `admin_audit` log entries without recording Authorization headers, tokens, request bodies, config content, or log content. It is an embedded single-page console and does not require a frontend build step.
 
 ### 15. Validate config changes
 
@@ -562,6 +570,9 @@ curl http://127.0.0.1:23234/stats/usage?group_by=key \
 curl http://127.0.0.1:23234/stats/usage?group_by=provider \
   -H 'Authorization: Bearer <accounting-admin-token>'
 
+curl 'http://127.0.0.1:23234/stats/usage?group_by=key&start_date=2026-04-21&end_date=2026-04-28' \
+  -H 'Authorization: Bearer <accounting-admin-token>'
+
 curl 'http://127.0.0.1:23234/stats/usage?group_by=key&window=day&bucket=2026-04-27' \
   -H 'Authorization: Bearer <accounting-admin-token>'
 
@@ -581,6 +592,9 @@ Current `group_by` values:
 - `source`
 - `outbound`
 - `error_kind`
+- `date`
+- `agent`
+- `session`
 
 Current `window` values:
 
@@ -591,6 +605,10 @@ Current `window` values:
 
 Notes:
 
+- when no time parameters are provided, the API defaults to the last seven UTC calendar days
+- `start_date` is inclusive and `end_date` is exclusive; both use strict `YYYY-MM-DD` UTC dates and must be provided together
+- `start_date`/`end_date` cannot be combined with legacy `window`/`bucket` parameters
+- explicit `window=total` preserves the all-history behavior
 - `bucket` is optional when `window=total`
 - `window=day` uses buckets like `2026-04-27`
 - `window=week` uses ISO week buckets like `2026-W18`
@@ -609,9 +627,12 @@ Response shape:
       "fallback_count": 0,
       "input_tokens": 1234,
       "output_tokens": 567,
-      "cached_input_read_tokens": 0,
-      "cached_input_write_tokens": 0,
-      "total_tokens": 1801,
+      "cached_input_read_tokens": 42,
+      "cached_input_write_tokens": 8,
+      "cache_read_tokens": 42,
+      "cache_create_tokens": 8,
+      "total_tokens": 1851,
+      "cost_usd": 0.0012,
       "provider_usage_count": 12,
       "estimated_usage_count": 0,
       "last_seen_at": "2026-04-25T09:00:00Z"
@@ -624,6 +645,9 @@ Notes:
 
 - `clients[].name` remains the stable accounting identity
 - `value` depends on the selected `group_by`
+- `group_by=session` uses the active session registered by `syrogo run claude` when available, or explicit `X-Syrogo-Session-ID` / `X-Syrogo-Agent` headers
+- `cost_usd` uses Syrogo's embedded LiteLLM pricing snapshot when the executed model matches; entries in `accounting.pricing` override embedded defaults
+- the embedded snapshot records its LiteLLM revision in `internal/accounting/pricing_default.json`; run `make update-pricing` after intentionally updating the locked revision in `scripts/update_pricing.py`
 - `group_by=error_kind` uses `none` for successful requests and values such as `quota_exceeded`, `timeout`, `upstream_server_error`, `auth_failed`, or `capability_unsupported` for failures
 - failover only continues on recoverable errors such as quota, timeout, transient, or upstream 5xx failures; auth, capability, and request-shape failures are surfaced directly
 - queries always read the in-memory aggregate view instead of scanning disk on request
@@ -637,6 +661,13 @@ accounting:
   backend: "local_file"
   expose_http: true
   admin_token: "${SYROGO_ACCOUNTING_ADMIN_TOKEN}"
+  pricing:
+    - provider: "openai"
+      model: "gpt-4o-mini"
+      input_per_million_usd: 0.15
+      output_per_million_usd: 0.60
+      cache_create_per_million_usd: 0
+      cache_read_per_million_usd: 0.075
   local_file:
     dir: "./tmp/accounting"
     rotate_max_size_mb: 64

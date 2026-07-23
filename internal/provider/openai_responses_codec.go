@@ -67,9 +67,12 @@ type openAIResponsesEnvelope struct {
 	Status string                      `json:"status,omitempty"`
 	Output []openAIResponsesOutputItem `json:"output"`
 	Usage  *struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-		TotalTokens  int `json:"total_tokens"`
+		InputTokens        int `json:"input_tokens"`
+		OutputTokens       int `json:"output_tokens"`
+		TotalTokens        int `json:"total_tokens"`
+		InputTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"input_tokens_details,omitempty"`
 	} `json:"usage,omitempty"`
 }
 
@@ -274,7 +277,17 @@ func decodeOpenAIResponsesResponse(resp openAIResponsesEnvelope) (runtime.Respon
 		Message:      message,
 	}
 	if resp.Usage != nil {
-		response.Usage = &runtime.Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens, TotalTokens: resp.Usage.TotalTokens, Source: runtime.UsageSourceProvider}
+		cachedTokens := 0
+		if resp.Usage.InputTokensDetails != nil {
+			cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
+		}
+		response.Usage = &runtime.Usage{
+			InputTokens:           resp.Usage.InputTokens,
+			OutputTokens:          resp.Usage.OutputTokens,
+			CachedInputReadTokens: cachedTokens,
+			TotalTokens:           resp.Usage.TotalTokens,
+			Source:                runtime.UsageSourceProvider,
+		}
 	}
 	return response, nil
 }

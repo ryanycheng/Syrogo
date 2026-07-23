@@ -16,9 +16,11 @@ const (
 )
 
 type Query struct {
-	GroupBy string
-	Window  Window
-	Bucket  string
+	GroupBy   string
+	Window    Window
+	Bucket    string
+	StartDate string
+	EndDate   string
 }
 
 type RecentRecordsQuery struct {
@@ -28,6 +30,10 @@ type RecentRecordsQuery struct {
 
 type StatsItem struct {
 	Value                  string             `json:"value"`
+	Date                   string             `json:"date,omitempty"`
+	Agent                  string             `json:"agent,omitempty"`
+	SessionID              string             `json:"session_id,omitempty"`
+	Model                  string             `json:"model,omitempty"`
 	RequestCount           int                `json:"request_count"`
 	SuccessCount           int                `json:"success_count"`
 	ErrorCount             int                `json:"error_count"`
@@ -36,7 +42,10 @@ type StatsItem struct {
 	OutputTokens           int                `json:"output_tokens"`
 	CachedInputReadTokens  int                `json:"cached_input_read_tokens"`
 	CachedInputWriteTokens int                `json:"cached_input_write_tokens"`
+	CacheReadTokens        int                `json:"cache_read_tokens"`
+	CacheCreateTokens      int                `json:"cache_create_tokens"`
 	TotalTokens            int                `json:"total_tokens"`
+	CostUSD                float64            `json:"cost_usd"`
 	ProviderUsageCount     int                `json:"provider_usage_count"`
 	EstimatedUsageCount    int                `json:"estimated_usage_count"`
 	ToolUnits              map[string]float64 `json:"tool_units,omitempty"`

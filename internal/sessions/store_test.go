@@ -97,3 +97,54 @@ func TestStoreConcurrentUpdates(t *testing.T) {
 		t.Fatalf("unexpected final status %s", sessions[0].Status)
 	}
 }
+
+func TestStoreListPrioritizesActionableSessions(t *testing.T) {
+	store := NewStore()
+	now := time.Date(2026, 7, 18, 10, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+
+	store.Register(Session{ID: "stopped-new", Status: StatusStopped, LastSeenAt: now})
+	store.Register(Session{ID: "running-old", Status: StatusRunning, LastSeenAt: now.Add(-10 * time.Minute)})
+	store.Register(Session{ID: "permission-old", Status: StatusWaitingPermission, LastSeenAt: now.Add(-20 * time.Minute)})
+	store.Register(Session{ID: "idle-new", Status: StatusIdle, LastSeenAt: now.Add(time.Minute)})
+	store.Register(Session{ID: "tool-old", Status: StatusToolRunning, LastSeenAt: now.Add(-30 * time.Minute)})
+
+	sessions := store.List(ListFilter{})
+	want := []string{"permission-old", "tool-old", "running-old", "idle-new", "stopped-new"}
+	if len(sessions) != len(want) {
+		t.Fatalf("got %d sessions, want %d", len(sessions), len(want))
+	}
+	for i, id := range want {
+		if sessions[i].ID != id {
+			t.Fatalf("session[%d] = %s, want %s; got %#v", i, sessions[i].ID, id, sessions)
+		}
+	}
+}
+
+func TestStorePruneStoppedOnlyRemovesExpiredStoppedSessions(t *testing.T) {
+	store := NewStore()
+	now := time.Date(2026, 7, 18, 10, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+
+	store.Register(Session{ID: "old-stopped", Status: StatusStopped, LastSeenAt: now.Add(-2 * time.Hour)})
+	store.Register(Session{ID: "new-stopped", Status: StatusStopped, LastSeenAt: now.Add(-30 * time.Minute)})
+	store.Register(Session{ID: "old-running", Status: StatusRunning, LastSeenAt: now.Add(-2 * time.Hour)})
+
+	if removed := store.PruneStopped(time.Hour); removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	sessions := store.List(ListFilter{})
+	ids := map[string]bool{}
+	for _, session := range sessions {
+		ids[session.ID] = true
+	}
+	for _, id := range []string{"new-stopped", "old-running"} {
+		if !ids[id] {
+			t.Fatalf("expected %s to remain, got %#v", id, sessions)
+		}
+	}
+	if ids["old-stopped"] {
+		t.Fatalf("expected old-stopped to be pruned, got %#v", sessions)
+	}
+}

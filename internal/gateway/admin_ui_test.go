@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/config"
 	"github.com/ryanycheng/Syrogo/internal/execution"
 	"github.com/ryanycheng/Syrogo/internal/latency"
+	internallogging "github.com/ryanycheng/Syrogo/internal/logging"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 )
 
@@ -57,7 +59,7 @@ func TestAdminUIReturnsIndexHTMLWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want text/html", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"Admin UI token", "/admin/app.js", "usage-window", "usage-bucket", "log-bytes", "logs-meta", "overview-summary", "sessions-table", "session-status-filter", "live-requests-table", "refresh-live-requests", "config-diff", "Apply current file", "config-history", "Debug", "dry-run-model"} {
+	for _, want := range []string{"Admin UI token", "/admin/app.js", "usage-range", "usage-start-date", "usage-end-date", "log-bytes", "logs-meta", "overview-summary", "sessions-table", "sessions-view-cards", "sessions-view-table", "session-status-filter", "live-requests-table", "refresh-live-requests", "config-diff", "Apply current file", "config-history", "Debug", "dry-run-model"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
@@ -80,7 +82,7 @@ func TestAdminUIReturnsStaticAssetsWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want javascript", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"/admin/sessions", "/admin/usage", "/admin/logs", "/admin/overview", "/admin/latency/active", "refreshLiveRequests", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback", "/admin/debug/traces", "/admin/debug/route-dry-run", "/admin/debug/providers", "/admin/config/history/diff"} {
+	for _, want := range []string{"/admin/sessions", "startSessionsRefresh", "renderSessionCards", "/admin/usage", "/admin/logs", "/admin/overview", "/admin/latency/active", "refreshLiveRequests", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback", "/admin/debug/traces", "/admin/debug/route-dry-run", "/admin/debug/providers", "/admin/config/history/diff"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
@@ -309,6 +311,106 @@ func TestAdminLogsReadsConfiguredPathAndRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestAdminLogsUsesCoveredRecentBufferAndStatusFamilies(t *testing.T) {
+	h := newAdminTestHandler(t)
+	buffer := internallogging.NewRecentBuffer(5*time.Minute, 8*1024*1024)
+	h.SetRecentLogs(buffer)
+	now := time.Now().UTC()
+	lines := []string{
+		fmt.Sprintf("time=%s level=INFO msg=ok status=200", now.Add(100*time.Millisecond).Format(time.RFC3339Nano)),
+		fmt.Sprintf("time=%s level=WARN msg=not-found status=404", now.Add(200*time.Millisecond).Format(time.RFC3339Nano)),
+		fmt.Sprintf("time=%s level=ERROR msg=bad-gateway status=502", now.Add(300*time.Millisecond).Format(time.RFC3339Nano)),
+		fmt.Sprintf("time=%s level=ERROR msg=unavailable status=503", now.Add(400*time.Millisecond).Format(time.RFC3339Nano)),
+	}
+	_, _ = buffer.Write([]byte(strings.Join(lines, "\n") + "\n"))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	for _, test := range []struct {
+		status string
+		want   []string
+		not    []string
+	}{
+		{status: "5xx", want: []string{"bad-gateway", "unavailable"}, not: []string{"not-found", "msg=ok"}},
+		{status: "4xx", want: []string{"not-found"}, not: []string{"bad-gateway", "unavailable", "msg=ok"}},
+	} {
+		w := httptest.NewRecorder()
+		url := fmt.Sprintf("/admin/logs?since=%s&until=%s&limit=10&status=%s", now.Format(time.RFC3339Nano), now.Add(time.Second).Format(time.RFC3339Nano), test.status)
+		mux.ServeHTTP(w, authorizedRequest(http.MethodGet, url, "admin-ui-token", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status filter %s: status = %d, body=%s", test.status, w.Code, w.Body.String())
+		}
+		var response struct {
+			Source string         `json:"source"`
+			Items  []adminLogItem `json:"items"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Source != "memory" {
+			t.Fatalf("source = %q, want memory", response.Source)
+		}
+		for _, want := range test.want {
+			if !strings.Contains(w.Body.String(), want) {
+				t.Fatalf("filter %s body = %s, want %s", test.status, w.Body.String(), want)
+			}
+		}
+		for _, unwanted := range test.not {
+			if strings.Contains(w.Body.String(), unwanted) {
+				t.Fatalf("filter %s body = %s, unwanted %s", test.status, w.Body.String(), unwanted)
+			}
+		}
+	}
+}
+
+func TestAdminLogsFallsBackToFileWhenRecentMatchesExceedLimit(t *testing.T) {
+	h := newAdminTestHandler(t)
+	now := time.Now().UTC()
+	fileContent := fmt.Sprintf("time=%s level=ERROR msg=file-newest status=503\ntime=%s level=ERROR msg=file-older status=502\n", now.Add(200*time.Millisecond).Format(time.RFC3339Nano), now.Add(100*time.Millisecond).Format(time.RFC3339Nano))
+	if err := os.WriteFile(h.admin.Logs.Path, []byte(fileContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	buffer := internallogging.NewRecentBuffer(5*time.Minute, 8*1024*1024)
+	h.SetRecentLogs(buffer)
+	_, _ = buffer.Write([]byte(fileContent))
+	mux := http.NewServeMux()
+	h.Register(mux)
+	w := httptest.NewRecorder()
+	url := fmt.Sprintf("/admin/logs?since=%s&until=%s&limit=1&status=5xx", now.Format(time.RFC3339Nano), now.Add(time.Second).Format(time.RFC3339Nano))
+	mux.ServeHTTP(w, authorizedRequest(http.MethodGet, url, "admin-ui-token", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"source":"file"`) || !strings.Contains(w.Body.String(), `"has_more":true`) {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminLogsStructuredResponseUsesRedactedContent(t *testing.T) {
+	h := newAdminTestHandler(t)
+	content := "time=2026-07-22T09:00:00Z level=ERROR msg=failed status=502 token=secret-token\n"
+	if err := os.WriteFile(h.admin.Logs.Path, []byte(content), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	mux := http.NewServeMux()
+	h.Register(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodGet, "/admin/logs?since=2026-07-22T08:00:00Z&until=2026-07-22T10:00:00Z&limit=10&level=ERROR", "admin-ui-token", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Content string         `json:"content"`
+		Items   []adminLogItem `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(response.Items) != 1 || response.Content != response.Items[0].Content {
+		t.Fatalf("response = %#v, want matching content", response)
+	}
+	if strings.Contains(response.Content, "secret-token") || !strings.Contains(response.Content, "<redacted>") {
+		t.Fatalf("content = %q, want redacted secret", response.Content)
+	}
+}
+
 func TestAdminConfigValidateAcceptsAdminTokenAndAccountingToken(t *testing.T) {
 	h := newAdminTestHandler(t)
 	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "accounting-token"}
@@ -359,11 +461,8 @@ func TestAdminAuditLogsActionWithoutSecrets(t *testing.T) {
 		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
 	}
 	text := logs.String()
-	if !strings.Contains(text, "admin_audit") || !strings.Contains(text, "action=logs") || !strings.Contains(text, "status=200") {
-		t.Fatalf("logs = %s, want admin audit fields", text)
-	}
-	if strings.Contains(text, "admin-ui-token") || strings.Contains(text, "secret-token") {
-		t.Fatalf("logs = %s, want no token or log content", text)
+	if text != "" {
+		t.Fatalf("logs = %s, want no audit for successful log reads", text)
 	}
 
 	methodNotAllowed := httptest.NewRecorder()

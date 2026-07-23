@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+const DefaultStoppedRetention = time.Hour
+
 type Store struct {
 	mu       sync.RWMutex
 	sessions map[string]Session
@@ -86,12 +88,17 @@ func (s *Store) List(filter ListFilter) []Session {
 		result = append(result, cloneSession(session))
 	}
 	sort.Slice(result, func(i, j int) bool {
+		leftPriority := statusPriority(result[i].Status)
+		rightPriority := statusPriority(result[j].Status)
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
 		return result[i].LastSeenAt.After(result[j].LastSeenAt)
 	})
 	return result
 }
 
-func (s *Store) Prune(maxAge time.Duration) int {
+func (s *Store) PruneStopped(maxAge time.Duration) int {
 	if maxAge <= 0 {
 		return 0
 	}
@@ -100,12 +107,49 @@ func (s *Store) Prune(maxAge time.Duration) int {
 	cutoff := s.now().Add(-maxAge)
 	removed := 0
 	for id, session := range s.sessions {
-		if session.LastSeenAt.Before(cutoff) {
+		if session.Status == StatusStopped && session.LastSeenAt.Before(cutoff) {
 			delete(s.sessions, id)
 			removed++
 		}
 	}
 	return removed
+}
+
+func (s *Store) LatestActive(clientName, inboundName string) (Session, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var latest Session
+	found := false
+	for _, session := range s.sessions {
+		if session.ClientName != clientName || session.InboundName != inboundName || session.Status == StatusStopped {
+			continue
+		}
+		if !found || session.LastSeenAt.After(latest.LastSeenAt) {
+			latest = session
+			found = true
+		}
+	}
+	if !found {
+		return Session{}, false
+	}
+	return cloneSession(latest), true
+}
+
+func statusPriority(status Status) int {
+	switch status {
+	case StatusWaitingPermission:
+		return 0
+	case StatusToolRunning, StatusCompacting:
+		return 1
+	case StatusRunning:
+		return 2
+	case StatusIdle, StatusUnknown:
+		return 3
+	case StatusStopped:
+		return 4
+	default:
+		return 3
+	}
 }
 
 func matchesFilter(session Session, filter ListFilter) bool {

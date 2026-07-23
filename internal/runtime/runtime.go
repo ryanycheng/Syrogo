@@ -64,6 +64,8 @@ const (
 	UsageStatusError   UsageStatus = "error"
 
 	ContextKeyRequestID contextKey = "request_id"
+	ContextKeySessionID contextKey = "session_id"
+	ContextKeyAgent     contextKey = "agent"
 )
 
 type ContentPart struct {
@@ -114,10 +116,12 @@ type Request struct {
 }
 
 type Usage struct {
-	InputTokens  int
-	OutputTokens int
-	TotalTokens  int
-	Source       UsageSource
+	InputTokens            int
+	OutputTokens           int
+	CachedInputReadTokens  int
+	CachedInputWriteTokens int
+	TotalTokens            int
+	Source                 UsageSource
 }
 
 type UsageBreakdown struct {
@@ -146,6 +150,9 @@ type UsageRecord struct {
 	UsageSource      UsageSource
 	Status           UsageStatus
 	ErrorKind        string
+	SessionID        string
+	Agent            string
+	CostUSD          float64
 	Breakdown        UsageBreakdown
 	StartedAt        string
 	FinishedAt       string

@@ -16,6 +16,9 @@ fmt:
 test:
 	go test ./...
 
+update-pricing:
+	./scripts/update_pricing.py
+
 smoke:
 	./scripts/smoke.sh
 

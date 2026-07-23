@@ -10,10 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ryanycheng/Syrogo/internal/accounting"
 	"github.com/ryanycheng/Syrogo/internal/config"
 	"github.com/ryanycheng/Syrogo/internal/execution"
 	"github.com/ryanycheng/Syrogo/internal/latency"
+	"github.com/ryanycheng/Syrogo/internal/logging"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/router"
@@ -25,6 +25,7 @@ type Handler struct {
 	runtime        atomic.Value
 	registry       *InboundRegistry
 	logger         *slog.Logger
+	recentLogs     *logging.RecentBuffer
 	configReloader ConfigReloader
 
 	accounting   config.AccountingConfig
@@ -101,8 +102,25 @@ func (w *loggingResponseWriter) Flush() {
 	}
 }
 
-func withRequestID(ctx context.Context, requestID string) context.Context {
-	return context.WithValue(ctx, runtime.ContextKeyRequestID, requestID)
+func withRequestContext(ctx context.Context, requestID string, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, sessionStore *sessions.Store) context.Context {
+	ctx = context.WithValue(ctx, runtime.ContextKeyRequestID, requestID)
+	sessionID := strings.TrimSpace(r.Header.Get("X-Syrogo-Session-ID"))
+	agent := strings.TrimSpace(r.Header.Get("X-Syrogo-Agent"))
+	if sessionID == "" && sessionStore != nil {
+		if session, ok := sessionStore.LatestActive(client.Name, inbound.Name); ok {
+			sessionID = session.ID
+			if agent == "" && len(session.Command) > 0 {
+				agent = session.Command[0]
+			}
+		}
+	}
+	if sessionID != "" {
+		ctx = context.WithValue(ctx, runtime.ContextKeySessionID, sessionID)
+	}
+	if agent != "" {
+		ctx = context.WithValue(ctx, runtime.ContextKeyAgent, agent)
+	}
+	return ctx
 }
 
 func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
@@ -163,7 +181,7 @@ func (h *Handler) ApplyRuntime(state RuntimeState) {
 
 func (h *Handler) runtimeState() RuntimeState {
 	state, _ := h.runtime.Load().(RuntimeState)
-	if h.accounting != (config.AccountingConfig{}) {
+	if hasAccountingOverride(h.accounting) {
 		state.Accounting = h.accounting
 	}
 	if h.admin != (config.AdminConfig{}) {
@@ -175,8 +193,16 @@ func (h *Handler) runtimeState() RuntimeState {
 	return state
 }
 
+func hasAccountingOverride(cfg config.AccountingConfig) bool {
+	return cfg.Enabled || cfg.Backend != "" || cfg.ExposeHTTP || cfg.AdminToken != "" || cfg.LocalFile != (config.AccountingLocalFileConfig{}) || len(cfg.Pricing) > 0
+}
+
 func (h *Handler) SetConfigReloader(reloader ConfigReloader) {
 	h.configReloader = reloader
+}
+
+func (h *Handler) SetRecentLogs(recentLogs *logging.RecentBuffer) {
+	h.recentLogs = recentLogs
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -192,7 +218,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/session/stopped", h.handleSessionStopped)
 	mux.HandleFunc("/admin/usage", h.withAdminAudit("usage", h.handleAdminUsage))
 	mux.HandleFunc("/admin/quota", h.withAdminAudit("quota", h.handleAdminQuota))
-	mux.HandleFunc("/admin/logs", h.withAdminAudit("logs", h.handleAdminLogs))
+	mux.HandleFunc("/admin/logs", h.withAdminFailureAudit("logs", h.handleAdminLogs))
 	mux.HandleFunc("/admin/overview", h.withAdminAudit("overview", h.handleAdminOverview))
 	mux.HandleFunc("/admin/latency/summary", h.withAdminAudit("latency_summary", h.handleAdminLatencySummary))
 	mux.HandleFunc("/admin/latency/active", h.withAdminAudit("latency_active", h.handleAdminActiveLatency))
@@ -239,19 +265,12 @@ func (h *Handler) handleUsageStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
-	groupBy := strings.TrimSpace(r.URL.Query().Get("group_by"))
-	if groupBy == "" {
-		groupBy = "key"
+	query, err := parseUsageQuery(r.URL.Query(), time.Now())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	window := accounting.Window(strings.TrimSpace(r.URL.Query().Get("window")))
-	if window == "" {
-		window = accounting.WindowTotal
-	}
-	items, err := h.runtimeState().Dispatcher.QueryUsageBy(accounting.Query{
-		GroupBy: groupBy,
-		Window:  window,
-		Bucket:  strings.TrimSpace(r.URL.Query().Get("bucket")),
-	})
+	items, err := h.runtimeState().Dispatcher.QueryUsageBy(query)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -524,7 +543,6 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	state := h.runtimeState()
 	ctx, latencyRecorder := latency.Start(r.Context(), state.LatencyStore, requestID, r.Method, r.URL.Path, startedAt)
 	lw.recorder = latencyRecorder
-	r = r.WithContext(withRequestID(ctx, requestID))
 	defer func() {
 		latencyRecorder.Finish(lw.statusCode, time.Now())
 	}()
@@ -548,6 +566,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	latencyRecorder.SetRoute(inbound.Name, inbound.Protocol, client.Name, client.Tag)
+	r = r.WithContext(withRequestContext(ctx, requestID, r, inbound, client, h.sessionStore))
 
 	requestLogger := h.logger.With(
 		slog.String("request_id", requestID),

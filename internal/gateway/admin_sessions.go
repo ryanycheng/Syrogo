@@ -27,6 +27,7 @@ func (h *Handler) handleAdminSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
+	h.sessionStore.PruneStopped(sessions.DefaultStoppedRetention)
 	items := h.sessionStore.List(sessions.ListFilter{
 		Client: strings.TrimSpace(r.URL.Query().Get("client")),
 		Status: sessions.Status(strings.TrimSpace(r.URL.Query().Get("status"))),

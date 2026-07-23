@@ -33,11 +33,14 @@ type openAIChatStreamChunk struct {
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
-		InputTokens      int `json:"input_tokens"`
-		OutputTokens     int `json:"output_tokens"`
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+		InputTokens         int `json:"input_tokens"`
+		OutputTokens        int `json:"output_tokens"`
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		TotalTokens         int `json:"total_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details,omitempty"`
 	} `json:"usage,omitempty"`
 }
 
@@ -197,11 +200,16 @@ func usageFromOpenAIChatStreamChunk(chunk openAIChatStreamChunk) *runtime.Usage 
 	if outputTokens == 0 {
 		outputTokens = chunk.Usage.CompletionTokens
 	}
+	cachedTokens := 0
+	if chunk.Usage.PromptTokensDetails != nil {
+		cachedTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+	}
 	return &runtime.Usage{
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-		TotalTokens:  chunk.Usage.TotalTokens,
-		Source:       runtime.UsageSourceProvider,
+		InputTokens:           inputTokens,
+		OutputTokens:          outputTokens,
+		CachedInputReadTokens: cachedTokens,
+		TotalTokens:           chunk.Usage.TotalTokens,
+		Source:                runtime.UsageSourceProvider,
 	}
 }
 
