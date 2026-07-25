@@ -1,8 +1,11 @@
 package config
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -1019,7 +1022,7 @@ func TestConfigValidateRequiresPositiveOutboundQuotaDuration(t *testing.T) {
 	}
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "outbounds.mock.quota.windows[0].duration must be a positive duration" {
+	if err == nil || err.Error() != "outbounds.mock.quota.windows[0].duration must be a positive duration when reset=rolling" {
 		t.Fatalf("Validate() error = %v, want invalid quota duration error", err)
 	}
 }
@@ -1034,8 +1037,8 @@ func TestConfigValidateRequiresPositiveOutboundQuotaLimit(t *testing.T) {
 	}
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "outbounds.mock.quota.windows[0].max_requests must be greater than 0" {
-		t.Fatalf("Validate() error = %v, want invalid quota limit error", err)
+	if err == nil || err.Error() != "outbounds.mock.quota.windows[0] requires max_requests or max_tokens greater than 0" {
+		t.Fatalf("Validate() error = %v, want missing quota limits error", err)
 	}
 }
 
@@ -1087,6 +1090,247 @@ func TestLoadParsesOutboundQuotaWindows(t *testing.T) {
 	}
 	if len(quota.Windows) != 2 || quota.Windows[0].Name != "five-hour" || quota.Windows[1].MaxRequests != 1000 {
 		t.Fatalf("quota.Windows = %#v, want parsed windows", quota.Windows)
+	}
+}
+
+func TestParseBytesSupportsOutboundQuotaResetSchemas(t *testing.T) {
+	base := `
+server:
+  listen: ":8080"
+outbounds:
+  - name: mock
+    protocol: mock
+    tag: mock-tag
+    quota:
+      enabled: true
+      cooldown: 10m
+      probe_interval: 1m
+%s
+routing:
+  rules:
+    - from_tags: [office]
+      to_tags: [mock-tag]
+      strategy: failover
+`
+	cases := []struct {
+		name  string
+		quota string
+		check func(*testing.T, OutboundQuotaConfig)
+	}{
+		{
+			name: "legacy rolling requests",
+			quota: `      windows:
+        - name: hourly
+          duration: 1h
+          max_requests: 100`,
+			check: func(t *testing.T, quota OutboundQuotaConfig) {
+				window := quota.Windows[0]
+				if window.Reset != "rolling" || window.Duration != "1h" || window.MaxRequests != 100 || window.MaxTokens != 0 {
+					t.Fatalf("window = %#v, want equivalent rolling request window", window)
+				}
+			},
+		},
+		{
+			name: "rolling tokens",
+			quota: `      windows:
+        - name: token-hour
+          reset: rolling
+          duration: 1h
+          max_tokens: 200000`,
+		},
+		{
+			name: "fixed interval",
+			quota: `      windows:
+        - name: anchored
+          reset: fixed
+          duration: 6h
+          fixed:
+            period: interval
+            anchor: "2026-01-02T03:04:05+08:00"
+          max_requests: 100
+          max_tokens: 200000`,
+		},
+		{
+			name: "fixed daily",
+			quota: `      windows:
+        - name: daily
+          reset: fixed
+          fixed:
+            period: daily
+            time: "09:30:15"
+            timezone: Asia/Shanghai
+          max_requests: 100`,
+		},
+		{
+			name: "fixed weekly and weekly reset all",
+			quota: `      windows:
+        - name: weekly
+          reset: fixed
+          fixed:
+            period: weekly
+            time: "09:30"
+            timezone: Europe/London
+            weekday: monday
+          max_tokens: 1000000
+      reset_all:
+        enabled: true
+        schedule:
+          period: weekly
+          time: "00:00"
+          timezone: UTC
+          weekday: sunday`,
+		},
+		{
+			name: "interval reset all",
+			quota: `      windows:
+        - name: hourly
+          duration: 1h
+          max_requests: 100
+      reset_all:
+        enabled: true
+        schedule:
+          period: interval
+          duration: 24h
+          anchor: "2026-01-02T00:00:00Z"`,
+		},
+		{
+			name: "disabled empty reset all",
+			quota: `      windows:
+        - name: hourly
+          duration: 1h
+          max_requests: 100
+      reset_all:
+        enabled: false`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := ParseBytes([]byte(fmt.Sprintf(base, tc.quota)))
+			if err != nil {
+				t.Fatalf("ParseBytes() error = %v", err)
+			}
+			if tc.check != nil {
+				tc.check(t, cfg.Outbounds[0].Quota)
+			}
+		})
+	}
+}
+
+func TestParseBytesRejectsInvalidOutboundQuotaResetSchemas(t *testing.T) {
+	base := `
+server:
+  listen: ":8080"
+outbounds:
+  - name: mock
+    protocol: mock
+    tag: mock-tag
+    quota:
+      enabled: true
+      cooldown: 10m
+      probe_interval: 1m
+%s
+routing:
+  rules:
+    - from_tags: [office]
+      to_tags: [mock-tag]
+      strategy: failover
+`
+	cases := []struct {
+		name  string
+		quota string
+	}{
+		{"negative requests", `      windows: [{name: bad, duration: 1h, max_requests: -1}]`},
+		{"negative tokens", `      windows: [{name: bad, duration: 1h, max_tokens: -1}]`},
+		{"no limits", `      windows: [{name: bad, duration: 1h}]`},
+		{"unsupported reset", `      windows: [{name: bad, reset: calendar, duration: 1h, max_requests: 1}]`},
+		{"rolling missing duration", `      windows: [{name: bad, reset: rolling, max_requests: 1}]`},
+		{"rolling fixed conflict", `      windows:
+        - name: bad
+          duration: 1h
+          fixed: {period: daily, time: "09:00", timezone: UTC}
+          max_requests: 1`},
+		{"fixed interval missing duration", `      windows:
+        - name: bad
+          reset: fixed
+          fixed: {period: interval, anchor: "2026-01-02T00:00:00Z"}
+          max_requests: 1`},
+		{"fixed interval anchor missing offset", `      windows:
+        - name: bad
+          reset: fixed
+          duration: 1h
+          fixed: {period: interval, anchor: "2026-01-02T00:00:00"}
+          max_requests: 1`},
+		{"fixed interval wall clock conflict", `      windows:
+        - name: bad
+          reset: fixed
+          duration: 1h
+          fixed: {period: interval, anchor: "2026-01-02T00:00:00Z", time: "09:00"}
+          max_requests: 1`},
+		{"fixed daily duration conflict", `      windows:
+        - name: bad
+          reset: fixed
+          duration: 24h
+          fixed: {period: daily, time: "09:00", timezone: UTC}
+          max_requests: 1`},
+		{"fixed daily invalid time", `      windows:
+        - name: bad
+          reset: fixed
+          fixed: {period: daily, time: "25:00", timezone: UTC}
+          max_requests: 1`},
+		{"fixed daily invalid timezone", `      windows:
+        - name: bad
+          reset: fixed
+          fixed: {period: daily, time: "09:00", timezone: Mars/Olympus}
+          max_requests: 1`},
+		{"fixed weekly missing weekday", `      windows:
+        - name: bad
+          reset: fixed
+          fixed: {period: weekly, time: "09:00", timezone: UTC}
+          max_requests: 1`},
+		{"reset all missing schedule", `      windows: [{name: hourly, duration: 1h, max_requests: 1}]
+      reset_all: {enabled: true}`},
+		{"reset all interval missing anchor", `      windows: [{name: hourly, duration: 1h, max_requests: 1}]
+      reset_all:
+        enabled: true
+        schedule: {period: interval, duration: 24h}`},
+		{"reset all daily interval conflict", `      windows: [{name: hourly, duration: 1h, max_requests: 1}]
+      reset_all:
+        enabled: true
+        schedule: {period: daily, duration: 24h, time: "00:00", timezone: UTC}`},
+		{"reset all weekly invalid weekday", `      windows: [{name: hourly, duration: 1h, max_requests: 1}]
+      reset_all:
+        enabled: true
+        schedule: {period: weekly, time: "00:00", timezone: UTC, weekday: someday}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseBytes([]byte(fmt.Sprintf(base, tc.quota))); err == nil {
+				t.Fatal("ParseBytes() error = nil, want quota schema validation error")
+			}
+		})
+	}
+}
+
+func TestOutboundQuotaContractJSONUsesSnakeCase(t *testing.T) {
+	quota := OutboundQuotaConfig{
+		Enabled: true,
+		Windows: []OutboundQuotaWindowConfig{{
+			Name:      "weekly",
+			Reset:     "fixed",
+			Fixed:     QuotaFixedScheduleConfig{Period: "weekly", Time: "09:00", Timezone: "UTC", Weekday: "monday"},
+			MaxTokens: 1000,
+		}},
+		ResetAll: QuotaResetAllConfig{Enabled: true, Schedule: QuotaResetScheduleConfig{Period: "daily", Time: "00:00", Timezone: "UTC"}},
+	}
+	data, err := json.Marshal(quota)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	text := string(data)
+	for _, key := range []string{`"max_tokens"`, `"max_requests"`, `"reset_all"`, `"timezone"`} {
+		if !strings.Contains(text, key) {
+			t.Fatalf("JSON = %s, want key %s", text, key)
+		}
 	}
 }
 
@@ -1198,6 +1442,82 @@ func TestConfigValidateSupportsMemoryAccounting(t *testing.T) {
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigValidateOutboundModelsContract(t *testing.T) {
+	t.Run("empty is unrestricted", func(t *testing.T) {
+		cfg := validConfig()
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("mock supports models and case is significant", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Outbounds[0].Models = []OutboundModelSpec{
+			{Name: "GPT-4", Aliases: []string{"premium"}},
+			{Name: "gpt-4", Aliases: []string{"Premium"}},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	cases := []struct {
+		name   string
+		models []OutboundModelSpec
+	}{
+		{name: "empty canonical", models: []OutboundModelSpec{{Name: ""}}},
+		{name: "untrimmed canonical", models: []OutboundModelSpec{{Name: " gpt-4"}}},
+		{name: "empty alias", models: []OutboundModelSpec{{Name: "gpt-4", Aliases: []string{""}}}},
+		{name: "untrimmed alias", models: []OutboundModelSpec{{Name: "gpt-4", Aliases: []string{"fast "}}}},
+		{name: "duplicate canonical", models: []OutboundModelSpec{{Name: "gpt-4"}, {Name: "gpt-4"}}},
+		{name: "duplicate alias", models: []OutboundModelSpec{{Name: "gpt-4", Aliases: []string{"fast"}}, {Name: "gpt-4o", Aliases: []string{"fast"}}}},
+		{name: "alias conflicts canonical", models: []OutboundModelSpec{{Name: "gpt-4", Aliases: []string{"gpt-4o"}}, {Name: "gpt-4o"}}},
+		{name: "canonical conflicts alias", models: []OutboundModelSpec{{Name: "gpt-4"}, {Name: "gpt-4o", Aliases: []string{"gpt-4"}}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Outbounds[0].Models = tc.models
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate() error = nil, want models validation error")
+			}
+		})
+	}
+}
+
+func TestOutboundModelsRoundTripUsesSnakeCase(t *testing.T) {
+	data := []byte(`
+server:
+  listen: ":8080"
+outbounds:
+  - name: mock
+    protocol: mock
+    tag: mock-tag
+    models:
+      - name: gpt-4o
+        aliases: [latest, fast]
+routing:
+  rules:
+    - from_tags: [office]
+      to_tags: [mock-tag]
+      strategy: failover
+`)
+	cfg, err := ParseBytes(data)
+	if err != nil {
+		t.Fatalf("ParseBytes() error = %v", err)
+	}
+	if got := cfg.Outbounds[0].Models; len(got) != 1 || got[0].Name != "gpt-4o" || len(got[0].Aliases) != 2 {
+		t.Fatalf("models = %#v, want parsed canonical and aliases", got)
+	}
+	encoded, err := json.Marshal(cfg.Outbounds[0].Models[0])
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if text := string(encoded); !strings.Contains(text, `"name"`) || !strings.Contains(text, `"aliases"`) || strings.Contains(text, `"Name"`) {
+		t.Fatalf("JSON = %s, want snake_case contract", text)
 	}
 }
 

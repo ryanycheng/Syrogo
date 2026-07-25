@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -34,8 +35,11 @@ type Handler struct {
 	sessionStore *sessions.Store
 }
 
+type ConfigMutation func(config.Config) (config.Config, error)
+
 type ConfigReloader interface {
 	ApplyConfig(context.Context) (ReloadResult, error)
+	MutateConfig(context.Context, string, ConfigMutation) (ReloadResult, error)
 	History() []HistoryItem
 	HistoryDiff(id string) (HistoryDiff, error)
 	Rollback(context.Context, string) (ReloadResult, error)
@@ -43,6 +47,7 @@ type ConfigReloader interface {
 
 type ReloadResult struct {
 	OK              bool   `json:"ok"`
+	Saved           bool   `json:"saved"`
 	Applied         bool   `json:"applied"`
 	RestartRequired bool   `json:"restart_required"`
 	Reason          string `json:"reason,omitempty"`
@@ -680,16 +685,128 @@ func (h *Handler) planRequest(ctx context.Context, req runtime.Request, inbound 
 	return plan, err
 }
 
-func gatewayError(err error) (int, string) {
-	switch provider.NormalizeError(err) {
+type executionErrorResponse struct {
+	StatusCode int
+	Message    string
+	Type       string
+	Code       string
+	RequestID  string
+	RetryAfter string
+}
+
+func gatewayError(err error) executionErrorResponse {
+	kind := provider.NormalizeError(err)
+	response := executionErrorResponse{
+		StatusCode: http.StatusBadGateway,
+		Message:    "upstream request failed",
+		Type:       "api_error",
+		Code:       string(kind),
+	}
+
+	switch kind {
 	case provider.ErrorKindQuotaExceeded:
-		return http.StatusBadGateway, "upstream quota exceeded"
+		response.StatusCode = http.StatusTooManyRequests
+		response.Message = "upstream quota exceeded"
+		response.Type = "rate_limit_error"
+		response.Code = "rate_limit_exceeded"
 	case provider.ErrorKindRetryable, provider.ErrorKindTimeout, provider.ErrorKindUpstreamServerError:
-		return http.StatusBadGateway, "upstream temporarily unavailable"
-	case provider.ErrorKindAuthFailed, provider.ErrorKindCapabilityUnsupported, provider.ErrorKindFatal:
-		return http.StatusBadGateway, err.Error()
+		response.Message = "upstream temporarily unavailable"
+		response.Type = "api_error"
+	case provider.ErrorKindAuthFailed:
+		response.Message = "upstream authentication failed"
+		response.Type = "authentication_error"
+	case provider.ErrorKindCapabilityUnsupported:
+		response.Message = err.Error()
+		response.Type = "invalid_request_error"
+	case provider.ErrorKindModelUnavailable:
+		response.StatusCode = http.StatusNotFound
+		response.Message = err.Error()
+		response.Type = "invalid_request_error"
+		response.Code = "model_not_found"
+	case provider.ErrorKindFatal:
+		response.Message = "upstream request failed"
+		response.Type = "api_error"
 	default:
-		return http.StatusInternalServerError, err.Error()
+		response.StatusCode = http.StatusInternalServerError
+		response.Message = "internal server error"
+		response.Type = "api_error"
+		response.Code = "internal_error"
+	}
+
+	var providerErr *provider.ProviderError
+	if provider.AsProviderError(err, &providerErr) && providerErr != nil {
+		response.RequestID = safeExecutionMetadata(providerErr.RequestID)
+		response.RetryAfter = safeExecutionRetryAfter(providerErr.RetryAfter)
+	}
+	if response.RequestID != "" {
+		response.Message += " (request_id: " + response.RequestID + ")"
+	}
+	return response
+}
+
+func safeExecutionMetadata(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 256 || strings.ContainsAny(value, "\r\n") {
+		return ""
+	}
+	return value
+}
+
+func safeExecutionRetryAfter(value string) string {
+	value = safeExecutionMetadata(value)
+	if value == "" {
+		return ""
+	}
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil {
+		return strconv.FormatUint(seconds, 10)
+	}
+	if retryAt, err := http.ParseTime(value); err == nil {
+		return retryAt.UTC().Format(http.TimeFormat)
+	}
+	return ""
+}
+
+func writeRoutingError(w http.ResponseWriter, protocol string, err error) {
+	if provider.NormalizeError(err) != provider.ErrorKindUnknown {
+		writeExecutionError(w, protocol, err)
+		return
+	}
+	writeError(w, http.StatusBadRequest, err.Error())
+}
+
+func writeExecutionError(w http.ResponseWriter, protocol string, err error) {
+	response := gatewayError(err)
+	if response.RequestID != "" {
+		switch protocol {
+		case "anthropic_messages":
+			w.Header().Set("request-id", response.RequestID)
+		case "openai_chat", "openai_responses":
+			w.Header().Set("x-request-id", response.RequestID)
+		}
+	}
+	if response.RetryAfter != "" {
+		w.Header().Set("Retry-After", response.RetryAfter)
+	}
+
+	switch protocol {
+	case "anthropic_messages":
+		writeJSON(w, response.StatusCode, map[string]any{
+			"type": "error",
+			"error": map[string]string{
+				"type":    response.Type,
+				"message": response.Message,
+			},
+		})
+	case "openai_chat", "openai_responses":
+		writeJSON(w, response.StatusCode, map[string]any{
+			"error": map[string]string{
+				"message": response.Message,
+				"type":    response.Type,
+				"code":    response.Code,
+			},
+		})
+	default:
+		writeError(w, response.StatusCode, response.Message)
 	}
 }
 

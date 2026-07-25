@@ -96,16 +96,16 @@ func (p *AnthropicMessagesProvider) completionWithAPIKey(ctx context.Context, re
 	appendProviderTraceSnapshot(trace)
 
 	if httpResp.StatusCode == http.StatusTooManyRequests {
-		return runtime.Response{}, NewQuotaExceededError(fmt.Errorf("upstream quota exceeded: %s", previewResponseBody(responseBody)))
+		return runtime.Response{}, withResponseMetadata(NewQuotaExceededError(fmt.Errorf("upstream quota exceeded: %s", previewResponseBody(responseBody))), httpResp)
 	}
 	if httpResp.StatusCode >= http.StatusInternalServerError {
-		return runtime.Response{}, NewUpstreamServerError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+		return runtime.Response{}, withResponseMetadata(NewUpstreamServerError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody))), httpResp)
 	}
 	if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
-		return runtime.Response{}, NewAuthFailedError(fmt.Errorf("upstream auth failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+		return runtime.Response{}, withResponseMetadata(NewAuthFailedError(fmt.Errorf("upstream auth failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody))), httpResp)
 	}
 	if httpResp.StatusCode >= http.StatusBadRequest {
-		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream request failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+		return runtime.Response{}, withResponseMetadata(NewFatalError(fmt.Errorf("upstream request failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody))), httpResp)
 	}
 
 	var resp anthropicMessagesEnvelope

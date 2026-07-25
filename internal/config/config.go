@@ -63,21 +63,50 @@ type ClientSpec struct {
 	Name  string            `yaml:"name"`
 	Token string            `yaml:"token"`
 	Tag   string            `yaml:"tag"`
-	Quota ClientQuotaConfig `yaml:"quota"`
+	Quota ClientQuotaConfig `yaml:"quota" json:"quota"`
 }
 
 type ClientQuotaConfig struct {
-	Enabled bool                `yaml:"enabled"`
-	Windows []QuotaWindowConfig `yaml:"windows"`
+	Enabled bool                `yaml:"enabled" json:"enabled"`
+	Windows []QuotaWindowConfig `yaml:"windows" json:"windows"`
 }
 
 type QuotaWindowConfig struct {
-	Name        string        `yaml:"name"`
-	Duration    DurationValue `yaml:"duration"`
-	MaxRequests int           `yaml:"max_requests"`
+	Name        string        `yaml:"name" json:"name"`
+	Duration    DurationValue `yaml:"duration" json:"duration"`
+	MaxRequests int           `yaml:"max_requests" json:"max_requests"`
 }
 
-type OutboundQuotaWindowConfig = QuotaWindowConfig
+type OutboundQuotaWindowConfig struct {
+	Name        string                   `yaml:"name" json:"name"`
+	Reset       string                   `yaml:"reset" json:"reset"`
+	Duration    DurationValue            `yaml:"duration" json:"duration"`
+	Fixed       QuotaFixedScheduleConfig `yaml:"fixed" json:"fixed"`
+	MaxRequests int                      `yaml:"max_requests" json:"max_requests"`
+	MaxTokens   int                      `yaml:"max_tokens" json:"max_tokens"`
+}
+
+type QuotaFixedScheduleConfig struct {
+	Period   string `yaml:"period" json:"period"`
+	Anchor   string `yaml:"anchor" json:"anchor"`
+	Time     string `yaml:"time" json:"time"`
+	Timezone string `yaml:"timezone" json:"timezone"`
+	Weekday  string `yaml:"weekday" json:"weekday"`
+}
+
+type QuotaResetAllConfig struct {
+	Enabled  bool                     `yaml:"enabled" json:"enabled"`
+	Schedule QuotaResetScheduleConfig `yaml:"schedule" json:"schedule"`
+}
+
+type QuotaResetScheduleConfig struct {
+	Period   string        `yaml:"period" json:"period"`
+	Duration DurationValue `yaml:"duration" json:"duration"`
+	Anchor   string        `yaml:"anchor" json:"anchor"`
+	Time     string        `yaml:"time" json:"time"`
+	Timezone string        `yaml:"timezone" json:"timezone"`
+	Weekday  string        `yaml:"weekday" json:"weekday"`
+}
 
 type InboundSpec struct {
 	Name     string       `yaml:"name"`
@@ -107,29 +136,36 @@ type OutboundSpec struct {
 	AuthToken    string               `yaml:"auth_token"`
 	Tag          string               `yaml:"tag"`
 	Enabled      *bool                `yaml:"enabled"`
+	Models       []OutboundModelSpec  `yaml:"models" json:"models"`
 	Capabilities OutboundCapabilities `yaml:"capabilities"`
-	Quota        OutboundQuotaConfig  `yaml:"quota"`
+	Quota        OutboundQuotaConfig  `yaml:"quota" json:"quota"`
 	Proxy        OutboundProxyConfig  `yaml:"proxy"`
 }
 
+type OutboundModelSpec struct {
+	Name    string   `yaml:"name" json:"name"`
+	Aliases []string `yaml:"aliases" json:"aliases"`
+}
+
 type OutboundProxyConfig struct {
-	URL string `yaml:"url"`
+	URL string `yaml:"url" json:"url"`
 }
 
 type OutboundQuotaConfig struct {
-	Enabled       bool                `yaml:"enabled"`
-	Windows       []QuotaWindowConfig `yaml:"windows"`
-	Cooldown      DurationValue       `yaml:"cooldown"`
-	ProbeInterval DurationValue       `yaml:"probe_interval"`
+	Enabled       bool                        `yaml:"enabled" json:"enabled"`
+	Windows       []OutboundQuotaWindowConfig `yaml:"windows" json:"windows"`
+	Cooldown      DurationValue               `yaml:"cooldown" json:"cooldown"`
+	ProbeInterval DurationValue               `yaml:"probe_interval" json:"probe_interval"`
+	ResetAll      QuotaResetAllConfig         `yaml:"reset_all" json:"reset_all"`
 }
 
 type OutboundCapabilities struct {
-	ResponsesPreviousResponseID     *bool  `yaml:"responses_previous_response_id"`
-	ResponsesBuiltinTools           *bool  `yaml:"responses_builtin_tools"`
-	ResponsesToolResultStatusError  *bool  `yaml:"responses_tool_result_status_error"`
-	ResponsesAssistantHistoryNative *bool  `yaml:"responses_assistant_history_native"`
-	UsageEstimation                 bool   `yaml:"usage_estimation"`
-	UsageEstimationMode             string `yaml:"usage_estimation_mode"`
+	ResponsesPreviousResponseID     *bool  `yaml:"responses_previous_response_id" json:"responses_previous_response_id"`
+	ResponsesBuiltinTools           *bool  `yaml:"responses_builtin_tools" json:"responses_builtin_tools"`
+	ResponsesToolResultStatusError  *bool  `yaml:"responses_tool_result_status_error" json:"responses_tool_result_status_error"`
+	ResponsesAssistantHistoryNative *bool  `yaml:"responses_assistant_history_native" json:"responses_assistant_history_native"`
+	UsageEstimation                 bool   `yaml:"usage_estimation" json:"usage_estimation"`
+	UsageEstimationMode             string `yaml:"usage_estimation_mode" json:"usage_estimation_mode"`
 }
 
 type DurationValue string
@@ -271,6 +307,14 @@ func (c *Config) applyDefaults() {
 	}
 	if rotation.MaxTotalSizeMB == 0 {
 		rotation.MaxTotalSizeMB = 1024
+	}
+	for i := range c.Outbounds {
+		for j := range c.Outbounds[i].Quota.Windows {
+			window := &c.Outbounds[i].Quota.Windows[j]
+			if window.Reset == "" {
+				window.Reset = "rolling"
+			}
+		}
 	}
 }
 
@@ -429,6 +473,9 @@ func (c Config) Validate() error {
 				return fmt.Errorf("outbounds.%s.usage_estimation_mode %q is unsupported", outbound.Name, outbound.Capabilities.UsageEstimationMode)
 			}
 		}
+		if err := validateOutboundModels(outbound); err != nil {
+			return err
+		}
 		if err := validateOutboundProxy(outbound); err != nil {
 			return err
 		}
@@ -556,6 +603,31 @@ func validateClientQuota(inboundName string, index int, client ClientSpec) error
 	return validateQuotaWindows(fmt.Sprintf("inbounds.%s.clients[%d].quota", inboundName, index), quota.Windows)
 }
 
+func validateOutboundModels(outbound OutboundSpec) error {
+	seen := make(map[string]string)
+	for i, model := range outbound.Models {
+		prefix := fmt.Sprintf("outbounds.%s.models[%d]", outbound.Name, i)
+		if model.Name == "" || strings.TrimSpace(model.Name) != model.Name {
+			return fmt.Errorf("%s.name must be non-empty and trimmed", prefix)
+		}
+		if owner, ok := seen[model.Name]; ok {
+			return fmt.Errorf("%s.name %q conflicts with %s", prefix, model.Name, owner)
+		}
+		seen[model.Name] = prefix + ".name"
+		for j, alias := range model.Aliases {
+			field := fmt.Sprintf("%s.aliases[%d]", prefix, j)
+			if alias == "" || strings.TrimSpace(alias) != alias {
+				return fmt.Errorf("%s must be non-empty and trimmed", field)
+			}
+			if owner, ok := seen[alias]; ok {
+				return fmt.Errorf("%s %q conflicts with %s", field, alias, owner)
+			}
+			seen[alias] = field
+		}
+	}
+	return nil
+}
+
 func validateOutboundProxy(outbound OutboundSpec) error {
 	proxyURL := strings.TrimSpace(outbound.Proxy.URL)
 	if proxyURL == "" {
@@ -581,7 +653,8 @@ func validateOutboundQuota(outbound OutboundSpec) error {
 	if !quota.Enabled {
 		return nil
 	}
-	if err := validateQuotaWindows(fmt.Sprintf("outbounds.%s.quota", outbound.Name), quota.Windows); err != nil {
+	prefix := fmt.Sprintf("outbounds.%s.quota", outbound.Name)
+	if err := validateOutboundQuotaWindows(prefix, quota.Windows); err != nil {
 		return err
 	}
 	if quota.Cooldown.Duration() <= 0 {
@@ -590,7 +663,164 @@ func validateOutboundQuota(outbound OutboundSpec) error {
 	if quota.ProbeInterval.Duration() <= 0 {
 		return fmt.Errorf("outbounds.%s.quota.probe_interval must be a positive duration", outbound.Name)
 	}
+	if quota.ResetAll.Enabled || quota.ResetAll.Schedule != (QuotaResetScheduleConfig{}) {
+		if err := validateResetSchedule(prefix+".reset_all.schedule", quota.ResetAll.Schedule); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func validateOutboundQuotaWindows(prefix string, windows []OutboundQuotaWindowConfig) error {
+	if len(windows) == 0 {
+		return fmt.Errorf("%s.windows is required when quota is enabled", prefix)
+	}
+	seen := make(map[string]struct{}, len(windows))
+	for i, window := range windows {
+		windowPrefix := fmt.Sprintf("%s.windows[%d]", prefix, i)
+		if window.Name == "" {
+			return fmt.Errorf("%s.name is required", windowPrefix)
+		}
+		if _, ok := seen[window.Name]; ok {
+			return fmt.Errorf("%s.name duplicates %q", windowPrefix, window.Name)
+		}
+		seen[window.Name] = struct{}{}
+		if window.MaxRequests < 0 {
+			return fmt.Errorf("%s.max_requests must be greater than or equal to 0", windowPrefix)
+		}
+		if window.MaxTokens < 0 {
+			return fmt.Errorf("%s.max_tokens must be greater than or equal to 0", windowPrefix)
+		}
+		if window.MaxRequests == 0 && window.MaxTokens == 0 {
+			return fmt.Errorf("%s requires max_requests or max_tokens greater than 0", windowPrefix)
+		}
+		switch window.Reset {
+		case "rolling":
+			if window.Duration.Duration() <= 0 {
+				return fmt.Errorf("%s.duration must be a positive duration when reset=rolling", windowPrefix)
+			}
+			if window.Fixed != (QuotaFixedScheduleConfig{}) {
+				return fmt.Errorf("%s.fixed is only supported when reset=fixed", windowPrefix)
+			}
+		case "fixed":
+			if err := validateFixedWindowSchedule(windowPrefix, window); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("%s.reset %q is unsupported", windowPrefix, window.Reset)
+		}
+	}
+	return nil
+}
+
+func validateFixedWindowSchedule(prefix string, window OutboundQuotaWindowConfig) error {
+	fixed := window.Fixed
+	if fixed.Period == "" {
+		return fmt.Errorf("%s.fixed.period is required when reset=fixed", prefix)
+	}
+	switch fixed.Period {
+	case "interval":
+		if window.Duration.Duration() <= 0 {
+			return fmt.Errorf("%s.duration must be a positive duration when fixed.period=interval", prefix)
+		}
+		if err := validateRFC3339Anchor(prefix+".fixed.anchor", fixed.Anchor); err != nil {
+			return err
+		}
+		if fixed.Time != "" || fixed.Timezone != "" || fixed.Weekday != "" {
+			return fmt.Errorf("%s.fixed time, timezone, and weekday are not supported when period=interval", prefix)
+		}
+	case "daily":
+		if window.Duration != "" || fixed.Anchor != "" || fixed.Weekday != "" {
+			return fmt.Errorf("%s duration, fixed.anchor, and fixed.weekday are not supported when fixed.period=daily", prefix)
+		}
+		return validateWallClock(prefix+".fixed", fixed.Time, fixed.Timezone)
+	case "weekly":
+		if window.Duration != "" || fixed.Anchor != "" {
+			return fmt.Errorf("%s duration and fixed.anchor are not supported when fixed.period=weekly", prefix)
+		}
+		if err := validateWallClock(prefix+".fixed", fixed.Time, fixed.Timezone); err != nil {
+			return err
+		}
+		if !validWeekday(fixed.Weekday) {
+			return fmt.Errorf("%s.fixed.weekday must be monday-sunday", prefix)
+		}
+	default:
+		return fmt.Errorf("%s.fixed.period %q is unsupported", prefix, fixed.Period)
+	}
+	return nil
+}
+
+func validateResetSchedule(prefix string, schedule QuotaResetScheduleConfig) error {
+	switch schedule.Period {
+	case "interval":
+		if schedule.Duration.Duration() <= 0 {
+			return fmt.Errorf("%s.duration must be a positive duration when period=interval", prefix)
+		}
+		if err := validateRFC3339Anchor(prefix+".anchor", schedule.Anchor); err != nil {
+			return err
+		}
+		if schedule.Time != "" || schedule.Timezone != "" || schedule.Weekday != "" {
+			return fmt.Errorf("%s time, timezone, and weekday are not supported when period=interval", prefix)
+		}
+	case "daily":
+		if schedule.Duration != "" || schedule.Anchor != "" || schedule.Weekday != "" {
+			return fmt.Errorf("%s duration, anchor, and weekday are not supported when period=daily", prefix)
+		}
+		return validateWallClock(prefix, schedule.Time, schedule.Timezone)
+	case "weekly":
+		if schedule.Duration != "" || schedule.Anchor != "" {
+			return fmt.Errorf("%s duration and anchor are not supported when period=weekly", prefix)
+		}
+		if err := validateWallClock(prefix, schedule.Time, schedule.Timezone); err != nil {
+			return err
+		}
+		if !validWeekday(schedule.Weekday) {
+			return fmt.Errorf("%s.weekday must be monday-sunday", prefix)
+		}
+	default:
+		return fmt.Errorf("%s.period %q is unsupported", prefix, schedule.Period)
+	}
+	return nil
+}
+
+func validateRFC3339Anchor(field, value string) error {
+	if value == "" {
+		return fmt.Errorf("%s is required", field)
+	}
+	if _, err := time.Parse(time.RFC3339, value); err != nil {
+		return fmt.Errorf("%s must be RFC3339: %w", field, err)
+	}
+	if !strings.HasSuffix(value, "Z") && (len(value) < 6 || (value[len(value)-6] != '+' && value[len(value)-6] != '-')) {
+		return fmt.Errorf("%s must include an explicit offset", field)
+	}
+	return nil
+}
+
+func validateWallClock(prefix, value, timezone string) error {
+	if value == "" {
+		return fmt.Errorf("%s.time is required", prefix)
+	}
+	if _, err := time.Parse("15:04", value); err != nil {
+		if _, secondsErr := time.Parse("15:04:05", value); secondsErr != nil {
+			return fmt.Errorf("%s.time must use HH:MM[:SS]", prefix)
+		}
+	}
+	if timezone == "" {
+		return fmt.Errorf("%s.timezone is required", prefix)
+	}
+	if _, err := time.LoadLocation(timezone); err != nil {
+		return fmt.Errorf("%s.timezone must be a valid IANA timezone", prefix)
+	}
+	return nil
+}
+
+func validWeekday(value string) bool {
+	switch value {
+	case "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateQuotaWindows(prefix string, windows []QuotaWindowConfig) error {

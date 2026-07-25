@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ type providerResourceRequest struct {
 	AuthToken    string                      `json:"auth_token"`
 	Tag          string                      `json:"tag"`
 	Enabled      *bool                       `json:"enabled"`
+	Models       []config.OutboundModelSpec  `json:"models"`
 	Capabilities config.OutboundCapabilities `json:"capabilities"`
 	Quota        config.OutboundQuotaConfig  `json:"quota"`
 	Proxy        config.OutboundProxyConfig  `json:"proxy"`
@@ -70,6 +72,7 @@ type providerResourceResponse struct {
 	AuthToken    string                      `json:"auth_token"`
 	Tag          string                      `json:"tag"`
 	Enabled      bool                        `json:"enabled"`
+	Models       []config.OutboundModelSpec  `json:"models"`
 	Capabilities config.OutboundCapabilities `json:"capabilities"`
 	Quota        config.OutboundQuotaConfig  `json:"quota"`
 	Proxy        config.OutboundProxyConfig  `json:"proxy"`
@@ -178,6 +181,7 @@ func (h *Handler) handleConfigProviders(w http.ResponseWriter, r *http.Request) 
 			AuthToken:    outbound.AuthToken,
 			Tag:          outbound.Tag,
 			Enabled:      config.OutboundEnabled(outbound),
+			Models:       outbound.Models,
 			Capabilities: outbound.Capabilities,
 			Quota:        outbound.Quota,
 			Proxy:        outbound.Proxy,
@@ -199,7 +203,7 @@ func (h *Handler) handleConfigProviderUpsert(w http.ResponseWriter, r *http.Requ
 	if !decodeJSONResourceRequest(w, r, &req) {
 		return
 	}
-	h.writeAdminConfigResource(w, func(cfg config.Config) (config.Config, error) {
+	h.writeAdminConfigMutation(w, r, "provider_upsert_"+req.Name, func(cfg config.Config) (config.Config, error) {
 		next := config.OutboundSpec{
 			Name:         req.Name,
 			Protocol:     req.Protocol,
@@ -207,6 +211,7 @@ func (h *Handler) handleConfigProviderUpsert(w http.ResponseWriter, r *http.Requ
 			AuthToken:    req.AuthToken,
 			Tag:          req.Tag,
 			Enabled:      req.Enabled,
+			Models:       req.Models,
 			Capabilities: req.Capabilities,
 			Quota:        req.Quota,
 			Proxy:        req.Proxy,
@@ -234,7 +239,10 @@ func (h *Handler) handleConfigProviderDelete(w http.ResponseWriter, r *http.Requ
 	if !decodeJSONResourceRequest(w, r, &req) {
 		return
 	}
-	h.writeAdminConfigResource(w, func(cfg config.Config) (config.Config, error) {
+	h.writeAdminConfigMutation(w, r, "provider_delete_"+req.Name, func(cfg config.Config) (config.Config, error) {
+		if err := validateProviderDelete(cfg, req.Name); err != nil {
+			return cfg, err
+		}
 		return config.DeleteOutbound(cfg, req.Name), nil
 	})
 }
@@ -252,7 +260,7 @@ func (h *Handler) handleConfigProviderEnabled(w http.ResponseWriter, r *http.Req
 	if !decodeJSONResourceRequest(w, r, &req) {
 		return
 	}
-	h.writeAdminConfigResource(w, func(cfg config.Config) (config.Config, error) {
+	h.writeAdminConfigMutation(w, r, fmt.Sprintf("provider_enabled_%s_%t", req.Name, req.Enabled), func(cfg config.Config) (config.Config, error) {
 		return config.SetOutboundEnabled(cfg, req.Name, req.Enabled)
 	})
 }
@@ -446,6 +454,58 @@ func (h *Handler) writeAdminConfigResource(w http.ResponseWriter, mutate configR
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": state.ConfigPath, "applied": false})
 	return next, true
+}
+
+func (h *Handler) writeAdminConfigMutation(w http.ResponseWriter, r *http.Request, reason string, mutate ConfigMutation) {
+	if h.configReloader == nil {
+		writeError(w, http.StatusServiceUnavailable, "config reload is not configured")
+		return
+	}
+	result, err := h.configReloader.MutateConfig(r.Context(), reason, mutate)
+	if err != nil {
+		response := map[string]any{
+			"ok":                false,
+			"saved":             result.Saved,
+			"applied":           result.Applied,
+			"restart_required":  result.RestartRequired,
+			"reason":            result.Reason,
+			"history_id":        result.HistoryID,
+			"quota_state_reset": result.QuotaStateReset,
+			"error":             err.Error(),
+		}
+		writeJSON(w, http.StatusBadRequest, response)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func validateProviderDelete(cfg config.Config, name string) error {
+	var tag string
+	found := false
+	for _, outbound := range cfg.Outbounds {
+		if outbound.Name == name {
+			tag = outbound.Tag
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("outbound %q not found", name)
+	}
+	for _, rule := range cfg.Routing.Rules {
+		if slices.Contains(rule.ToTags, tag) {
+			return fmt.Errorf("cannot delete outbound %q: routing rule %q references tag %q", name, rule.Name, tag)
+		}
+		if _, ok := rule.Weights[tag]; ok {
+			return fmt.Errorf("cannot delete outbound %q: routing rule %q weights reference tag %q", name, rule.Name, tag)
+		}
+	}
+	for _, price := range cfg.Accounting.Pricing {
+		if price.Provider == name {
+			return fmt.Errorf("cannot delete outbound %q: accounting pricing references provider %q", name, price.Provider)
+		}
+	}
+	return nil
 }
 
 func decodeJSONResourceRequest(w http.ResponseWriter, r *http.Request, target any) bool {

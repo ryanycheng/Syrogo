@@ -130,6 +130,125 @@ func TestDispatchUsesFallbackStepWhenErrorIsRetryable(t *testing.T) {
 	}
 }
 
+func TestDispatchSelectsPreferredError(t *testing.T) {
+	tests := []struct {
+		name   string
+		errors []error
+	}{
+		{name: "429 then retryable", errors: []error{
+			&provider.ProviderError{Kind: provider.ErrorKindQuotaExceeded, Err: errors.New("upstream 429"), StatusCode: 429, RequestID: "req-429"},
+			provider.NewRetryableError(errors.New("temporary failure")),
+		}},
+		{name: "retryable then 429", errors: []error{
+			provider.NewRetryableError(errors.New("temporary failure")),
+			&provider.ProviderError{Kind: provider.ErrorKindQuotaExceeded, Err: errors.New("upstream 429"), StatusCode: 429, RequestID: "req-429"},
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := accounting.NewMemoryStore()
+			dispatcher := NewDispatcherWithStore(store)
+			steps := make([]runtime.ExecutionStep, 0, len(tt.errors))
+			for _, err := range tt.errors {
+				p := &stubProvider{name: "outbound", err: err}
+				steps = append(steps, runtime.ExecutionStep{Type: runtime.StepTypeOutbound, OutboundName: p.name, OutboundTarget: p, Model: "gpt-4", OnError: runtime.FallbackOnRetryable})
+			}
+
+			_, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{Steps: steps})
+			var providerErr *provider.ProviderError
+			if !provider.AsProviderError(err, &providerErr) || providerErr.StatusCode != 429 || providerErr.RequestID != "req-429" {
+				t.Fatalf("Dispatch() error = %#v, want upstream 429 metadata", err)
+			}
+			records, queryErr := store.RecentRecords(accounting.RecentRecordsQuery{Limit: 10})
+			if queryErr != nil {
+				t.Fatalf("RecentRecords() error = %v", queryErr)
+			}
+			if len(records) != 1 || records[0].ErrorKind != string(provider.ErrorKindQuotaExceeded) {
+				t.Fatalf("accounting records = %#v, want preferred quota_exceeded", records)
+			}
+		})
+	}
+}
+
+func TestDispatchPreferredErrorDoesNotAffectFallbackSuccess(t *testing.T) {
+	dispatcher := NewDispatcher()
+	primary := &stubProvider{name: "primary", err: &provider.ProviderError{Kind: provider.ErrorKindQuotaExceeded, Err: errors.New("upstream 429"), StatusCode: 429}}
+	fallback := &stubProvider{name: "fallback", resp: runtime.Response{Model: "gpt-4"}}
+
+	_, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{
+		{Type: runtime.StepTypeOutbound, OutboundName: primary.name, OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+		{Type: runtime.StepTypeOutbound, OutboundName: fallback.name, OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+	}})
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v, want fallback success", err)
+	}
+	if fallback.req.Model != "gpt-4" {
+		t.Fatalf("fallback req = %#v, want fallback called", fallback.req)
+	}
+}
+
+func TestDispatchSkipsUnavailableModelAndFallsBack(t *testing.T) {
+	dispatcher := NewDispatcher()
+	primary := &stubProvider{name: "primary"}
+	fallback := &stubProvider{name: "fallback", resp: runtime.Response{Model: "fallback-model"}}
+	_, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "client-model"}, runtime.ExecutionPlan{
+		RequestedModel: "client-model",
+		Steps: []runtime.ExecutionStep{
+			{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "client-model", ModelUnavailable: true, OnError: runtime.FallbackOnRetryable},
+			{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "fallback-model", OnError: runtime.FallbackOnRetryable},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if primary.req.Model != "" || fallback.req.Model != "fallback-model" {
+		t.Fatalf("primary req = %#v fallback req = %#v, want unavailable skipped and fallback called", primary.req, fallback.req)
+	}
+}
+
+func TestDispatchAllModelsUnavailable(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "non-stream", true: "stream"}[stream], func(t *testing.T) {
+			dispatcher := NewDispatcher()
+			p := &stubProvider{name: "primary"}
+			plan := runtime.ExecutionPlan{RequestedModel: "secret-model", Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: p, Model: "secret-model", ModelUnavailable: true}}}
+			var err error
+			if stream {
+				_, err = dispatcher.DispatchStream(context.Background(), runtime.Request{Model: "secret-model"}, plan)
+			} else {
+				_, err = dispatcher.Dispatch(context.Background(), runtime.Request{Model: "secret-model"}, plan)
+			}
+			if provider.NormalizeError(err) != provider.ErrorKindModelUnavailable || p.req.Model != "" {
+				t.Fatalf("error = %#v req = %#v, want model unavailable without provider call", err, p.req)
+			}
+		})
+	}
+}
+
+func TestDispatchModelUnavailableDoesNotOverridePreferred429(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "non-stream", true: "stream"}[stream], func(t *testing.T) {
+			dispatcher := NewDispatcher()
+			primary := &stubProvider{name: "primary", err: &provider.ProviderError{Kind: provider.ErrorKindQuotaExceeded, Err: errors.New("upstream 429"), StatusCode: 429}}
+			plan := runtime.ExecutionPlan{RequestedModel: "client-model", Steps: []runtime.ExecutionStep{
+				{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "model-a", OnError: runtime.FallbackOnRetryable},
+				{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: &stubProvider{name: "fallback"}, Model: "client-model", ModelUnavailable: true},
+			}}
+			var err error
+			if stream {
+				_, err = dispatcher.DispatchStream(context.Background(), runtime.Request{Model: "client-model"}, plan)
+			} else {
+				_, err = dispatcher.Dispatch(context.Background(), runtime.Request{Model: "client-model"}, plan)
+			}
+			var providerErr *provider.ProviderError
+			if !provider.AsProviderError(err, &providerErr) || providerErr.Kind != provider.ErrorKindQuotaExceeded || providerErr.StatusCode != 429 {
+				t.Fatalf("error = %#v, want preferred real 429", err)
+			}
+		})
+	}
+}
+
 func TestDispatchDoesNotFallbackWhenErrorIsFatal(t *testing.T) {
 	dispatcher := NewDispatcher()
 	primary := &stubProvider{name: "primary", err: provider.NewFatalError(errors.New("auth failed"))}
@@ -387,6 +506,9 @@ func TestDispatchMarksQuotaExceededCooldownAndProbeRecovery(t *testing.T) {
 	if len(items) != 1 || items[0].State != quota.StateCooldown {
 		t.Fatalf("Snapshot() = %#v, want primary cooldown", items)
 	}
+	if got := items[0].Windows[0]; got.UsedRequests != 0 || got.UsedTokens != 0 {
+		t.Fatalf("quota-exceeded usage = %#v, want no successful request or tokens", got)
+	}
 
 	primary.req = runtime.Request{}
 	fallback.req = runtime.Request{}
@@ -434,8 +556,12 @@ func TestDispatchStreamMarksQuotaExceededCooldown(t *testing.T) {
 	if err == nil {
 		t.Fatal("DispatchStream() error = nil, want quota error")
 	}
-	if items := tracker.Snapshot(); len(items) != 1 || items[0].State != quota.StateCooldown {
+	items := tracker.Snapshot()
+	if len(items) != 1 || items[0].State != quota.StateCooldown {
 		t.Fatalf("Snapshot() = %#v, want cooldown", items)
+	}
+	if got := items[0].Windows[0]; got.UsedRequests != 0 || got.UsedTokens != 0 {
+		t.Fatalf("stream quota-exceeded usage = %#v, want no successful request or tokens", got)
 	}
 }
 func TestDispatchStreamRecordsTTFTMilestones(t *testing.T) {
@@ -534,6 +660,66 @@ func TestDispatchStreamUsesFallbackWhenErrorIsRetryable(t *testing.T) {
 	}
 }
 
+func TestDispatchStreamSelectsPreferredError(t *testing.T) {
+	tests := []struct {
+		name   string
+		errors []error
+	}{
+		{name: "429 then retryable", errors: []error{
+			&provider.ProviderError{Kind: provider.ErrorKindQuotaExceeded, Err: errors.New("upstream 429"), StatusCode: 429, RetryAfter: "10"},
+			provider.NewRetryableError(errors.New("temporary failure")),
+		}},
+		{name: "retryable then 429", errors: []error{
+			provider.NewRetryableError(errors.New("temporary failure")),
+			&provider.ProviderError{Kind: provider.ErrorKindQuotaExceeded, Err: errors.New("upstream 429"), StatusCode: 429, RetryAfter: "10"},
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := accounting.NewMemoryStore()
+			dispatcher := NewDispatcherWithStore(store)
+			steps := make([]runtime.ExecutionStep, 0, len(tt.errors))
+			for _, err := range tt.errors {
+				p := &stubProvider{name: "outbound", err: err}
+				steps = append(steps, runtime.ExecutionStep{Type: runtime.StepTypeOutbound, OutboundName: p.name, OutboundTarget: p, Model: "gpt-4", OnError: runtime.FallbackOnRetryable})
+			}
+
+			_, err := dispatcher.DispatchStream(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{Steps: steps})
+			var providerErr *provider.ProviderError
+			if !provider.AsProviderError(err, &providerErr) || providerErr.StatusCode != 429 || providerErr.RetryAfter != "10" {
+				t.Fatalf("DispatchStream() error = %#v, want upstream 429 metadata", err)
+			}
+			records, queryErr := store.RecentRecords(accounting.RecentRecordsQuery{Limit: 10})
+			if queryErr != nil {
+				t.Fatalf("RecentRecords() error = %v", queryErr)
+			}
+			if len(records) != 1 || records[0].ErrorKind != string(provider.ErrorKindQuotaExceeded) {
+				t.Fatalf("accounting records = %#v, want preferred quota_exceeded", records)
+			}
+		})
+	}
+}
+
+func TestDispatchStreamPreferredErrorDoesNotAffectFallbackSuccess(t *testing.T) {
+	dispatcher := NewDispatcher()
+	primary := &stubProvider{name: "primary", err: &provider.ProviderError{Kind: provider.ErrorKindQuotaExceeded, Err: errors.New("upstream 429"), StatusCode: 429}}
+	fallback := &stubProvider{name: "fallback", streamEvents: []runtime.StreamEvent{{Type: runtime.StreamEventMessageEnd}}}
+
+	events, err := dispatcher.DispatchStream(context.Background(), runtime.Request{Model: "gpt-4"}, runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{
+		{Type: runtime.StepTypeOutbound, OutboundName: primary.name, OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+		{Type: runtime.StepTypeOutbound, OutboundName: fallback.name, OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+	}})
+	if err != nil {
+		t.Fatalf("DispatchStream() error = %v, want fallback success", err)
+	}
+	for range events {
+	}
+	if fallback.req.Model != "gpt-4" || !fallback.req.Stream {
+		t.Fatalf("fallback req = %#v, want stream fallback called", fallback.req)
+	}
+}
+
 func TestDispatchStreamRecordsEventErrorKind(t *testing.T) {
 	store := accounting.NewMemoryStore()
 	dispatcher := NewDispatcherWithStore(store)
@@ -555,6 +741,158 @@ func TestDispatchStreamRecordsEventErrorKind(t *testing.T) {
 	if len(items) != 1 || items[0].Value != "upstream_server_error" || items[0].ErrorCount != 1 {
 		t.Fatalf("items = %#v, want upstream_server_error error_count=1", items)
 	}
+}
+
+func newTokenTracker(names ...string) *quota.Tracker {
+	configs := make([]quota.OutboundConfig, 0, len(names))
+	for _, name := range names {
+		configs = append(configs, quota.OutboundConfig{
+			Name: name,
+			Windows: []quota.WindowConfig{{
+				Name:        "usage",
+				Duration:    time.Hour,
+				MaxRequests: 100,
+				MaxTokens:   10000,
+			}},
+		})
+	}
+	return quota.NewTestTracker(configs, time.Now)
+}
+
+func quotaUsage(t *testing.T, tracker *quota.Tracker, outbound string) (int, int) {
+	t.Helper()
+	for _, item := range tracker.Snapshot() {
+		if item.Outbound == outbound {
+			if len(item.Windows) != 1 {
+				t.Fatalf("quota windows for %q = %#v, want one", outbound, item.Windows)
+			}
+			return item.Windows[0].UsedRequests, item.Windows[0].UsedTokens
+		}
+	}
+	t.Fatalf("quota snapshot has no outbound %q", outbound)
+	return 0, 0
+}
+
+func TestDispatchRecordsNormalizedQuotaTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage *runtime.Usage
+		want  int
+	}{
+		{name: "total tokens preferred", usage: &runtime.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 21}, want: 21},
+		{name: "input output fallback", usage: &runtime.Usage{InputTokens: 10, OutputTokens: 5}, want: 15},
+		{name: "nil usage", usage: nil, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := newTokenTracker("primary")
+			dispatcher := NewDispatcherWithStoreAndQuota(accounting.NewMemoryStore(), tracker)
+			p := &stubProvider{name: "primary", resp: runtime.Response{Model: "gpt-4", Usage: tt.usage}}
+			plan := runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: p, Model: "gpt-4", OnError: runtime.FallbackAlways}}}
+
+			if _, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, plan); err != nil {
+				t.Fatalf("Dispatch() error = %v", err)
+			}
+			requests, tokens := quotaUsage(t, tracker, "primary")
+			if requests != 1 || tokens != tt.want {
+				t.Fatalf("quota usage = requests %d tokens %d, want 1/%d", requests, tokens, tt.want)
+			}
+		})
+	}
+}
+
+func TestDispatchFallbackRecordsOnlySuccessfulOutboundQuota(t *testing.T) {
+	tracker := newTokenTracker("primary", "fallback")
+	dispatcher := NewDispatcherWithStoreAndQuota(accounting.NewMemoryStore(), tracker)
+	primary := &stubProvider{name: "primary", err: provider.NewRetryableError(errors.New("temporary"))}
+	fallback := &stubProvider{name: "fallback", resp: runtime.Response{Model: "gpt-4", Usage: &runtime.Usage{TotalTokens: 17}}}
+	plan := runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{
+		{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "gpt-4", OnError: runtime.FallbackOnRetryable},
+		{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "gpt-4", OnError: runtime.FallbackAlways},
+	}}
+
+	if _, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "gpt-4"}, plan); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if requests, tokens := quotaUsage(t, tracker, "primary"); requests != 0 || tokens != 0 {
+		t.Fatalf("primary quota usage = %d/%d, want 0/0", requests, tokens)
+	}
+	if requests, tokens := quotaUsage(t, tracker, "fallback"); requests != 1 || tokens != 17 {
+		t.Fatalf("fallback quota usage = %d/%d, want 1/17", requests, tokens)
+	}
+}
+
+func TestDispatchStreamRecordsLatestUsageOnce(t *testing.T) {
+	tracker := newTokenTracker("primary")
+	store := accounting.NewMemoryStore()
+	dispatcher := NewDispatcherWithStoreAndQuota(store, tracker)
+	p := &stubProvider{name: "primary", streamEvents: []runtime.StreamEvent{
+		{Type: runtime.StreamEventUsage, Usage: &runtime.Usage{InputTokens: 10, OutputTokens: 2, TotalTokens: 12}},
+		{Type: runtime.StreamEventUsage, Usage: &runtime.Usage{InputTokens: 10, OutputTokens: 8, TotalTokens: 18}},
+		{Type: runtime.StreamEventMessageEnd, Usage: &runtime.Usage{InputTokens: 10, OutputTokens: 11}},
+	}}
+	plan := runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: p, Model: "gpt-4", OnError: runtime.FallbackAlways}}}
+
+	events, err := dispatcher.DispatchStream(context.Background(), runtime.Request{Model: "gpt-4"}, plan)
+	if err != nil {
+		t.Fatalf("DispatchStream() error = %v", err)
+	}
+	for range events {
+	}
+	if requests, tokens := quotaUsage(t, tracker, "primary"); requests != 1 || tokens != 21 {
+		t.Fatalf("quota usage = %d/%d, want 1/21", requests, tokens)
+	}
+	records, err := store.RecentRecords(accounting.RecentRecordsQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("RecentRecords() error = %v", err)
+	}
+	if len(records) != 1 || records[0].Breakdown.TotalTokens != 21 {
+		t.Fatalf("accounting records = %#v, want one record with 21 tokens", records)
+	}
+}
+
+func TestDispatchStreamFailuresDoNotRecordSuccessfulQuota(t *testing.T) {
+	t.Run("stream error", func(t *testing.T) {
+		tracker := newTokenTracker("primary")
+		dispatcher := NewDispatcherWithStoreAndQuota(accounting.NewMemoryStore(), tracker)
+		p := &stubProvider{name: "primary", streamEvents: []runtime.StreamEvent{
+			{Type: runtime.StreamEventUsage, Usage: &runtime.Usage{TotalTokens: 13}},
+			{Type: runtime.StreamEventError, Err: provider.NewUpstreamServerError(errors.New("bad gateway"))},
+		}}
+		plan := runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: p, Model: "gpt-4", OnError: runtime.FallbackAlways}}}
+		events, err := dispatcher.DispatchStream(context.Background(), runtime.Request{Model: "gpt-4"}, plan)
+		if err != nil {
+			t.Fatalf("DispatchStream() error = %v", err)
+		}
+		for range events {
+		}
+		if requests, tokens := quotaUsage(t, tracker, "primary"); requests != 0 || tokens != 0 {
+			t.Fatalf("quota usage = %d/%d, want 0/0", requests, tokens)
+		}
+	})
+
+	t.Run("context cancellation", func(t *testing.T) {
+		tracker := newTokenTracker("primary")
+		dispatcher := NewDispatcherWithStoreAndQuota(accounting.NewMemoryStore(), tracker)
+		providerEvents := make(chan runtime.StreamEvent)
+		p := &controlledStreamProvider{name: "primary", events: providerEvents}
+		ctx, cancel := context.WithCancel(context.Background())
+		plan := runtime.ExecutionPlan{Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: p, Model: "gpt-4", OnError: runtime.FallbackAlways}}}
+		events, err := dispatcher.DispatchStream(ctx, runtime.Request{Model: "gpt-4"}, plan)
+		if err != nil {
+			t.Fatalf("DispatchStream() error = %v", err)
+		}
+		providerEvents <- runtime.StreamEvent{Type: runtime.StreamEventUsage, Usage: &runtime.Usage{TotalTokens: 13}}
+		if event := <-events; event.Type != runtime.StreamEventUsage {
+			t.Fatalf("event = %#v, want usage", event)
+		}
+		cancel()
+		for range events {
+		}
+		if requests, tokens := quotaUsage(t, tracker, "primary"); requests != 0 || tokens != 0 {
+			t.Fatalf("quota usage = %d/%d, want 0/0", requests, tokens)
+		}
+	})
 }
 
 func TestDispatchFailsWhenPlanHasNoSteps(t *testing.T) {

@@ -96,23 +96,62 @@ outbounds:
     endpoint: "https://api.openai.com/v1"
     auth_token: "${OPENAI_API_KEY_PRIMARY}"
     tag: "openai-primary"
+    # Optional provider model allowlist. Empty or omitted means unrestricted.
+    # name is the canonical upstream model; aliases are accepted routed names
+    # that resolve to that canonical name for this provider only.
+    # Route target_model/model_map is applied first. Each fallback provider then
+    # independently resolves that routed model against its own models list.
+    models:
+      - name: "gpt-4o-mini"
+        aliases:
+          - "gpt-4-mini"
+          - "fast"
     # Optional per-outbound proxy. This only affects this outbound, not other providers.
     # proxy:
     #   url: "http://127.0.0.1:7890"
     # Optional outbound-only quota tracker for upstream subscription limits.
-    # Multiple windows can be active at the same time; any exhausted window skips this outbound.
-    # A real upstream 429 enters cooldown and is probed again by real traffic after probe_interval.
+    # Keep disabled/commented until values match the real upstream contract.
+    # Requests and outbound tokens can be limited together; any exhausted dimension/window skips this outbound.
     # quota:
     #   enabled: true
     #   cooldown: "10m"
     #   probe_interval: "1m"
     #   windows:
-    #     - name: "five-hour"
+    #     - name: "rolling-five-hour"
+    #       reset: "rolling"
     #       duration: "5h"
     #       max_requests: 1000
+    #       max_tokens: 2000000
+    #     - name: "fixed-five-hour"
+    #       reset: "fixed"
+    #       duration: "5h"
+    #       fixed:
+    #         period: "interval"
+    #         anchor: "2026-01-01T00:00:00Z"
+    #       max_tokens: 2500000
+    #     - name: "daily"
+    #       reset: "fixed"
+    #       fixed:
+    #         period: "daily"
+    #         time: "04:00"
+    #         timezone: "America/New_York"
+    #       max_requests: 5000
     #     - name: "weekly"
-    #       duration: "168h"
-    #       max_requests: 10000
+    #       reset: "fixed"
+    #       fixed:
+    #         period: "weekly"
+    #         weekday: "monday"
+    #         time: "00:00"
+    #         timezone: "UTC"
+    #       max_requests: 20000
+    #       max_tokens: 40000000
+    #   reset_all:
+    #     enabled: true
+    #     schedule:
+    #       period: "weekly"
+    #       weekday: "sunday"
+    #       time: "00:00"
+    #       timezone: "UTC"
     # Optional platform-side usage fallback when the upstream omits usage.
     # This is a heuristic estimate, not the provider billing truth.
     # capabilities:

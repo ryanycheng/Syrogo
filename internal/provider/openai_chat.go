@@ -168,7 +168,7 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, req run
 		trace.Status = httpResp.StatusCode
 		trace.Response = append(json.RawMessage(nil), responseBody...)
 		appendProviderTraceSnapshot(trace)
-		return nil, NewQuotaExceededError(fmt.Errorf("upstream quota exceeded: %s", previewResponseBody(responseBody)))
+		return nil, withResponseMetadata(NewQuotaExceededError(fmt.Errorf("upstream quota exceeded: %s", previewResponseBody(responseBody))), httpResp)
 	}
 	if httpResp.StatusCode >= http.StatusBadRequest {
 		defer func() {
@@ -179,12 +179,12 @@ func (p *OpenAICompatibleProvider) streamWithAPIKey(ctx context.Context, req run
 		trace.Response = append(json.RawMessage(nil), responseBody...)
 		appendProviderTraceSnapshot(trace)
 		if httpResp.StatusCode >= http.StatusInternalServerError {
-			return nil, NewUpstreamServerError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+			return nil, withResponseMetadata(NewUpstreamServerError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody))), httpResp)
 		}
 		if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
-			return nil, NewAuthFailedError(fmt.Errorf("upstream auth failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+			return nil, withResponseMetadata(NewAuthFailedError(fmt.Errorf("upstream auth failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody))), httpResp)
 		}
-		return nil, NewFatalError(fmt.Errorf("upstream request failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+		return nil, withResponseMetadata(NewFatalError(fmt.Errorf("upstream request failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody))), httpResp)
 	}
 
 	trace.Status = httpResp.StatusCode
@@ -305,16 +305,16 @@ func (p *OpenAICompatibleProvider) completionWithAPIKey(ctx context.Context, req
 	appendProviderTraceSnapshot(trace)
 
 	if httpResp.StatusCode == http.StatusTooManyRequests {
-		return runtime.Response{}, NewQuotaExceededError(fmt.Errorf("upstream quota exceeded: %s", previewResponseBody(responseBody)))
+		return runtime.Response{}, withResponseMetadata(NewQuotaExceededError(fmt.Errorf("upstream quota exceeded: %s", previewResponseBody(responseBody))), httpResp)
 	}
 	if httpResp.StatusCode >= http.StatusInternalServerError {
-		return runtime.Response{}, NewUpstreamServerError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+		return runtime.Response{}, withResponseMetadata(NewUpstreamServerError(fmt.Errorf("upstream server error: %s body=%s", httpResp.Status, previewResponseBody(responseBody))), httpResp)
 	}
 	if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
-		return runtime.Response{}, NewAuthFailedError(fmt.Errorf("upstream auth failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+		return runtime.Response{}, withResponseMetadata(NewAuthFailedError(fmt.Errorf("upstream auth failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody))), httpResp)
 	}
 	if httpResp.StatusCode >= http.StatusBadRequest {
-		return runtime.Response{}, NewFatalError(fmt.Errorf("upstream request failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody)))
+		return runtime.Response{}, withResponseMetadata(NewFatalError(fmt.Errorf("upstream request failed: %s body=%s", httpResp.Status, previewResponseBody(responseBody))), httpResp)
 	}
 
 	switch p.mode {

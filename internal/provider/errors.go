@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"strconv"
+	"strings"
 )
 
 type ErrorKind string
@@ -17,12 +20,85 @@ const (
 	ErrorKindUpstreamServerError   ErrorKind = "upstream_server_error"
 	ErrorKindAuthFailed            ErrorKind = "auth_failed"
 	ErrorKindCapabilityUnsupported ErrorKind = "capability_unsupported"
+	ErrorKindModelUnavailable      ErrorKind = "model_unavailable"
 	ErrorKindFatal                 ErrorKind = "fatal"
 )
 
 type ProviderError struct {
-	Kind ErrorKind
-	Err  error
+	Kind       ErrorKind
+	Err        error
+	StatusCode int
+	RequestID  string
+	RetryAfter string
+}
+
+const maxUpstreamMetadataLength = 256
+
+type responseMetadata struct {
+	StatusCode int
+	RequestID  string
+	RetryAfter string
+}
+
+func extractResponseMetadata(resp *http.Response) responseMetadata {
+	if resp == nil {
+		return responseMetadata{}
+	}
+
+	return responseMetadata{
+		StatusCode: resp.StatusCode,
+		RequestID: firstSafeHeaderValue(resp.Header,
+			"Request-Id",
+			"X-Request-Id",
+		),
+		RetryAfter: safeRetryAfter(resp.Header.Get("Retry-After")),
+	}
+}
+
+func firstSafeHeaderValue(header http.Header, names ...string) string {
+	for _, name := range names {
+		if value := safeMetadataValue(header.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func safeMetadataValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maxUpstreamMetadataLength || strings.ContainsAny(value, "\r\n") {
+		return ""
+	}
+	return value
+}
+
+func safeRetryAfter(value string) string {
+	value = safeMetadataValue(value)
+	if value == "" {
+		return ""
+	}
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil {
+		return strconv.FormatUint(seconds, 10)
+	}
+	if retryAt, err := http.ParseTime(value); err == nil {
+		return retryAt.UTC().Format(http.TimeFormat)
+	}
+	return ""
+}
+
+func withResponseMetadata(err error, resp *http.Response) error {
+	if err == nil {
+		return nil
+	}
+	var providerErr *ProviderError
+	if !AsProviderError(err, &providerErr) || providerErr == nil {
+		return err
+	}
+	metadata := extractResponseMetadata(resp)
+	providerErr.StatusCode = metadata.StatusCode
+	providerErr.RequestID = metadata.RequestID
+	providerErr.RetryAfter = metadata.RetryAfter
+	return err
 }
 
 func (e *ProviderError) Error() string {
@@ -61,6 +137,10 @@ func NewAuthFailedError(err error) error {
 
 func NewCapabilityUnsupportedError(err error) error {
 	return &ProviderError{Kind: ErrorKindCapabilityUnsupported, Err: err}
+}
+
+func NewModelUnavailableError(err error) error {
+	return &ProviderError{Kind: ErrorKindModelUnavailable, Err: err}
 }
 
 func NewFatalError(err error) error {
@@ -132,7 +212,7 @@ func FallbackAllowed(condition string, kind ErrorKind, isLast bool) bool {
 
 func isRecoverable(kind ErrorKind) bool {
 	switch kind {
-	case ErrorKindRetryable, ErrorKindTimeout, ErrorKindQuotaExceeded, ErrorKindUpstreamServerError:
+	case ErrorKindRetryable, ErrorKindTimeout, ErrorKindQuotaExceeded, ErrorKindUpstreamServerError, ErrorKindModelUnavailable:
 		return true
 	default:
 		return false

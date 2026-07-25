@@ -25,13 +25,15 @@ type Options struct {
 }
 
 type App struct {
-	Server             *server.HTTPServer
-	accountingStore    accounting.Store
-	dispatcher         *execution.Dispatcher
-	quotaSnapshotStore *quota.SnapshotStore
-	cfg                config.Config
-	configPath         string
-	reloadManager      *ReloadManager
+	Server               *server.HTTPServer
+	accountingStore      accounting.Store
+	dispatcher           *execution.Dispatcher
+	outboundQuotaTracker *quota.Tracker
+	clientQuotaTracker   *quota.Tracker
+	quotaSnapshotStore   *quota.SnapshotStore
+	cfg                  config.Config
+	configPath           string
+	reloadManager        *ReloadManager
 }
 
 type listenerBinding struct {
@@ -40,12 +42,13 @@ type listenerBinding struct {
 }
 
 type appRuntime struct {
-	router             *router.Router
-	dispatcher         *execution.Dispatcher
-	clientQuotaTracker *quota.Tracker
-	eventRecorder      *quota.EventRecorder
-	latencyStore       *latency.Store
-	quotaSnapshotStore *quota.SnapshotStore
+	router               *router.Router
+	dispatcher           *execution.Dispatcher
+	outboundQuotaTracker *quota.Tracker
+	clientQuotaTracker   *quota.Tracker
+	eventRecorder        *quota.EventRecorder
+	latencyStore         *latency.Store
+	quotaSnapshotStore   *quota.SnapshotStore
 }
 
 func New(cfg config.Config) (*App, error) {
@@ -67,12 +70,14 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 		binding.handler.SetRecentLogs(opts.RecentLogs)
 	}
 	app := &App{
-		Server:             server.NewListeners(listeners),
-		accountingStore:    store,
-		dispatcher:         runtime.dispatcher,
-		quotaSnapshotStore: runtime.quotaSnapshotStore,
-		cfg:                cfg,
-		configPath:         opts.ConfigPath,
+		Server:               server.NewListeners(listeners),
+		accountingStore:      store,
+		dispatcher:           runtime.dispatcher,
+		outboundQuotaTracker: runtime.outboundQuotaTracker,
+		clientQuotaTracker:   runtime.clientQuotaTracker,
+		quotaSnapshotStore:   runtime.quotaSnapshotStore,
+		cfg:                  cfg,
+		configPath:           opts.ConfigPath,
 	}
 	app.reloadManager = NewReloadManager(app, bindings)
 	for _, binding := range bindings {
@@ -82,6 +87,10 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 }
 
 func buildRuntime(cfg config.Config, store accounting.Store) (appRuntime, error) {
+	return buildRuntimeWithTrackers(cfg, store, quota.NewTracker(nil), quota.NewClientTracker(nil), true)
+}
+
+func buildRuntimeWithTrackers(cfg config.Config, store accounting.Store, outboundQuotaTracker, clientQuotaTracker *quota.Tracker, loadSnapshot bool) (appRuntime, error) {
 	providers := make(map[string]provider.Provider, len(cfg.Outbounds))
 	registry := provider.DefaultFactoryRegistry()
 	for _, spec := range cfg.Outbounds {
@@ -99,20 +108,28 @@ func buildRuntime(cfg config.Config, store accounting.Store) (appRuntime, error)
 		providers[spec.Name] = instance
 	}
 
-	enabledOutbounds := make([]config.OutboundSpec, 0, len(cfg.Outbounds))
-	for _, outbound := range cfg.Outbounds {
-		if config.OutboundEnabled(outbound) {
-			enabledOutbounds = append(enabledOutbounds, outbound)
-		}
-	}
-	r, err := router.New(cfg.Routing, providers, enabledOutbounds)
+	enabledOutbounds := enabledOutbounds(cfg)
+	r, err := router.New(cfg.Routing, providers, cfg.Outbounds)
 	if err != nil {
 		return appRuntime{}, err
 	}
 
-	outboundQuotaTracker := quota.NewTrackerFromOutbounds(enabledOutbounds)
-	clientQuotaTracker := quota.NewClientTrackerFromInbounds(cfg.Inbounds)
-	quotaSnapshotStore, err := quota.NewSnapshotStore(cfg.Governance.Quota.Snapshot, outboundQuotaTracker, clientQuotaTracker)
+	if outboundQuotaTracker == nil {
+		outboundQuotaTracker = quota.NewTracker(nil)
+	}
+	if clientQuotaTracker == nil {
+		clientQuotaTracker = quota.NewClientTracker(nil)
+	}
+	if loadSnapshot {
+		outboundQuotaTracker.ReconfigureOutbounds(enabledOutbounds)
+		clientQuotaTracker.ReconfigureInbounds(cfg.Inbounds)
+	}
+	var quotaSnapshotStore *quota.SnapshotStore
+	if hasQuotaConfig(enabledOutbounds, cfg.Inbounds) && loadSnapshot {
+		quotaSnapshotStore, err = quota.NewSnapshotStore(cfg.Governance.Quota.Snapshot, outboundQuotaTracker, clientQuotaTracker)
+	} else if hasQuotaConfig(enabledOutbounds, cfg.Inbounds) {
+		quotaSnapshotStore, err = quota.NewSnapshotStoreWithoutLoad(cfg.Governance.Quota.Snapshot, outboundQuotaTracker, clientQuotaTracker)
+	}
 	if err != nil {
 		return appRuntime{}, err
 	}
@@ -125,13 +142,40 @@ func buildRuntime(cfg config.Config, store accounting.Store) (appRuntime, error)
 	latencyStore := latency.NewStore(200)
 	dispatcher := execution.NewDispatcherWithStoreQuotaHealthEventsLatencyAndPricing(store, outboundQuotaTracker, healthTracker, eventRecorder, latencyStore, accounting.NewPriceCalculator(cfg.Accounting.Pricing))
 	return appRuntime{
-		router:             r,
-		dispatcher:         dispatcher,
-		clientQuotaTracker: clientQuotaTracker,
-		eventRecorder:      eventRecorder,
-		latencyStore:       latencyStore,
-		quotaSnapshotStore: quotaSnapshotStore,
+		router:               r,
+		dispatcher:           dispatcher,
+		outboundQuotaTracker: outboundQuotaTracker,
+		clientQuotaTracker:   clientQuotaTracker,
+		eventRecorder:        eventRecorder,
+		latencyStore:         latencyStore,
+		quotaSnapshotStore:   quotaSnapshotStore,
 	}, nil
+}
+
+func enabledOutbounds(cfg config.Config) []config.OutboundSpec {
+	result := make([]config.OutboundSpec, 0, len(cfg.Outbounds))
+	for _, outbound := range cfg.Outbounds {
+		if config.OutboundEnabled(outbound) {
+			result = append(result, outbound)
+		}
+	}
+	return result
+}
+
+func hasQuotaConfig(outbounds []config.OutboundSpec, inbounds []config.InboundSpec) bool {
+	for _, outbound := range outbounds {
+		if outbound.Quota.Enabled {
+			return true
+		}
+	}
+	for _, inbound := range inbounds {
+		for _, client := range inbound.Clients {
+			if client.Quota.Enabled {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func buildListeners(runtime appRuntime, cfg config.Config, configPath string, sessionStore *sessions.Store, logger *slog.Logger) ([]server.Listener, []listenerBinding) {

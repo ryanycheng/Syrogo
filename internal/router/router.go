@@ -20,9 +20,10 @@ type compiledRule struct {
 }
 
 type Router struct {
-	rules         []compiledRule
-	providers     map[string]provider.Provider
-	outboundByTag map[string][]string
+	rules          []compiledRule
+	providers      map[string]provider.Provider
+	outboundByTag  map[string][]string
+	modelsByTarget map[string]map[string]string
 
 	mu         sync.Mutex
 	roundRobin map[string]int
@@ -30,25 +31,35 @@ type Router struct {
 
 func New(cfg config.RoutingConfig, providers map[string]provider.Provider, outbounds []config.OutboundSpec) (*Router, error) {
 	outboundByTag := make(map[string][]string)
+	declaredTags := make(map[string]struct{})
+	modelsByTarget := make(map[string]map[string]string, len(outbounds))
 	for _, outbound := range outbounds {
+		declaredTags[outbound.Tag] = struct{}{}
+		if !config.OutboundEnabled(outbound) {
+			continue
+		}
 		if _, ok := providers[outbound.Name]; !ok {
 			return nil, fmt.Errorf("outbound %q not found", outbound.Name)
 		}
 		outboundByTag[outbound.Tag] = append(outboundByTag[outbound.Tag], outbound.Name)
+		modelsByTarget[outbound.Name] = compileOutboundModels(outbound.Models)
 	}
 
-	rules := compileRules(cfg.Rules, outboundByTag)
-	for _, rule := range rules {
-		if len(rule.resolvedSet) == 0 {
-			return nil, fmt.Errorf("routing rule %q resolved no outbounds", rule.name)
+	for _, rule := range cfg.Rules {
+		for _, tag := range rule.ToTags {
+			if _, ok := declaredTags[tag]; !ok {
+				return nil, fmt.Errorf("routing rule %q references unknown outbound tag %q", rule.Name, tag)
+			}
 		}
 	}
+	rules := compileRules(cfg.Rules, outboundByTag)
 
 	return &Router{
-		rules:         rules,
-		providers:     providers,
-		outboundByTag: outboundByTag,
-		roundRobin:    make(map[string]int),
+		rules:          rules,
+		providers:      providers,
+		outboundByTag:  outboundByTag,
+		modelsByTarget: modelsByTarget,
+		roundRobin:     make(map[string]int),
 	}, nil
 }
 
@@ -66,6 +77,10 @@ func (r *Router) plan(ctx runtime.RouteContext, mutate bool) (runtime.ExecutionP
 			continue
 		}
 
+		if len(rule.resolvedSet) == 0 {
+			return runtime.ExecutionPlan{}, provider.NewRetryableError(fmt.Errorf("routing rule %q has no enabled outbounds", rule.name))
+		}
+
 		ordered := append([]string(nil), rule.resolvedSet...)
 		switch rule.strategy {
 		case runtime.RoutingStrategyRoundRobin:
@@ -81,15 +96,17 @@ func (r *Router) plan(ctx runtime.RouteContext, mutate bool) (runtime.ExecutionP
 		}
 
 		steps := make([]runtime.ExecutionStep, 0, len(ordered))
-		model := rule.resolveModel(ctx.Request.Model)
+		routedModel := rule.resolveModel(ctx.Request.Model)
 		for _, outboundName := range ordered {
 			target := r.providers[outboundName]
+			model, unavailable := resolveOutboundModel(r.modelsByTarget[outboundName], routedModel)
 			steps = append(steps, runtime.ExecutionStep{
 				Type:             runtime.StepTypeOutbound,
 				OutboundName:     outboundName,
 				OutboundProtocol: providerProtocol(target),
 				OutboundTarget:   target,
 				Model:            model,
+				ModelUnavailable: unavailable,
 				OnError:          runtime.FallbackOnRetryable,
 			})
 		}
@@ -172,6 +189,31 @@ func (r compiledRule) resolveModel(requestedModel string) string {
 		return mapped
 	}
 	return requestedModel
+}
+
+func compileOutboundModels(models []config.OutboundModelSpec) map[string]string {
+	if len(models) == 0 {
+		return nil
+	}
+	resolved := make(map[string]string)
+	for _, model := range models {
+		resolved[model.Name] = model.Name
+		for _, alias := range model.Aliases {
+			resolved[alias] = model.Name
+		}
+	}
+	return resolved
+}
+
+func resolveOutboundModel(models map[string]string, routedModel string) (string, bool) {
+	if models == nil {
+		return routedModel, false
+	}
+	model, ok := models[routedModel]
+	if !ok {
+		return routedModel, true
+	}
+	return model, false
 }
 
 func expandWeightedResolved(rule config.RoutingRule, outboundByTag map[string][]string) []string {

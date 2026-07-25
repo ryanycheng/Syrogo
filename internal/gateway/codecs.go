@@ -12,16 +12,16 @@ import (
 func dispatchOrWriteError(h *Handler, w http.ResponseWriter, r *http.Request, req runtime.Request, plan runtime.ExecutionPlan, logger *slog.Logger) (runtime.Response, bool) {
 	resp, err := h.runtimeState().Dispatcher.Dispatch(r.Context(), req, plan)
 	if err != nil {
-		status, message := gatewayError(err)
+		response := gatewayError(err)
 		errorKind := string(provider.NormalizeError(err))
 		latency.FromContext(r.Context()).SetErrorKind(errorKind)
 		logger.Error("request dispatch failed",
 			slog.String("model", plannedModel(plan)),
 			slog.String("error_kind", errorKind),
-			slog.Int("status", status),
+			slog.Int("status", response.StatusCode),
 			slog.Any("error", err),
 		)
-		writeError(w, status, message)
+		writeExecutionError(w, plan.InboundProtocol, err)
 		return runtime.Response{}, false
 	}
 	return resp, true

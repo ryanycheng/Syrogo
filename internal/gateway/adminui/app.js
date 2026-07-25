@@ -240,7 +240,7 @@ function renderProviderRow(item) {
   const provider = item.provider || {};
   const usage = item.usage || {};
   const state = providerState(item);
-  return `<tr class="${provider.enabled === false ? "disabled-row" : ""}"><td><strong>${escapeHTML(provider.name || "")}</strong><div class="muted endpoint-text">${escapeHTML(provider.endpoint || "local mock")}</div></td><td><div class="info-stack"><span>${badge(provider.protocol || "unknown")}</span><span class="muted">tag: ${escapeHTML(provider.tag || "-")}</span></div></td><td>${providerUsageCell(usage)}</td><td>${providerStatusCell(item)}</td><td>${providerQuotaCell(item.quota, provider.quota)}</td><td>${providerTimeline(item.timeline || [])}</td><td>${providerEnabledSwitch(provider)}</td><td><div class="row-actions"><button class="small" data-provider-edit='${escapeAttr(JSON.stringify(provider))}'>Edit</button><button class="small ghost" data-provider-check="${escapeAttr(provider.name || "")}">Test</button></div></td></tr>`;
+  return `<tr class="${provider.enabled === false ? "disabled-row" : ""}"><td><strong>${escapeHTML(provider.name || "")}</strong><div class="muted endpoint-text">${escapeHTML(provider.endpoint || "local mock")}</div></td><td><div class="info-stack"><span>${badge(provider.protocol || "unknown")}</span><span class="muted">tag: ${escapeHTML(provider.tag || "-")}</span></div></td><td>${providerUsageCell(usage)}</td><td>${providerStatusCell(item)}</td><td>${providerQuotaCell(item.quota, provider.quota)}</td><td>${providerTimeline(item.timeline || [])}</td><td>${providerEnabledSwitch(provider)}</td><td><div class="row-actions"><button class="small" data-provider-edit='${escapeAttr(JSON.stringify(provider))}'>Edit</button><button class="small ghost" data-provider-check="${escapeAttr(provider.name || "")}" data-provider-check-protocol="${escapeAttr(provider.protocol || "")}">Test</button></div></td></tr>`;
 }
 
 function providerUsageCell(usage) {
@@ -272,9 +272,15 @@ function providerHealthCell(health, state) {
 function providerQuotaCell(quota, quotaConfig) {
   if (!quota && !quotaConfig?.enabled) return badge("off", "warn");
   if (!quota) return badge("configured");
-  const windows = (quota.windows || []).map((window) => `${window.name}: ${window.used}/${window.limit}`).join(" · ");
+  const windows = (quota.windows || []).map((window) => {
+    const requests = window.max_requests > 0 ? `${window.used_requests}/${window.max_requests} req` : "";
+    const tokens = window.max_tokens > 0 ? `${window.used_tokens}/${window.max_tokens} tok` : "";
+    const reset = [window.reset, window.fixed_period, window.reset_at ? `reset ${formatTime(window.reset_at)}` : ""].filter(Boolean).join(" · ");
+    return escapeHTML(`${window.name}: ${[requests, tokens, reset].filter(Boolean).join(" / ")}`);
+  }).join("<br>");
   const kind = quota.state === "available" ? "" : "warn";
-  return `${badge(quota.state || "available", kind)}<div class="muted">${escapeHTML(windows || "no windows")}</div>`;
+  const metadata = [quota.cooldown_until ? `cooldown ${formatTime(quota.cooldown_until)}` : "", quota.next_probe_at ? `probe ${formatTime(quota.next_probe_at)}` : "", quota.last_quota_exceeded_at ? `last 429 ${formatTime(quota.last_quota_exceeded_at)}` : ""].filter(Boolean).join(" · ");
+  return `${badge(quota.state || "available", kind)}<div class="muted">${windows || "no windows"}</div>${metadata ? `<div class="muted">${escapeHTML(metadata)}</div>` : ""}`;
 }
 
 function providerTimeline(timeline) {
@@ -304,6 +310,10 @@ function fillProviderForm(item = {}) {
   document.querySelector("#provider-tag").value = item.tag || "";
   document.querySelector("#provider-endpoint").value = item.endpoint || "";
   document.querySelector("#provider-auth-token").value = item.auth_token || "";
+  document.querySelector("#provider-test-model").value = "";
+  document.querySelector("#provider-models-json").value = pretty(item.models || []);
+  document.querySelector("#provider-quota-json").value = pretty(item.quota || { enabled: false, windows: [], cooldown: "10m", probe_interval: "1m" });
+  document.querySelector("#provider-usage-estimation").checked = Boolean(item.capabilities?.usage_estimation);
   document.querySelector("#provider-proxy-url").value = item.proxy?.url || "";
   document.querySelector("#provider-validate-result").className = "inline-status loading hidden";
   document.querySelector("#provider-validate-result").textContent = "";
@@ -318,7 +328,24 @@ function closeProviderModal() {
 }
 
 function providerPayload() {
-  return { name: value("#provider-name"), protocol: value("#provider-protocol"), tag: value("#provider-tag"), endpoint: value("#provider-endpoint"), auth_token: value("#provider-auth-token"), enabled: activeProvider?.enabled !== false, capabilities: activeProvider?.capabilities || {}, quota: activeProvider?.quota || {}, proxy: { url: value("#provider-proxy-url") } };
+  let models;
+  let quota;
+  try {
+    models = JSON.parse(value("#provider-models-json") || "[]");
+    setInvalid("#provider-models-json", false);
+  } catch (_) {
+    models = null;
+  }
+  try {
+    quota = JSON.parse(value("#provider-quota-json") || "{}");
+    setInvalid("#provider-quota-json", false);
+  } catch (_) {
+    quota = null;
+  }
+  const capabilities = { ...(activeProvider?.capabilities || {}) };
+  capabilities.usage_estimation = document.querySelector("#provider-usage-estimation").checked;
+  capabilities.usage_estimation_mode = capabilities.usage_estimation ? "heuristic" : "";
+  return { name: value("#provider-name"), protocol: value("#provider-protocol"), tag: value("#provider-tag"), endpoint: value("#provider-endpoint"), auth_token: value("#provider-auth-token"), enabled: activeProvider?.enabled !== false, models, capabilities, quota, proxy: { url: value("#provider-proxy-url") } };
 }
 
 function validateProviderDraft() {
@@ -327,10 +354,16 @@ function validateProviderDraft() {
   setInvalid("#provider-name", !payload.name);
   setInvalid("#provider-protocol", !payload.protocol);
   const endpointInvalid = payload.protocol !== "mock" && !payload.endpoint;
+  const modelsInvalid = !Array.isArray(payload.models) || payload.models.some((model) => !model || typeof model !== "object" || Array.isArray(model));
+  const quotaInvalid = payload.quota === null || typeof payload.quota !== "object" || Array.isArray(payload.quota);
   setInvalid("#provider-endpoint", endpointInvalid);
+  setInvalid("#provider-models-json", modelsInvalid);
+  setInvalid("#provider-quota-json", quotaInvalid);
   if (!payload.name) issues.push("name is required");
   if (!payload.protocol) issues.push("protocol is required");
   if (endpointInvalid) issues.push("endpoint is required for non-mock providers");
+  if (modelsInvalid) issues.push("models must be a valid JSON array; Core validates canonical names and aliases");
+  if (quotaInvalid) issues.push("quota must be valid JSON object; Core validates its schema");
   const target = document.querySelector("#provider-validate-result");
   if (issues.length > 0) {
     target.className = "inline-status error";
@@ -346,13 +379,14 @@ function setInvalid(selector, invalid) {
   document.querySelector(selector).classList.toggle("invalid", invalid);
 }
 
-async function checkProviderLive(name, draft = null) {
+async function checkProviderLive(name, model, draft = null) {
   if (!name && !draft?.name) return;
   const checkName = name || draft.name;
+  const testModel = String(model || "").trim();
   providerLiveChecks[checkName] = { ok: false, state: "checking", checked_at: new Date().toISOString(), latency_ms: 0 };
   renderFilteredProviders();
   try {
-    const payload = draft ? { name: checkName, provider: draft } : { name: checkName };
+    const payload = draft ? { name: checkName, model: testModel, provider: draft } : { name: checkName, model: testModel };
     const result = await fetchJSON("/admin/config/provider/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     providerLiveChecks[checkName] = result;
     showToast(result.ok ? `${checkName} is live.` : `${checkName} is not reachable.`);
@@ -368,23 +402,44 @@ async function checkProviderLive(name, draft = null) {
 
 async function testProviderForm() {
   if (!validateProviderDraft()) return;
+  const draft = providerPayload();
+  const testModel = value("#provider-test-model");
   const target = document.querySelector("#provider-validate-result");
+  const modelRequired = draft.protocol !== "mock" && !testModel;
+  setInvalid("#provider-test-model", modelRequired);
+  if (modelRequired) {
+    target.className = "inline-status error";
+    target.textContent = "test model is required for non-mock providers";
+    return;
+  }
   target.className = "inline-status loading";
   target.textContent = "Testing provider connection...";
-  const result = await checkProviderLive("", providerPayload());
+  const result = await checkProviderLive("", testModel, draft);
   if (!result) return;
   target.className = result.ok ? "inline-status" : "inline-status error";
   target.textContent = result.ok ? `Connection OK · ${result.latency_ms || 0}ms` : `Connection failed: ${result.error || "unknown error"}`;
 }
 
+async function testProviderFromList(name, protocol) {
+  const model = window.prompt(protocol === "mock" ? "Test model (optional for mock)" : "Test model", "");
+  if (model === null) return;
+  const testModel = model.trim();
+  if (protocol !== "mock" && !testModel) {
+    providerLiveChecks[name] = { ok: false, state: "unavailable", checked_at: new Date().toISOString(), latency_ms: 0, error: "test model is required for non-mock providers" };
+    renderFilteredProviders();
+    return;
+  }
+  await checkProviderLive(name, testModel);
+}
+
 async function setProviderEnabled(name, enabled) {
   if (!name) return;
-  await mutateResource("/admin/config/provider/enabled", { name, enabled }, refreshProviders, `${name} ${enabled ? "enabled" : "disabled"}. Click Apply current file when ready.`);
+  await mutateResource("/admin/config/provider/enabled", { name, enabled }, refreshProviders, `${name} ${enabled ? "enabled" : "disabled"} and applied.`);
 }
 
 async function saveProvider() {
   if (!validateProviderDraft()) return;
-  await mutateResource("/admin/config/provider/upsert", providerPayload(), async () => { closeProviderModal(); await refreshProviders(); }, "Provider saved. Click Apply current file when ready.");
+  await mutateResource("/admin/config/provider/upsert", providerPayload(), async () => { closeProviderModal(); await refreshProviders(); }, "Provider saved and applied.");
 }
 async function deleteProvider() {
   const name = value("#provider-name");
@@ -401,7 +456,7 @@ async function deleteProvider() {
   const invalid = typedName !== name;
   input.classList.toggle("invalid", invalid);
   if (invalid) { showToast("Type the provider name to confirm deletion."); return; }
-  await mutateResource("/admin/config/provider/delete", { name }, async () => { closeProviderModal(); await refreshProviders(); }, "Provider deleted. Click Apply current file when ready.");
+  await mutateResource("/admin/config/provider/delete", { name }, async () => { closeProviderModal(); await refreshProviders(); }, "Provider deleted and applied.");
 }
 
 async function refreshClients() {
@@ -679,7 +734,7 @@ function bindEvents() {
     const enabledInput = event.target.closest("input[data-provider-enabled-name]");
     if (enabledInput) { setProviderEnabled(enabledInput.dataset.providerEnabledName, enabledInput.checked); return; }
     const checkButton = event.target.closest("button[data-provider-check]");
-    if (checkButton) { checkProviderLive(checkButton.dataset.providerCheck); }
+    if (checkButton) { testProviderFromList(checkButton.dataset.providerCheck, checkButton.dataset.providerCheckProtocol); }
   });
   document.querySelector("#refresh-clients").addEventListener("click", refreshClients);
   document.querySelector("#new-client").addEventListener("click", () => fillClientForm());

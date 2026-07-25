@@ -310,6 +310,22 @@ routing:
 
 如果整条规则固定覆盖为一个目标模型，使用 `target_model`；如果要按请求模型逐项映射，使用 `model_map`。同一条规则不能同时配置两者。
 
+每个 outbound 还可以声明自己支持的 canonical 模型名和可选入口 alias：
+
+```yaml
+outbounds:
+  - name: "openai-primary"
+    protocol: "openai_chat"
+    endpoint: "https://api.openai.com/v1"
+    auth_token: "${OPENAI_API_KEY_PRIMARY}"
+    tag: "openai-primary"
+    models:
+      - name: "gpt-4o-mini"
+        aliases: ["gpt-4-mini", "fast"]
+```
+
+省略 `models` 或配置为空列表表示不限制模型。路由会先应用 `target_model` 或 `model_map`，然后每个 fallback provider 再根据自己的 canonical 名称与 alias 独立解析映射后的模型，因此同一 alias 可以在不同 provider 上对应不同的上游模型名。不接受该模型的 provider 会被跳过；如果执行计划中的 provider 都不接受，入口协议会收到 HTTP 404 和 `model_not_found`（或对应协议的错误 envelope）。
+
 ### 9. 配置 outbound 代理
 
 如果某个上游 provider 需要独立网络出口，可以在该 outbound 上配置代理：
@@ -412,7 +428,7 @@ curl http://127.0.0.1:23234/stats/client-quota \
 
 ### 13. 跟踪 outbound 配额窗口
 
-对于存在多个重叠请求限制的上游订阅，可以在 outbound 上启用 outbound-only quota tracker：
+Outbound quota 是 outbound provider 侧保护，与 inbound/client 请求配额相互独立。它可以在多个重叠窗口中同时跟踪请求数与 outbound token：
 
 ```yaml
 outbounds:
@@ -426,20 +442,39 @@ outbounds:
       cooldown: "10m"
       probe_interval: "1m"
       windows:
-        - name: "five-hour"
+        - name: "rolling-five-hour"
+          reset: "rolling"
           duration: "5h"
           max_requests: 1000
+          max_tokens: 2000000
+        - name: "fixed-five-hour"
+          reset: "fixed"
+          duration: "5h"
+          fixed: {period: "interval", anchor: "2026-01-01T00:00:00Z"}
+          max_tokens: 2500000
+        - name: "daily"
+          reset: "fixed"
+          fixed: {period: "daily", time: "04:00", timezone: "America/New_York"}
+          max_requests: 5000
         - name: "weekly"
-          duration: "168h"
-          max_requests: 10000
+          reset: "fixed"
+          fixed: {period: "weekly", weekday: "monday", time: "00:00", timezone: "UTC"}
+          max_requests: 20000
+          max_tokens: 40000000
+      reset_all:
+        enabled: true
+        schedule: {period: "weekly", weekday: "sunday", time: "00:00", timezone: "UTC"}
 ```
 
-当前范围：
+语义与运行限制：
 
-- 只作用于 outbound provider，不做 inbound/client 侧限流
-- 多个窗口会同时生效；任一窗口耗尽都会跳过该 outbound
-- 上游真实返回 429 后会进入 cooldown，并在 `probe_interval` 后通过真实流量探测恢复
-- 第一版只跟踪请求次数，不跟踪 token 或账单额度
+- `reset: rolling` 使用移动 `duration`。Fixed 窗口支持三类：带锚点的 `interval`（例如 5h）、自然日 `daily`、自然周 `weekly`。
+- Daily/weekly 的 `timezone` 必须是 IANA 时区，reset 按该时区的自然时间和 DST 切换执行；interval anchor 必须是带显式 offset 的 RFC3339。
+- `max_requests` 与 `max_tokens` 是相互独立的可选维度，至少一个必须大于 0；任一窗口任一维度耗尽都会跳过 outbound。
+- Token 只在 outbound 成功终态计入。优先使用 provider 返回的 usage；上游缺失 usage 时默认为 0，只有启用 `capabilities.usage_estimation: true` 和 `usage_estimation_mode: heuristic` 才使用启发式估算。估算值只是平台侧估计，不是 provider 账单真值。
+- 准入检查与成功 usage 记账分开，因此并发 in-flight 请求可能按同时成功数超过配置上限。
+- 上游真实 429 会进入 `cooldown`；到 `probe_interval` 后允许一个真实请求探测，探测成功才解除 cooldown。`reset_all` 按计划清空所有 usage 窗口，但不会清除 cooldown/probe 状态。
+- 旧 quota 配置省略 `reset` 时保持兼容，按 rolling 窗口处理。
 
 使用 accounting admin token 查看当前 quota 状态：
 
@@ -450,7 +485,7 @@ curl http://127.0.0.1:23234/stats/quota \
 
 ### 14. 持久化与查看 quota 治理状态
 
-Syrogo 可以把运行时 quota 状态持久化到本地，重启后恢复最近的 client/outbound 窗口与 outbound cooldown：
+Syrogo 可以把运行时 quota 状态持久化到本地，重启后恢复最近的 client/outbound 窗口与 outbound cooldown。Snapshot v2 会保存请求/token 事件及 reset 元数据，并继续兼容读取旧 snapshot。成功 Apply 会按稳定的 subject/window 身份迁移兼容状态（包括 cooldown/probe）；定义已变化或不兼容的窗口会从空状态开始：
 
 ```yaml
 governance:
@@ -515,7 +550,7 @@ admin:
 
 日志会在下一次写入将超过 `max_size_mb` 时轮转，并在本地自然日首次写入时按日轮转。历史文件使用 gzip 压缩，并按保留天数、文件数量和总磁盘占用清理；当前日志文件永不删除。`/admin/logs` 会自动查询当前文件和仍保留的归档。完整落在有界近期缓存内的查询（最近 5 分钟、最多 8 MiB）优先从内存返回；cursor、历史、覆盖不完整或需要分页的查询会自动回退文件，避免遗漏结果。状态筛选支持精确状态码以及 `4xx`、`5xx` 状态族。成功的 `/admin/logs` 自动轮询不会生成 `admin_audit` 日志。
 
-UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/overview`、`/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`、`/admin/config/apply`、`/admin/config/history`、`/admin/config/history/diff`、`/admin/config/rollback`、`/admin/debug/traces`、`/admin/debug/route-dry-run`、`/admin/debug/providers`。Overview 会展示请求、错误、fallback、latency、quota、provider health、最近治理事件，以及 config path、logs 可用性等 Admin 自检摘要卡片。Usage 默认展示最近 7 个 UTC 自然日，并支持 UTC 日期范围和 `group_by` 筛选。Debug 会展示最近 trace 的 matched rule、routing strategy、planned steps、fallback count、spans，并提供无副作用 route dry-run 表单，以及 provider health/quota/event/latency 聚合信息。日志只会读取配置指定的本地日志文件，支持行数/字节限制，会展示 path、是否截断、读取上限等元信息，并对常见 token、key、authorization、secret 字段做脱敏。当前配置读取会返回脱敏展示副本；配置更新前会展示脱敏 diff preview，并要求浏览器二次确认后才写入；Apply 会热加载安全的运行时变更；History/Rollback 会保留并恢复最近的本地配置版本，并支持查看脱敏 diff。Admin API 操作会写入 `admin_audit` 日志，但不会记录 Authorization header、token、请求 body、配置内容或日志内容。它是内置单页控制台，不需要额外前端构建步骤。
+UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/overview`、`/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`、`/admin/config/apply`、`/admin/config/history`、`/admin/config/history/diff`、`/admin/config/rollback`、`/admin/debug/traces`、`/admin/debug/route-dry-run`、`/admin/debug/providers`。Overview 会展示请求、错误、fallback、latency、quota、provider health、最近治理事件，以及 config path、logs 可用性等 Admin 自检摘要卡片。Provider 编辑会完整 round-trip 模型 canonical 名称与 alias，空列表会明确显示为 unrestricted。Provider 保存、启停和删除会原子更新配置并立即热应用，不需要再单独点击 Apply。Usage 默认展示最近 7 个 UTC 自然日，并支持 UTC 日期范围和 `group_by` 筛选。Debug 会展示最近 trace 的 matched rule、routing strategy、planned steps、fallback count、spans，并提供无副作用 route dry-run 表单，以及 provider health/quota/event/latency 聚合信息。日志只会读取配置指定的本地日志文件，支持行数/字节限制，会展示 path、是否截断、读取上限等元信息，并对常见 token、key、authorization、secret 字段做脱敏。当前配置读取会返回脱敏展示副本；配置更新前会展示脱敏 diff preview，并要求浏览器二次确认后才写入；Apply 会热加载安全的运行时变更；History/Rollback 会保留并恢复最近的本地配置版本，并支持查看脱敏 diff。Admin API 操作会写入 `admin_audit` 日志，但不会记录 Authorization header、token、请求 body、配置内容或日志内容。它是内置单页控制台，不需要额外前端构建步骤。
 
 ### 15. 校验配置变更
 
@@ -544,7 +579,7 @@ curl -X POST http://127.0.0.1:23234/admin/config/apply \
   -H 'Authorization: Bearer <admin-ui-token>'
 ```
 
-Apply 会在不重启监听 socket 的前提下重建 provider、routing、quota tracker、health tracking、Admin/accounting token 和 listener 绑定的 inbound。listener 数量、listen 地址、listener 名称或 listener inbound 绑定发生变化时，会返回 `"restart_required": true`，并保持当前运行态不变。成功 apply 会在配置文件同目录的 `.syrogo-history/` 中创建本地配置历史；`/admin/config/history` 可以列出最近版本，`/admin/config/history/diff?id=<history-id>` 会返回脱敏后的当前/历史 YAML 用于对比，`/admin/config/rollback` 可以写回指定版本并 apply。
+Apply 会在不重启监听 socket 的前提下重建 provider（包括模型 canonical 名称与 alias）、routing、quota tracker、health tracking、Admin/accounting token 和 listener 绑定的 inbound。外部工具或人工修改当前配置文件后，需要执行 Apply；通过 Admin UI/API 发起的 Provider mutation 已经会原子保存并自动热应用。listener 数量、listen 地址、listener 名称、listener inbound 绑定，或日志 path/rotation 配置发生变化时，会返回 `"restart_required": true`，并保持当前运行态不变。成功 apply 会在配置文件同目录的 `.syrogo-history/` 中创建本地配置历史；`/admin/config/history` 可以列出最近版本，`/admin/config/history/diff?id=<history-id>` 会返回脱敏后的当前/历史 YAML 用于对比，`/admin/config/rollback` 可以写回指定版本并 apply。
 
 如果要在不改变 round-robin 状态、也不发送模型请求的前提下验证路由结果，可以使用 route dry-run：
 

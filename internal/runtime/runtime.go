@@ -202,6 +202,7 @@ type ExecutionStep struct {
 	OutboundProtocol string
 	OutboundTarget   CompletionProvider
 	Model            string
+	ModelUnavailable bool
 	OnError          FallbackCondition
 }
 

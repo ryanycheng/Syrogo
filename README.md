@@ -310,6 +310,22 @@ routing:
 
 Use `target_model` for one fixed model override, or `model_map` for per-request model mapping. A rule cannot set both.
 
+Each outbound can also declare the canonical models it supports and optional inbound aliases:
+
+```yaml
+outbounds:
+  - name: "openai-primary"
+    protocol: "openai_chat"
+    endpoint: "https://api.openai.com/v1"
+    auth_token: "${OPENAI_API_KEY_PRIMARY}"
+    tag: "openai-primary"
+    models:
+      - name: "gpt-4o-mini"
+        aliases: ["gpt-4-mini", "fast"]
+```
+
+An omitted or empty `models` list is unrestricted. Routing applies `target_model` or `model_map` first; each fallback provider then independently resolves that routed name against its own canonical names and aliases. This lets the same alias map to different upstream names on different providers. A provider that does not accept the routed model is skipped; if no planned provider accepts it, the inbound protocol receives HTTP 404 with `model_not_found` (or its protocol-equivalent error envelope).
+
 ### 9. Configure outbound proxy
 
 If one upstream provider needs a dedicated network exit, configure a proxy on that outbound:
@@ -412,7 +428,7 @@ curl http://127.0.0.1:23234/stats/client-quota \
 
 ### 13. Track outbound quota windows
 
-For upstream subscriptions with overlapping request limits, you can enable outbound-only quota tracking on an outbound:
+Outbound quota is an outbound-provider guard, separate from inbound/client request quotas. It can track requests and outbound tokens across overlapping windows:
 
 ```yaml
 outbounds:
@@ -426,20 +442,39 @@ outbounds:
       cooldown: "10m"
       probe_interval: "1m"
       windows:
-        - name: "five-hour"
+        - name: "rolling-five-hour"
+          reset: "rolling"
           duration: "5h"
           max_requests: 1000
+          max_tokens: 2000000
+        - name: "fixed-five-hour"
+          reset: "fixed"
+          duration: "5h"
+          fixed: {period: "interval", anchor: "2026-01-01T00:00:00Z"}
+          max_tokens: 2500000
+        - name: "daily"
+          reset: "fixed"
+          fixed: {period: "daily", time: "04:00", timezone: "America/New_York"}
+          max_requests: 5000
         - name: "weekly"
-          duration: "168h"
-          max_requests: 10000
+          reset: "fixed"
+          fixed: {period: "weekly", weekday: "monday", time: "00:00", timezone: "UTC"}
+          max_requests: 20000
+          max_tokens: 40000000
+      reset_all:
+        enabled: true
+        schedule: {period: "weekly", weekday: "sunday", time: "00:00", timezone: "UTC"}
 ```
 
-Scope:
+Semantics and operational limits:
 
-- only applies to outbound providers, not inbound/client-side rate limiting
-- multiple windows can be active at the same time; any exhausted window skips the outbound
-- provider 429 responses enter cooldown and are retried by real traffic after `probe_interval`
-- the first version tracks request counts, not token or billing quotas
+- `reset: rolling` uses a moving `duration`. Fixed windows support three schedules: anchored `interval` (for example 5h), wall-clock `daily`, and wall-clock `weekly`.
+- Daily/weekly `timezone` is an IANA zone. Resets follow that zone's civil clock and DST transitions; interval anchors must be RFC3339 with an explicit offset.
+- `max_requests` and `max_tokens` are independent optional dimensions, and at least one must be positive. Any exhausted dimension in any window skips the outbound.
+- Tokens are counted only for successful terminal outbound attempts. Provider-reported usage is preferred; if the upstream omits usage, tokens are zero unless `capabilities.usage_estimation: true` with `usage_estimation_mode: heuristic` is enabled. Heuristic usage is a platform estimate, not provider billing truth.
+- Admission and successful usage recording are separate, so concurrent in-flight requests can overshoot a configured limit by the number of concurrent successes.
+- A real upstream 429 enters `cooldown`. After `probe_interval`, one real request may probe recovery; a successful probe clears cooldown. `reset_all` clears all usage windows on its schedule, but does not clear cooldown/probe state.
+- Existing quota blocks that omit `reset` remain compatible and are treated as rolling windows.
 
 Read current quota state with the accounting admin token:
 
@@ -450,7 +485,7 @@ curl http://127.0.0.1:23234/stats/quota \
 
 ### 14. Persist and inspect quota governance
 
-Syrogo can persist runtime quota state locally so restart recovery keeps recent client/outbound windows and outbound cooldowns:
+Syrogo can persist runtime quota state locally so restart recovery keeps recent client/outbound windows and outbound cooldowns. Snapshot v2 stores request and token events plus reset metadata; legacy snapshots remain readable. A successful Apply migrates compatible quota state by stable subject/window identity (including cooldown/probe state), while changed or incompatible window definitions start clean:
 
 ```yaml
 governance:
@@ -515,7 +550,7 @@ admin:
 
 Log files rotate before a write would exceed `max_size_mb` and at the first write on a new local calendar day. Historical files are compressed with gzip and cleaned by age, file count, and total disk usage; the active file is never removed. `/admin/logs` automatically searches the active file and retained archives. Queries fully covered by the bounded recent cache (last 5 minutes, up to 8 MiB) use memory; cursor, older, incomplete, or multi-page queries fall back to files so results are not omitted. Status filters accept exact codes and families such as `4xx` and `5xx`. Successful `/admin/logs` polling does not emit an `admin_audit` entry.
 
-The UI stores the Admin UI token only in browser local storage and uses `/admin/overview`, `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, `/admin/config/update`, `/admin/config/apply`, `/admin/config/history`, `/admin/config/history/diff`, `/admin/config/rollback`, `/admin/debug/traces`, `/admin/debug/route-dry-run`, and `/admin/debug/providers`. The Overview page shows request, error, fallback, latency, quota, provider health, recent governance event, and Admin self-check summaries such as config path and log availability. Usage defaults to the last seven UTC calendar days and supports explicit UTC date ranges plus `group_by` filters. Debug shows recent traces with matched rule, routing strategy, planned steps, fallback count, spans, a side-effect-free route dry-run form, and provider health/quota/event/latency aggregates. Logs are read only from the configured local log path, support line/byte limits, show path/truncation/read-limit metadata, and are redacted for common token, key, authorization, and secret fields. Current config loading returns a redacted display copy; config updates show a redacted diff preview plus browser confirmation before writing; Apply hot-reloads safe runtime changes and History/Rollback keeps recent local config versions with redacted diff viewing. Admin API operations emit `admin_audit` log entries without recording Authorization headers, tokens, request bodies, config content, or log content. It is an embedded single-page console and does not require a frontend build step.
+The UI stores the Admin UI token only in browser local storage and uses `/admin/overview`, `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, `/admin/config/update`, `/admin/config/apply`, `/admin/config/history`, `/admin/config/history/diff`, `/admin/config/rollback`, `/admin/debug/traces`, `/admin/debug/route-dry-run`, and `/admin/debug/providers`. The Overview page shows request, error, fallback, latency, quota, provider health, recent governance event, and Admin self-check summaries such as config path and log availability. Provider editing round-trips model canonical names and aliases; an empty list is shown as unrestricted. Provider save, enable/disable, and delete mutations atomically update the config and hot-apply the result immediately, so no separate Apply click is needed. Usage defaults to the last seven UTC calendar days and supports explicit UTC date ranges plus `group_by` filters. Debug shows recent traces with matched rule, routing strategy, planned steps, fallback count, spans, a side-effect-free route dry-run form, and provider health/quota/event/latency aggregates. Logs are read only from the configured local log path, support line/byte limits, show path/truncation/read-limit metadata, and are redacted for common token, key, authorization, and secret fields. Current config loading returns a redacted display copy; config updates show a redacted diff preview plus browser confirmation before writing; Apply hot-reloads safe runtime changes and History/Rollback keeps recent local config versions with redacted diff viewing. Admin API operations emit `admin_audit` log entries without recording Authorization headers, tokens, request bodies, config content, or log content. It is an embedded single-page console and does not require a frontend build step.
 
 ### 15. Validate config changes
 
@@ -544,7 +579,7 @@ curl -X POST http://127.0.0.1:23234/admin/config/apply \
   -H 'Authorization: Bearer <admin-ui-token>'
 ```
 
-Apply rebuilds providers, routing, quota trackers, health tracking, Admin/accounting tokens, and listener-bound inbounds without restarting the listening sockets. Listener count, listen address, listener name, or listener inbound binding changes return `"restart_required": true` and keep the current runtime unchanged. Successful apply creates a local config history entry under `.syrogo-history/` next to the config file; `/admin/config/history` lists recent entries, `/admin/config/history/diff?id=<history-id>` returns redacted current/history YAML for comparison, and `/admin/config/rollback` writes one back and applies it.
+Apply rebuilds providers (including their model canonical names and aliases), routing, quota trackers, health tracking, Admin/accounting tokens, and listener-bound inbounds without restarting the listening sockets. Use Apply for external or manual edits to the active config file; Provider mutations made through the Admin UI/API already save and hot-apply atomically. Listener count, listen address, listener name, listener inbound binding, or logging path/rotation configuration changes return `"restart_required": true` and keep the current runtime unchanged. Successful apply creates a local config history entry under `.syrogo-history/` next to the config file; `/admin/config/history` lists recent entries, `/admin/config/history/diff?id=<history-id>` returns redacted current/history YAML for comparison, and `/admin/config/rollback` writes one back and applies it.
 
 To validate routing without changing round-robin state or sending a model request, use route dry-run:
 

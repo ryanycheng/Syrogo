@@ -20,13 +20,13 @@ func (h *Handler) handleOpenAIStreaming(w http.ResponseWriter, r *http.Request, 
 
 	events, err := h.runtimeState().Dispatcher.DispatchStream(r.Context(), req, plan)
 	if err != nil {
-		status, message := gatewayError(err)
+		response := gatewayError(err)
 		logger.Error("stream dispatch failed",
 			kvString("model", plannedModel(plan)),
-			kvInt("status", status),
+			kvInt("status", response.StatusCode),
 			kvAny("error", err),
 		)
-		writeError(w, status, message)
+		writeExecutionError(w, plan.InboundProtocol, err)
 		return
 	}
 
@@ -58,13 +58,13 @@ func (h *Handler) handleOpenAIResponsesStreaming(w http.ResponseWriter, r *http.
 
 	events, err := h.runtimeState().Dispatcher.DispatchStream(r.Context(), req, plan)
 	if err != nil {
-		status, message := gatewayError(err)
+		response := gatewayError(err)
 		logger.Error("stream dispatch failed",
 			kvString("model", plannedModel(plan)),
-			kvInt("status", status),
+			kvInt("status", response.StatusCode),
 			kvAny("error", err),
 		)
-		writeError(w, status, message)
+		writeExecutionError(w, plan.InboundProtocol, err)
 		return
 	}
 
@@ -92,13 +92,13 @@ func (h *Handler) handleAnthropicStreaming(w http.ResponseWriter, r *http.Reques
 
 	runtimeEvents, err := h.runtimeState().Dispatcher.DispatchStream(r.Context(), req, plan)
 	if err != nil {
-		status, message := gatewayError(err)
+		response := gatewayError(err)
 		logger.Error("stream dispatch failed",
 			kvString("model", plannedModel(plan)),
-			kvInt("status", status),
+			kvInt("status", response.StatusCode),
 			kvAny("error", err),
 		)
-		writeError(w, status, message)
+		writeExecutionError(w, plan.InboundProtocol, err)
 		return
 	}
 

@@ -20,6 +20,9 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/latency"
 	internallogging "github.com/ryanycheng/Syrogo/internal/logging"
 	"github.com/ryanycheng/Syrogo/internal/provider"
+	"github.com/ryanycheng/Syrogo/internal/quota"
+	"github.com/ryanycheng/Syrogo/internal/runtime"
+	"gopkg.in/yaml.v3"
 )
 
 func newAdminTestHandler(t *testing.T) *Handler {
@@ -59,7 +62,7 @@ func TestAdminUIReturnsIndexHTMLWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want text/html", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"Admin UI token", "/admin/app.js", "usage-range", "usage-start-date", "usage-end-date", "log-bytes", "logs-meta", "overview-summary", "sessions-table", "sessions-view-cards", "sessions-view-table", "session-status-filter", "live-requests-table", "refresh-live-requests", "config-diff", "Apply current file", "config-history", "Debug", "dry-run-model"} {
+	for _, want := range []string{"Admin UI token", "/admin/app.js", "provider-test-model", "provider-models-json", "Strict JSON array of canonical names and aliases", "An empty array means unrestricted", "each fallback provider then resolves", "atomically update the config and hot-apply", "provider-quota-json", "rolling and fixed interval/daily/weekly", "reset_all", "Usage totals are all-time", "Timeline range", "usage-range", "usage-start-date", "usage-end-date", "log-bytes", "logs-meta", "overview-summary", "sessions-table", "sessions-view-cards", "sessions-view-table", "session-status-filter", "live-requests-table", "refresh-live-requests", "config-diff", "Apply current file", "config-history", "Debug", "dry-run-model"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
@@ -82,10 +85,22 @@ func TestAdminUIReturnsStaticAssetsWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want javascript", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"/admin/sessions", "startSessionsRefresh", "renderSessionCards", "/admin/usage", "/admin/logs", "/admin/overview", "/admin/latency/active", "refreshLiveRequests", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback", "/admin/debug/traces", "/admin/debug/route-dry-run", "/admin/debug/providers", "/admin/config/history/diff"} {
+	for _, want := range []string{"/admin/sessions", "startSessionsRefresh", "data-provider-check-protocol", "model: testModel", "#provider-models-json", "item.models || []", "models = JSON.parse", "models, capabilities", "#provider-quota-json", "max_tokens", "used_tokens", "fixed_period", "last_quota_exceeded_at", "usage_estimation_mode", "renderSessionCards", "/admin/usage", "/admin/logs", "/admin/overview", "/admin/latency/active", "refreshLiveRequests", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback", "/admin/debug/traces", "/admin/debug/route-dry-run", "/admin/debug/providers", "/admin/config/history/diff"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
+	}
+	payloadStart := strings.Index(body, "function providerPayload()")
+	if payloadStart < 0 {
+		t.Fatal("providerPayload function not found")
+	}
+	payloadEnd := strings.Index(body[payloadStart:], "function validateProviderDraft()")
+	if payloadEnd < 0 {
+		t.Fatal("validateProviderDraft function not found")
+	}
+	payloadSource := body[payloadStart : payloadStart+payloadEnd]
+	if strings.Contains(payloadSource, "metrics") {
+		t.Fatalf("providerPayload unexpectedly includes metrics: %s", payloadSource)
 	}
 }
 
@@ -476,10 +491,19 @@ func TestAdminAuditLogsActionWithoutSecrets(t *testing.T) {
 	}
 }
 
-type fakeConfigReloader struct{}
+type fakeConfigReloader struct {
+	mutate func(context.Context, string, ConfigMutation) (ReloadResult, error)
+}
 
 func (fakeConfigReloader) ApplyConfig(context.Context) (ReloadResult, error) {
 	return ReloadResult{OK: true, Applied: true, HistoryID: "history-1", QuotaStateReset: true}, nil
+}
+
+func (f fakeConfigReloader) MutateConfig(ctx context.Context, reason string, mutate ConfigMutation) (ReloadResult, error) {
+	if f.mutate != nil {
+		return f.mutate(ctx, reason, mutate)
+	}
+	return ReloadResult{OK: true, Saved: true, Applied: true, Reason: reason, HistoryID: "history-mutation"}, nil
 }
 
 func (fakeConfigReloader) History() []HistoryItem {
@@ -643,6 +667,99 @@ admin:
 		if strings.Contains(w.Body.String(), "client-token") || strings.Contains(w.Body.String(), "admin-secret") {
 			t.Fatalf("path=%s body = %s, want secrets redacted", path, w.Body.String())
 		}
+		if path == "/admin/config/providers" {
+			for _, want := range []string{`"models":`, `"capabilities":{"responses_previous_response_id":`, `"quota":{"enabled":`, `"proxy":{"url":`} {
+				if !strings.Contains(w.Body.String(), want) {
+					t.Fatalf("path=%s body = %s, want %s", path, w.Body.String(), want)
+				}
+			}
+		}
+	}
+}
+
+type fileMutationReloader struct {
+	path string
+}
+
+func (f fileMutationReloader) ApplyConfig(context.Context) (ReloadResult, error) {
+	return ReloadResult{}, nil
+}
+
+func (f fileMutationReloader) MutateConfig(_ context.Context, reason string, mutate ConfigMutation) (ReloadResult, error) {
+	cfg, err := config.Load(f.path)
+	if err != nil {
+		return ReloadResult{}, err
+	}
+	next, err := mutate(cfg)
+	if err != nil {
+		return ReloadResult{}, err
+	}
+	data, err := yaml.Marshal(next)
+	if err != nil {
+		return ReloadResult{}, err
+	}
+	if err := config.WriteValidatedFile(f.path, data); err != nil {
+		return ReloadResult{}, err
+	}
+	return ReloadResult{OK: true, Saved: true, Applied: true, Reason: reason, HistoryID: "history-file"}, nil
+}
+
+func (fileMutationReloader) History() []HistoryItem                  { return nil }
+func (fileMutationReloader) HistoryDiff(string) (HistoryDiff, error) { return HistoryDiff{}, nil }
+func (fileMutationReloader) Rollback(context.Context, string) (ReloadResult, error) {
+	return ReloadResult{}, nil
+}
+
+func TestAdminConfigProviderMutationUsesAtomicReloader(t *testing.T) {
+	h := newAdminTestHandler(t)
+	var gotReason string
+	h.SetConfigReloader(fakeConfigReloader{mutate: func(_ context.Context, reason string, mutate ConfigMutation) (ReloadResult, error) {
+		gotReason = reason
+		cfg := config.Config{Outbounds: []config.OutboundSpec{{Name: "mock", Protocol: "mock", Tag: "mock-tag"}}}
+		next, err := mutate(cfg)
+		if err != nil {
+			return ReloadResult{}, err
+		}
+		if config.OutboundEnabled(next.Outbounds[0]) {
+			t.Fatal("enabled mutation did not disable provider")
+		}
+		return ReloadResult{OK: true, Saved: true, Applied: true, Reason: reason, HistoryID: "history-provider", QuotaStateReset: true}, nil
+	}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/provider/enabled", "admin-ui-token", []byte(`{"name":"mock","enabled":false}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{`"saved":true`, `"applied":true`, `"history_id":"history-provider"`, `"quota_state_reset":true`} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Fatalf("body = %s, want %s", w.Body.String(), want)
+		}
+	}
+	if gotReason != "provider_enabled_mock_false" {
+		t.Fatalf("reason = %q", gotReason)
+	}
+}
+
+func TestAdminConfigProviderDeleteRejectsReferences(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.SetConfigReloader(fakeConfigReloader{mutate: func(_ context.Context, _ string, mutate ConfigMutation) (ReloadResult, error) {
+		cfg := config.Config{
+			Outbounds: []config.OutboundSpec{{Name: "mock", Protocol: "mock", Tag: "mock-tag"}},
+			Routing:   config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office", ToTags: []string{"mock-tag"}}}},
+		}
+		_, err := mutate(cfg)
+		return ReloadResult{}, err
+	}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/provider/delete", "admin-ui-token", []byte(`{"name":"mock"}`)))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `routing rule`) || !strings.Contains(w.Body.String(), `mock-tag`) {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 	}
 }
 
@@ -678,10 +795,11 @@ routing:
 	if err := os.WriteFile(h.configPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("os.WriteFile() error = %v", err)
 	}
+	h.SetConfigReloader(fileMutationReloader{path: h.configPath})
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	body := []byte(`{"name":"openai","protocol":"openai_chat","endpoint":"https://api.example.test/v1","auth_token":"<redacted>","tag":"openai-tag"}`)
+	body := []byte(`{"name":"openai","protocol":"openai_chat","endpoint":"https://api.example.test/v1","auth_token":"<redacted>","tag":"openai-tag","models":[{"name":"gpt-4o","aliases":["fast","public-model"]}],"capabilities":{"usage_estimation":true,"usage_estimation_mode":"heuristic"},"quota":{"enabled":true,"windows":[{"name":"hourly","duration":"1h","max_requests":100}],"cooldown":"1m","probe_interval":"30s"},"proxy":{"url":"https://proxy.example.test"}}`)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/provider/upsert", "admin-ui-token", body))
 	if w.Code != http.StatusOK {
@@ -693,6 +811,153 @@ routing:
 	}
 	if cfg.Outbounds[0].AuthToken != "old-secret" || cfg.Outbounds[0].Endpoint != "https://api.example.test/v1" {
 		t.Fatalf("outbound = %#v, want preserved token and updated endpoint", cfg.Outbounds[0])
+	}
+	outbound := cfg.Outbounds[0]
+	if len(outbound.Models) != 1 || outbound.Models[0].Name != "gpt-4o" || len(outbound.Models[0].Aliases) != 2 || outbound.Models[0].Aliases[0] != "fast" {
+		t.Fatalf("models = %#v, want canonical model and aliases", outbound.Models)
+	}
+	if !outbound.Capabilities.UsageEstimation || outbound.Capabilities.UsageEstimationMode != "heuristic" {
+		t.Fatalf("capabilities = %#v, want usage estimation", outbound.Capabilities)
+	}
+	if !outbound.Quota.Enabled || len(outbound.Quota.Windows) != 1 || outbound.Quota.Windows[0].MaxRequests != 100 || outbound.Quota.Cooldown != "1m" || outbound.Quota.ProbeInterval != "30s" {
+		t.Fatalf("quota = %#v, want decoded snake_case quota", outbound.Quota)
+	}
+	if outbound.Proxy.URL != "https://proxy.example.test" {
+		t.Fatalf("proxy = %#v, want decoded snake_case URL", outbound.Proxy)
+	}
+}
+
+func TestAdminConfigProviderQuotaRoundTripUsesSnakeCase(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(h.configPath, []byte(validGatewayConfigYAML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.SetConfigReloader(fileMutationReloader{path: h.configPath})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	quotaJSON := `{"enabled":true,"windows":[{"name":"rolling","reset":"rolling","duration":"5h","max_requests":100,"max_tokens":20000},{"name":"fixed-5h","reset":"fixed","duration":"5h","fixed":{"period":"interval","anchor":"2026-01-01T00:00:00Z"},"max_requests":200,"max_tokens":40000},{"name":"daily","reset":"fixed","fixed":{"period":"daily","time":"04:00","timezone":"America/New_York"},"max_requests":300,"max_tokens":60000},{"name":"weekly","reset":"fixed","fixed":{"period":"weekly","time":"09:30","timezone":"Asia/Shanghai","weekday":"monday"},"max_requests":400,"max_tokens":80000}],"cooldown":"10m","probe_interval":"1m","reset_all":{"enabled":true,"schedule":{"period":"weekly","time":"00:00","timezone":"UTC","weekday":"sunday"}}}`
+	body := []byte(`{"name":"mock","protocol":"mock","auth_token":"<redacted>","tag":"mock-tag","models":[{"name":"canonical-model","aliases":["public-alias"]}],"quota":` + quotaJSON + `}`)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/provider/upsert", "admin-ui-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("upsert status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodGet, "/admin/config/providers", "admin-ui-token", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("get status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Items []providerResourceResponse `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(response.Items))
+	}
+	got := response.Items[0].Quota
+	gotModels := response.Items[0].Models
+	if len(gotModels) != 1 || gotModels[0].Name != "canonical-model" || len(gotModels[0].Aliases) != 1 || gotModels[0].Aliases[0] != "public-alias" {
+		t.Fatalf("models round trip = %#v", gotModels)
+	}
+	if len(got.Windows) != 4 || got.Windows[0].MaxTokens != 20000 || got.Windows[1].Fixed.Period != "interval" || got.Windows[2].Fixed.Period != "daily" || got.Windows[3].Fixed.Weekday != "monday" || !got.ResetAll.Enabled || got.ResetAll.Schedule.Period != "weekly" {
+		t.Fatalf("quota round trip = %#v", got)
+	}
+	encoded := w.Body.String()
+	for _, want := range []string{`"max_tokens"`, `"max_requests"`, `"probe_interval"`, `"reset_all"`, `"timezone"`} {
+		if !strings.Contains(encoded, want) {
+			t.Fatalf("body = %s, want snake_case key %s", encoded, want)
+		}
+	}
+	for _, forbidden := range []string{`"maxTokens"`, `"maxRequests"`, `"probeInterval"`, `"resetAll"`} {
+		if strings.Contains(encoded, forbidden) {
+			t.Fatalf("body = %s, contains non-contract key %s", encoded, forbidden)
+		}
+	}
+
+	providerDraft, err := json.Marshal(response.Items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkBody := []byte(`{"name":"mock","model":"","provider":` + string(providerDraft) + `}`)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/provider/check", "admin-ui-token", checkBody))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"ok":true`) {
+		t.Fatalf("check status = %d, body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminProviderMetricsReturnsAllTimeUsageAndQuotaMetadata(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	content := strings.Replace(validGatewayConfigYAML(), "    tag: mock-tag", `    tag: mock-tag
+    quota:
+      enabled: true
+      cooldown: 10m
+      probe_interval: 1m
+      windows:
+        - name: rolling
+          reset: rolling
+          duration: 5h
+          max_requests: 10
+          max_tokens: 1000
+        - name: daily
+          reset: fixed
+          fixed: {period: daily, time: "00:00", timezone: UTC}
+          max_requests: 20
+          max_tokens: 2000`, 1)
+	if err := os.WriteFile(h.configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := accounting.NewMemoryStore()
+	old := time.Now().UTC().Add(-24 * time.Hour)
+	store.Record(runtime.UsageRecord{ProviderName: "mock", Status: runtime.UsageStatusSuccess, Breakdown: runtime.UsageBreakdown{RequestCount: 7, TotalTokens: 70}, StartedAt: old.Format(time.RFC3339Nano), FinishedAt: old.Format(time.RFC3339Nano)})
+	tracker := quota.NewTrackerFromOutbounds([]config.OutboundSpec{{Name: "mock", Quota: config.OutboundQuotaConfig{Enabled: true, Cooldown: "10m", ProbeInterval: "1m", Windows: []config.OutboundQuotaWindowConfig{{Name: "rolling", Reset: "rolling", Duration: "5h", MaxRequests: 10, MaxTokens: 1000}, {Name: "daily", Reset: "fixed", Fixed: config.QuotaFixedScheduleConfig{Period: "daily", Time: "00:00", Timezone: "UTC"}, MaxRequests: 20, MaxTokens: 2000}}}}})
+	tracker.RecordSuccess("mock", 123)
+	state := h.runtimeState()
+	state.Dispatcher = execution.NewDispatcherWithStoreAndQuota(store, tracker)
+	h.ApplyRuntime(state)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodGet, "/admin/config/providers/metrics?hours=3", "admin-ui-token", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Hours int                       `json:"hours"`
+		Items []providerMetricsResponse `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Hours != 3 || len(response.Items) != 1 {
+		t.Fatalf("response = %#v", response)
+	}
+	item := response.Items[0]
+	if item.Usage.RequestCount != 7 {
+		t.Fatalf("all-time request_count = %d, want 7", item.Usage.RequestCount)
+	}
+	for _, bucket := range item.Timeline {
+		if bucket.RequestCount != 0 {
+			t.Fatalf("timeline includes usage outside hours: %#v", bucket)
+		}
+	}
+	if item.Quota == nil || len(item.Quota.Windows) != 2 {
+		t.Fatalf("quota = %#v", item.Quota)
+	}
+	window := item.Quota.Windows[0]
+	if window.MaxRequests != 10 || window.UsedRequests != 1 || window.MaxTokens != 1000 || window.UsedTokens != 123 || window.Reset != "rolling" || window.ResetAt == "" {
+		t.Fatalf("rolling quota window = %#v", window)
+	}
+	fixed := item.Quota.Windows[1]
+	if fixed.Reset != "fixed" || fixed.FixedPeriod != "daily" || fixed.ResetAt == "" {
+		t.Fatalf("fixed quota window = %#v", fixed)
 	}
 }
 

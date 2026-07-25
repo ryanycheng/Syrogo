@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -63,6 +64,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan run
 		if step.Type != runtime.StepTypeOutbound {
 			return runtime.Response{}, fmt.Errorf("unsupported execution step type %q", step.Type)
 		}
+		if step.ModelUnavailable {
+			lastErr = selectPreferredError(lastErr, modelUnavailableError(plan, req))
+			continue
+		}
 		if step.OutboundTarget == nil {
 			return runtime.Response{}, fmt.Errorf("outbound target is required")
 		}
@@ -75,13 +80,13 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan run
 		decision := d.beforeAttempt(step.OutboundName)
 		if !decision.Allowed {
 			d.recordOutboundLimited(step.OutboundName, decision)
-			lastErr = provider.NewQuotaExceededError(fmt.Errorf("outbound %q quota %s", step.OutboundName, decision.Reason))
+			lastErr = selectPreferredError(lastErr, provider.NewQuotaExceededError(fmt.Errorf("outbound %q quota %s", step.OutboundName, decision.Reason)))
 			continue
 		}
 		healthDecision := d.beforeHealthAttempt(step.OutboundName)
 		if !healthDecision.Allowed {
 			d.recordProviderHealthLimited(step.OutboundName, healthDecision)
-			lastErr = provider.NewRetryableError(fmt.Errorf("outbound %q health %s", step.OutboundName, healthDecision.Reason))
+			lastErr = selectPreferredError(lastErr, provider.NewRetryableError(fmt.Errorf("outbound %q health %s", step.OutboundName, healthDecision.Reason)))
 			continue
 		}
 
@@ -93,17 +98,18 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan run
 		})
 		if err == nil {
 			latency.FromContext(ctx).SetFallbackCount(i)
-			d.recordSuccess(step.OutboundName, decision.Probe, healthDecision.Probe)
+			d.recordSuccess(step.OutboundName, normalizedUsageTokens(resp.Usage), decision.Probe, healthDecision.Probe)
 			d.record(d.finalizeUsageRecord(ctx, plan, step, stepReq.Model, resp.Model, resp.Usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), i))
 			return resp, nil
 		}
 
-		lastErr = err
+		lastErr = selectPreferredError(lastErr, err)
 		errorKind := provider.NormalizeError(err)
 		d.recordProviderError(step.OutboundName, errorKind)
 		if !provider.FallbackAllowed(string(step.OnError), errorKind, i == len(plan.Steps)-1) {
-			d.record(d.finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), i))
-			return runtime.Response{}, err
+			preferredKind := provider.NormalizeError(lastErr)
+			d.record(d.finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, string(preferredKind), startedAt, time.Now(), i))
+			return runtime.Response{}, lastErr
 		}
 	}
 
@@ -125,6 +131,10 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 		if step.Type != runtime.StepTypeOutbound {
 			return nil, fmt.Errorf("unsupported execution step type %q", step.Type)
 		}
+		if step.ModelUnavailable {
+			lastErr = selectPreferredError(lastErr, modelUnavailableError(plan, req))
+			continue
+		}
 		if step.OutboundTarget == nil {
 			return nil, fmt.Errorf("outbound target is required")
 		}
@@ -138,13 +148,13 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 		decision := d.beforeAttempt(step.OutboundName)
 		if !decision.Allowed {
 			d.recordOutboundLimited(step.OutboundName, decision)
-			lastErr = provider.NewQuotaExceededError(fmt.Errorf("outbound %q quota %s", step.OutboundName, decision.Reason))
+			lastErr = selectPreferredError(lastErr, provider.NewQuotaExceededError(fmt.Errorf("outbound %q quota %s", step.OutboundName, decision.Reason)))
 			continue
 		}
 		healthDecision := d.beforeHealthAttempt(step.OutboundName)
 		if !healthDecision.Allowed {
 			d.recordProviderHealthLimited(step.OutboundName, healthDecision)
-			lastErr = provider.NewRetryableError(fmt.Errorf("outbound %q health %s", step.OutboundName, healthDecision.Reason))
+			lastErr = selectPreferredError(lastErr, provider.NewRetryableError(fmt.Errorf("outbound %q health %s", step.OutboundName, healthDecision.Reason)))
 			continue
 		}
 
@@ -164,12 +174,13 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 			return d.wrapStream(ctx, plan, step, stepReq.Model, i, startedAt, events, decision.Probe, healthDecision.Probe), nil
 		}
 
-		lastErr = err
+		lastErr = selectPreferredError(lastErr, err)
 		errorKind := provider.NormalizeError(err)
 		d.recordProviderError(step.OutboundName, errorKind)
 		if !provider.FallbackAllowed(string(step.OnError), errorKind, i == len(plan.Steps)-1) {
-			d.record(d.finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, string(errorKind), startedAt, time.Now(), i))
-			return nil, err
+			preferredKind := provider.NormalizeError(lastErr)
+			d.record(d.finalizeUsageRecord(ctx, plan, step, stepReq.Model, stepReq.Model, nil, runtime.UsageStatusError, string(preferredKind), startedAt, time.Now(), i))
+			return nil, lastErr
 		}
 	}
 
@@ -178,6 +189,51 @@ func (d *Dispatcher) DispatchStream(ctx context.Context, req runtime.Request, pl
 		d.record(d.finalizeUsageRecord(ctx, plan, last, req.Model, req.Model, nil, runtime.UsageStatusError, string(provider.NormalizeError(lastErr)), startedAt, time.Now(), len(plan.Steps)-1))
 	}
 	return nil, lastErr
+}
+
+func modelUnavailableError(plan runtime.ExecutionPlan, req runtime.Request) error {
+	model := plan.RequestedModel
+	if model == "" {
+		model = req.Model
+	}
+	if model == "" {
+		return provider.NewModelUnavailableError(errors.New("requested model is unavailable"))
+	}
+	return provider.NewModelUnavailableError(fmt.Errorf("model %q is unavailable", model))
+}
+
+func selectPreferredError(current, candidate error) error {
+	if current == nil {
+		return candidate
+	}
+	if candidate == nil {
+		return current
+	}
+	if preferredErrorPriority(candidate) > preferredErrorPriority(current) {
+		return candidate
+	}
+	return current
+}
+
+func preferredErrorPriority(err error) int {
+	kind := provider.NormalizeError(err)
+	var providerErr *provider.ProviderError
+	hasHTTPMetadata := provider.AsProviderError(err, &providerErr) && providerErr != nil &&
+		(providerErr.StatusCode != 0 || providerErr.RequestID != "" || providerErr.RetryAfter != "")
+
+	switch kind {
+	case provider.ErrorKindQuotaExceeded, provider.ErrorKindAuthFailed:
+		if hasHTTPMetadata {
+			return 5
+		}
+		return 4
+	case provider.ErrorKindFatal, provider.ErrorKindCapabilityUnsupported:
+		return 3
+	case provider.ErrorKindTimeout, provider.ErrorKindUpstreamServerError, provider.ErrorKindRetryable:
+		return 2
+	default:
+		return 1
+	}
 }
 
 func (d *Dispatcher) QueryUsage(groupBy string) ([]accounting.StatsItem, error) {
@@ -253,9 +309,13 @@ func (d *Dispatcher) wrapStream(ctx context.Context, plan runtime.ExecutionPlan,
 				return
 			case event, ok := <-events:
 				if !ok {
+					if ctx.Err() != nil {
+						recorder.SetStreamState(latency.StreamStateError)
+						return
+					}
 					if !recorded {
 						recorder.SetStreamState(latency.StreamStateCompleted)
-						d.recordSuccess(step.OutboundName, quotaProbe, healthProbe)
+						d.recordSuccess(step.OutboundName, normalizedUsageTokens(usage), quotaProbe, healthProbe)
 						d.record(d.finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), fallbackCount))
 					}
 					return
@@ -314,9 +374,9 @@ func (d *Dispatcher) beforeHealthAttempt(outbound string) provider.HealthDecisio
 	return d.healthTracker.BeforeAttempt(outbound)
 }
 
-func (d *Dispatcher) recordSuccess(outbound string, quotaProbe bool, healthProbe bool) {
+func (d *Dispatcher) recordSuccess(outbound string, tokens int, quotaProbe bool, healthProbe bool) {
 	if d.quotaTracker != nil {
-		d.quotaTracker.RecordSuccess(outbound)
+		d.quotaTracker.RecordSuccess(outbound, tokens)
 	}
 	if d.healthTracker != nil {
 		d.healthTracker.RecordSuccess(outbound)
@@ -358,19 +418,25 @@ func (d *Dispatcher) record(record runtime.UsageRecord) {
 	d.store.Record(record)
 }
 
+func normalizedUsageTokens(usage *runtime.Usage) int {
+	if usage == nil {
+		return 0
+	}
+	if usage.TotalTokens != 0 {
+		return usage.TotalTokens
+	}
+	return usage.InputTokens + usage.OutputTokens
+}
+
 func (d *Dispatcher) finalizeUsageRecord(ctx context.Context, plan runtime.ExecutionPlan, step runtime.ExecutionStep, requestedModel, executedModel string, usage *runtime.Usage, status runtime.UsageStatus, errorKind string, startedAt, finishedAt time.Time, fallbackCount int) runtime.UsageRecord {
 	breakdown := runtime.UsageBreakdown{RequestCount: 1}
 	usageSource := runtime.UsageSource("")
 	if usage != nil {
-		totalTokens := usage.TotalTokens
-		if totalTokens == 0 {
-			totalTokens = usage.InputTokens + usage.OutputTokens
-		}
 		breakdown.InputTokens = usage.InputTokens
 		breakdown.OutputTokens = usage.OutputTokens
 		breakdown.CachedInputReadTokens = usage.CachedInputReadTokens
 		breakdown.CachedInputWriteTokens = usage.CachedInputWriteTokens
-		breakdown.TotalTokens = totalTokens
+		breakdown.TotalTokens = normalizedUsageTokens(usage)
 		usageSource = usage.Source
 	}
 	if executedModel == "" {

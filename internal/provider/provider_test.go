@@ -2006,6 +2006,120 @@ func TestOpenAICompatibleChatCompletionFatalOnBadRequest(t *testing.T) {
 	}
 }
 
+func TestResponseMetadataExtraction(t *testing.T) {
+	httpDate := "Wed, 21 Oct 2015 07:28:00 GMT"
+	tests := []struct {
+		name           string
+		header         http.Header
+		wantRequestID  string
+		wantRetryAfter string
+	}{
+		{
+			name: "request id takes priority and integer retry after",
+			header: http.Header{
+				"Request-Id":   {"req-primary"},
+				"X-Request-Id": {"req-fallback"},
+				"Retry-After":  {"42"},
+			},
+			wantRequestID:  "req-primary",
+			wantRetryAfter: "42",
+		},
+		{
+			name: "x request id fallback and HTTP date",
+			header: http.Header{
+				"X-Request-Id": {"req-openai"},
+				"Retry-After":  {httpDate},
+			},
+			wantRequestID:  "req-openai",
+			wantRetryAfter: httpDate,
+		},
+		{
+			name: "unsafe and invalid values rejected",
+			header: http.Header{
+				"Request-Id":   {"unsafe\r\nid"},
+				"X-Request-Id": {strings.Repeat("x", maxUpstreamMetadataLength+1)},
+				"Retry-After":  {"-1"},
+			},
+		},
+		{
+			name: "malformed retry after rejected",
+			header: http.Header{
+				"Request-Id":  {"safe-id"},
+				"Retry-After": {"tomorrow"},
+			},
+			wantRequestID: "safe-id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metadata := extractResponseMetadata(&http.Response{StatusCode: http.StatusTooManyRequests, Header: tt.header})
+			if metadata.StatusCode != http.StatusTooManyRequests || metadata.RequestID != tt.wantRequestID || metadata.RetryAfter != tt.wantRetryAfter {
+				t.Fatalf("metadata = %#v, want status=%d request_id=%q retry_after=%q", metadata, http.StatusTooManyRequests, tt.wantRequestID, tt.wantRetryAfter)
+			}
+		})
+	}
+}
+
+func TestOpenAICompatibleErrorsIncludeResponseMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", "req-openai-429")
+		w.Header().Set("Retry-After", "17")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	p := NewOpenAICompatible("openai", server.URL, []string{"test-key"}, server.Client())
+	_, err := p.ChatCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini"})
+	var providerErr *ProviderError
+	if !AsProviderError(err, &providerErr) {
+		t.Fatalf("ChatCompletion() error = %v, want ProviderError", err)
+	}
+	if providerErr.Kind != ErrorKindQuotaExceeded || providerErr.StatusCode != http.StatusTooManyRequests || providerErr.RequestID != "req-openai-429" || providerErr.RetryAfter != "17" {
+		t.Fatalf("ProviderError = %#v, want quota metadata", providerErr)
+	}
+}
+
+func TestOpenAIResponsesErrorsIncludeResponseMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Request-Id", "req-responses")
+		w.Header().Set("Retry-After", "invalid")
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	p := NewOpenAIResponsesCompatible("responses", server.URL, []string{"test-key"}, config.OutboundCapabilities{}, server.Client())
+	_, err := p.ChatCompletion(context.Background(), runtime.Request{Model: "gpt-4o-mini"})
+	var providerErr *ProviderError
+	if !AsProviderError(err, &providerErr) {
+		t.Fatalf("ChatCompletion() error = %v, want ProviderError", err)
+	}
+	if providerErr.Kind != ErrorKindUpstreamServerError || providerErr.StatusCode != http.StatusBadGateway || providerErr.RequestID != "req-responses" || providerErr.RetryAfter != "" {
+		t.Fatalf("ProviderError = %#v, want server error metadata without invalid retry-after", providerErr)
+	}
+}
+
+func TestAnthropicMessagesErrorsIncludeResponseMetadata(t *testing.T) {
+	retryAfter := "Wed, 21 Oct 2037 07:28:00 GMT"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Request-Id", "req-anthropic")
+		w.Header().Set("X-Request-Id", "req-secondary")
+		w.Header().Set("Retry-After", retryAfter)
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	p := NewAnthropicMessagesCompatible("anthropic", server.URL, []string{"test-key"}, server.Client())
+	_, err := p.ChatCompletion(context.Background(), runtime.Request{Model: "claude-sonnet-4-5"})
+	var providerErr *ProviderError
+	if !AsProviderError(err, &providerErr) {
+		t.Fatalf("ChatCompletion() error = %v, want ProviderError", err)
+	}
+	if providerErr.Kind != ErrorKindQuotaExceeded || providerErr.StatusCode != http.StatusTooManyRequests || providerErr.RequestID != "req-anthropic" || providerErr.RetryAfter != retryAfter {
+		t.Fatalf("ProviderError = %#v, want quota metadata", providerErr)
+	}
+}
+
 func TestTransientErrorClassifiesDeadlineExceededAsTimeout(t *testing.T) {
 	err := NewTransientError(context.DeadlineExceeded)
 	if NormalizeError(err) != ErrorKindTimeout {

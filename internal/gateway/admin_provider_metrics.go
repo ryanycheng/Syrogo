@@ -19,6 +19,7 @@ const providerTimelineBucketCount = 36
 
 type providerCheckRequest struct {
 	Name     string                   `json:"name"`
+	Model    string                   `json:"model"`
 	Provider *providerResourceRequest `json:"provider"`
 }
 
@@ -89,7 +90,12 @@ func (h *Handler) handleConfigProviderCheck(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusNotFound, "provider not found")
 		return
 	}
-	result := checkProviderLive(r.Context(), outbound)
+	model := strings.TrimSpace(req.Model)
+	if outbound.Protocol != "mock" && model == "" {
+		writeError(w, http.StatusBadRequest, "model is required for non-mock providers")
+		return
+	}
+	result := checkProviderLive(r.Context(), outbound, model)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -234,9 +240,13 @@ func findOutbound(cfg config.Config, name string) (config.OutboundSpec, bool) {
 	return config.OutboundSpec{}, false
 }
 
-func checkProviderLive(parent context.Context, outbound config.OutboundSpec) providerCheckResponse {
+func checkProviderLive(parent context.Context, outbound config.OutboundSpec, model string) providerCheckResponse {
 	startedAt := time.Now()
 	checkedAt := startedAt.UTC().Format(time.RFC3339Nano)
+	model = strings.TrimSpace(model)
+	if outbound.Protocol == "mock" && model == "" {
+		model = "syrogo-health-check"
+	}
 	if strings.TrimSpace(outbound.AuthToken) == config.RedactedValue {
 		return providerCheckResponse{Name: outbound.Name, OK: false, State: "unknown", CheckedAt: checkedAt, Error: "auth_token is redacted; load the active runtime provider or enter a token before testing"}
 	}
@@ -251,7 +261,7 @@ func checkProviderLive(parent context.Context, outbound config.OutboundSpec) pro
 	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
 	defer cancel()
 	_, err = client.ChatCompletion(ctx, runtime.Request{
-		Model:     "syrogo-health-check",
+		Model:     model,
 		MaxTokens: 1,
 		Messages:  []runtime.Message{{Role: runtime.MessageRoleUser, Parts: []runtime.ContentPart{{Type: runtime.ContentPartTypeText, Text: "ping"}}}},
 	})

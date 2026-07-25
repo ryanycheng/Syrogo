@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/quota"
 	"gopkg.in/yaml.v3"
 )
 
@@ -141,6 +143,396 @@ func TestReloadManagerRollbackRestoresPreviousConfig(t *testing.T) {
 	app.Server.Listeners()[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("rolled back token status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestReloadManagerPreservesAndSelectivelyResetsQuotaState(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Outbounds[0].Quota = config.OutboundQuotaConfig{
+		Enabled:       true,
+		Cooldown:      config.DurationValue("10m"),
+		ProbeInterval: config.DurationValue("1m"),
+		Windows: []config.OutboundQuotaWindowConfig{
+			{Name: "hourly", Duration: config.DurationValue("1h"), MaxRequests: 10},
+			{Name: "daily", Duration: config.DurationValue("24h"), MaxRequests: 100},
+		},
+	}
+	path := writeReloadTestConfig(t, cfg)
+	app, err := NewWithOptions(cfg, Options{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close(context.Background()) }()
+
+	tracker := app.outboundQuotaTracker
+	tracker.RecordSuccess("mock")
+	tracker.RecordQuotaExceeded("mock")
+	oldDispatcher := app.dispatcher
+
+	result := applyReloadConfig(t, app, path, cloneConfig(t, cfg))
+	if result.QuotaStateReset {
+		t.Fatal("identical quota reported reset")
+	}
+	if app.outboundQuotaTracker != tracker {
+		t.Fatal("Apply replaced outbound tracker")
+	}
+	assertOutboundUsage(t, tracker, 1, 1)
+	if got := tracker.Snapshot()[0]; got.State != quota.StateCooldown || got.CooldownUntil == "" {
+		t.Fatalf("cooldown was not preserved: %#v", got)
+	}
+
+	next := cloneConfig(t, cfg)
+	next.Outbounds[0].Quota.Windows[0].MaxRequests = 20
+	result = applyReloadConfig(t, app, path, next)
+	if result.QuotaStateReset {
+		t.Fatal("limit-only change reported reset")
+	}
+	assertOutboundUsage(t, tracker, 1, 1)
+
+	next.Outbounds[0].Quota.Windows[0].Duration = config.DurationValue("2h")
+	result = applyReloadConfig(t, app, path, next)
+	if !result.QuotaStateReset {
+		t.Fatal("incompatible used window did not report reset")
+	}
+	assertOutboundUsage(t, tracker, 0, 1)
+
+	tracker.RecordSuccess("mock")
+	oldItems := oldDispatcher.QueryQuota()
+	if len(oldItems) != 1 || oldItems[0].Windows[0].UsedRequests != 1 || oldItems[0].Windows[1].UsedRequests != 2 {
+		t.Fatalf("old dispatcher no longer shares tracker: %#v", oldItems)
+	}
+}
+
+func TestReloadManagerDoesNotLoadStaleSnapshot(t *testing.T) {
+	cfg := baseConfig()
+	dir := t.TempDir()
+	cfg.Governance.Quota.Snapshot = config.GovernanceQuotaSnapshotConfig{Enabled: true, Dir: dir, FlushInterval: config.DurationValue("1h")}
+	cfg.Outbounds[0].Quota = config.OutboundQuotaConfig{Enabled: true, Cooldown: config.DurationValue("10m"), ProbeInterval: config.DurationValue("1m"), Windows: []config.OutboundQuotaWindowConfig{{Name: "hourly", Duration: config.DurationValue("1h"), MaxRequests: 10}}}
+	path := writeReloadTestConfig(t, cfg)
+	app, err := NewWithOptions(cfg, Options{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close(context.Background()) }()
+
+	if err := app.quotaSnapshotStore.Save(); err != nil {
+		t.Fatal(err)
+	}
+	app.outboundQuotaTracker.RecordSuccess("mock")
+	result := applyReloadConfig(t, app, path, cloneConfig(t, cfg))
+	if result.QuotaStateReset {
+		t.Fatal("identical Apply reported reset")
+	}
+	assertOutboundUsage(t, app.outboundQuotaTracker, 1)
+}
+
+func TestReloadManagerSnapshotLifecycleUsesLiveTracker(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Outbounds[0].Quota = config.OutboundQuotaConfig{Enabled: true, Cooldown: config.DurationValue("10m"), ProbeInterval: config.DurationValue("1m"), Windows: []config.OutboundQuotaWindowConfig{{Name: "hourly", Duration: config.DurationValue("1h"), MaxRequests: 10}}}
+	path := writeReloadTestConfig(t, cfg)
+	app, err := NewWithOptions(cfg, Options{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close(context.Background()) }()
+
+	tracker := app.outboundQuotaTracker
+	tracker.RecordSuccess("mock")
+	if app.quotaSnapshotStore != nil {
+		t.Fatal("snapshot store started while disabled")
+	}
+
+	next := cloneConfig(t, cfg)
+	next.Governance.Quota.Snapshot = config.GovernanceQuotaSnapshotConfig{Enabled: true, Dir: t.TempDir(), FlushInterval: config.DurationValue("1h")}
+	if result := applyReloadConfig(t, app, path, next); result.QuotaStateReset {
+		t.Fatal("enabling snapshots reported quota reset")
+	}
+	if app.quotaSnapshotStore == nil || app.outboundQuotaTracker != tracker {
+		t.Fatal("snapshot enable did not retain and bind live tracker")
+	}
+	assertOutboundUsage(t, tracker, 1)
+
+	next.Governance.Quota.Snapshot.Enabled = false
+	if result := applyReloadConfig(t, app, path, next); result.QuotaStateReset {
+		t.Fatal("disabling snapshots reported quota reset")
+	}
+	if app.quotaSnapshotStore != nil || app.outboundQuotaTracker != tracker {
+		t.Fatal("snapshot disable changed tracker or retained store")
+	}
+	assertOutboundUsage(t, tracker, 1)
+}
+
+func TestReloadManagerQuotaResetFlagIgnoresUnusedChanges(t *testing.T) {
+	cfg := baseConfig()
+	path := writeReloadTestConfig(t, cfg)
+	app, err := NewWithOptions(cfg, Options{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close(context.Background()) }()
+
+	next := cloneConfig(t, cfg)
+	next.Outbounds[0].Quota = config.OutboundQuotaConfig{Enabled: true, Cooldown: config.DurationValue("10m"), ProbeInterval: config.DurationValue("1m"), Windows: []config.OutboundQuotaWindowConfig{{Name: "hourly", Duration: config.DurationValue("1h"), MaxRequests: 10}}}
+	if result := applyReloadConfig(t, app, path, next); result.QuotaStateReset {
+		t.Fatal("enabling an unused quota reported reset")
+	}
+	app.outboundQuotaTracker.RecordSuccess("mock")
+	next.Outbounds[0].Quota.Enabled = false
+	if result := applyReloadConfig(t, app, path, next); !result.QuotaStateReset {
+		t.Fatal("disabling a used quota did not report reset")
+	}
+}
+
+func TestReloadManagerMutationSavesAppliesAndRecordsHistory(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Outbounds = append(cfg.Outbounds, config.OutboundSpec{Name: "backup", Protocol: "mock", Tag: cfg.Outbounds[0].Tag})
+	path := writeReloadTestConfig(t, cfg)
+	app, err := NewWithOptions(cfg, Options{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close(context.Background()) }()
+
+	result, err := app.reloadManager.MutateConfig(context.Background(), "provider_disable_mock", func(next config.Config) (config.Config, error) {
+		return config.SetOutboundEnabled(next, "mock", false)
+	})
+	if err != nil {
+		t.Fatalf("MutateConfig() error = %v", err)
+	}
+	if !result.OK || !result.Saved || !result.Applied || result.RestartRequired || result.HistoryID == "" || result.Reason != "provider_disable_mock" {
+		t.Fatalf("MutateConfig() = %#v", result)
+	}
+	stored, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.OutboundEnabled(stored.Outbounds[0]) || config.OutboundEnabled(app.cfg.Outbounds[0]) {
+		t.Fatal("provider disable was not saved and applied")
+	}
+
+	enabled, err := app.reloadManager.MutateConfig(context.Background(), "provider_enable_mock", func(next config.Config) (config.Config, error) {
+		return config.SetOutboundEnabled(next, "mock", true)
+	})
+	if err != nil || !enabled.Saved || !enabled.Applied || !config.OutboundEnabled(app.cfg.Outbounds[0]) {
+		t.Fatalf("provider enable = %#v, err=%v", enabled, err)
+	}
+	deleted, err := app.reloadManager.MutateConfig(context.Background(), "provider_delete_backup", func(next config.Config) (config.Config, error) {
+		return config.DeleteOutbound(next, "backup"), nil
+	})
+	if err != nil || !deleted.Saved || !deleted.Applied || len(app.cfg.Outbounds) != 1 {
+		t.Fatalf("provider delete = %#v, err=%v, outbounds=%#v", deleted, err, app.cfg.Outbounds)
+	}
+	stored, err = config.Load(path)
+	if err != nil || len(stored.Outbounds) != 1 || stored.Outbounds[0].Name != "mock" {
+		t.Fatalf("stored provider delete = %#v, err=%v", stored.Outbounds, err)
+	}
+
+	historyData, item, err := app.reloadManager.history.Read(result.HistoryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyCfg, err := config.ParseBytes(historyData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.OutboundEnabled(historyCfg.Outbounds[0]) || item.Reason != "provider_disable_mock" {
+		t.Fatalf("history = %#v, cfg = %#v", item, historyCfg.Outbounds[0])
+	}
+}
+
+func TestReloadManagerDisablesSoleProviderAndRestoresItAtomically(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-reload","object":"chat.completion","created":1,"model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	cfg := baseConfig()
+	cfg.Outbounds[0] = config.OutboundSpec{Name: "openai", Protocol: "openai_chat", Endpoint: upstream.URL + "/v1", AuthToken: "upstream-key", Tag: "mock-tag"}
+	path := writeReloadTestConfig(t, cfg)
+	app, err := NewWithOptions(cfg, Options{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close(context.Background()) }()
+
+	body := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	request := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		app.Server.Listeners()[0].Handler.ServeHTTP(w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
+		return w
+	}
+	if w := request(); w.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("initial request status = %d, calls = %d, body=%s", w.Code, calls.Load(), w.Body.String())
+	}
+
+	disabled, err := app.reloadManager.MutateConfig(context.Background(), "provider_disable_openai", func(next config.Config) (config.Config, error) {
+		return config.SetOutboundEnabled(next, "openai", false)
+	})
+	if err != nil || !disabled.OK || !disabled.Saved || !disabled.Applied {
+		t.Fatalf("disable result = %#v, err=%v", disabled, err)
+	}
+	if w := request(); w.Code != http.StatusBadGateway || calls.Load() != 1 || !strings.Contains(w.Body.String(), "upstream temporarily unavailable") {
+		t.Fatalf("disabled request status = %d, calls = %d, body=%s", w.Code, calls.Load(), w.Body.String())
+	}
+
+	enabled, err := app.reloadManager.MutateConfig(context.Background(), "provider_enable_openai", func(next config.Config) (config.Config, error) {
+		return config.SetOutboundEnabled(next, "openai", true)
+	})
+	if err != nil || !enabled.OK || !enabled.Saved || !enabled.Applied {
+		t.Fatalf("enable result = %#v, err=%v", enabled, err)
+	}
+	if w := request(); w.Code != http.StatusOK || calls.Load() != 2 {
+		t.Fatalf("restored request status = %d, calls = %d, body=%s", w.Code, calls.Load(), w.Body.String())
+	}
+}
+
+func TestReloadManagerRejectsRouteWithUnknownOutboundTag(t *testing.T) {
+	cfg := baseConfig()
+	path := writeReloadTestConfig(t, cfg)
+	app, err := NewWithOptions(cfg, Options{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close(context.Background()) }()
+
+	_, err = app.reloadManager.MutateConfig(context.Background(), "route_typo", func(next config.Config) (config.Config, error) {
+		next.Routing.Rules[0].ToTags = []string{"missing-tag"}
+		return next, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), `to_tags "missing-tag" not found in outbounds`) {
+		t.Fatalf("MutateConfig() error = %v, want unknown outbound tag validation error", err)
+	}
+	if app.cfg.Routing.Rules[0].ToTags[0] != "mock-tag" {
+		t.Fatalf("runtime route changed after rejected mutation: %#v", app.cfg.Routing.Rules[0])
+	}
+}
+
+func TestReloadManagerMutationFailurePreservesDiskAndRuntime(t *testing.T) {
+	cfg := baseConfig()
+	path := writeReloadTestConfig(t, cfg)
+	app, err := NewWithOptions(cfg, Options{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close(context.Background()) }()
+	originalData, _ := os.ReadFile(path)
+	originalDispatcher := app.dispatcher
+
+	t.Run("validation", func(t *testing.T) {
+		_, err := app.reloadManager.MutateConfig(context.Background(), "invalid_provider", func(next config.Config) (config.Config, error) {
+			next.Outbounds[0].Name = ""
+			return next, nil
+		})
+		if err == nil {
+			t.Fatal("MutateConfig() error = nil")
+		}
+	})
+	t.Run("build", func(t *testing.T) {
+		blockedDir := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(blockedDir, []byte("file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := app.reloadManager.MutateConfig(context.Background(), "unbuildable_provider", func(next config.Config) (config.Config, error) {
+			next.Governance.Quota.Snapshot = config.GovernanceQuotaSnapshotConfig{Enabled: true, Dir: blockedDir, FlushInterval: "1h"}
+			next.Outbounds[0].Quota = config.OutboundQuotaConfig{Enabled: true, Cooldown: "10m", ProbeInterval: "1m", Windows: []config.OutboundQuotaWindowConfig{{Name: "hourly", Duration: "1h", MaxRequests: 10}}}
+			return next, nil
+		})
+		if err == nil {
+			t.Fatal("MutateConfig() error = nil")
+		}
+	})
+	gotData, _ := os.ReadFile(path)
+	if string(gotData) != string(originalData) {
+		t.Fatalf("config changed after failed mutation\ngot:\n%s\nwant:\n%s", gotData, originalData)
+	}
+	if app.dispatcher != originalDispatcher || app.cfg.Outbounds[0].Name != cfg.Outbounds[0].Name {
+		t.Fatal("runtime changed after failed mutation")
+	}
+}
+
+func TestReloadManagerMutationRejectsPendingRestartRequiredConfig(t *testing.T) {
+	cfg := baseConfig()
+	path := writeReloadTestConfig(t, cfg)
+	app, err := NewWithOptions(cfg, Options{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close(context.Background()) }()
+
+	pending := cloneConfig(t, cfg)
+	pending.Listeners[0].Listen = ":9090"
+	writeConfigFile(t, path, pending)
+	result, err := app.reloadManager.MutateConfig(context.Background(), "provider_disable_mock", func(next config.Config) (config.Config, error) {
+		return config.SetOutboundEnabled(next, "mock", false)
+	})
+	if err == nil || !result.RestartRequired || !strings.Contains(result.Reason, "listen") {
+		t.Fatalf("MutateConfig() = %#v, err = %v", result, err)
+	}
+	stored, loadErr := config.Load(path)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if stored.Listeners[0].Listen != ":9090" || !config.OutboundEnabled(stored.Outbounds[0]) || !config.OutboundEnabled(app.cfg.Outbounds[0]) {
+		t.Fatalf("disk/runtime changed unexpectedly: stored=%#v runtime=%#v", stored, app.cfg)
+	}
+}
+
+func TestReloadManagerMutationMigratesProviderQuotaState(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Outbounds[0].Quota = config.OutboundQuotaConfig{Enabled: true, Cooldown: "10m", ProbeInterval: "1m", Windows: []config.OutboundQuotaWindowConfig{{Name: "hourly", Duration: "1h", MaxRequests: 10}}}
+	path := writeReloadTestConfig(t, cfg)
+	app, err := NewWithOptions(cfg, Options{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close(context.Background()) }()
+	app.outboundQuotaTracker.RecordSuccess("mock")
+
+	result, err := app.reloadManager.MutateConfig(context.Background(), "provider_quota_update_mock", func(next config.Config) (config.Config, error) {
+		next.Outbounds[0].Quota.Windows[0].MaxRequests = 20
+		return next, nil
+	})
+	if err != nil || result.QuotaStateReset {
+		t.Fatalf("compatible mutation = %#v, err=%v", result, err)
+	}
+	assertOutboundUsage(t, app.outboundQuotaTracker, 1)
+
+	result, err = app.reloadManager.MutateConfig(context.Background(), "provider_quota_window_mock", func(next config.Config) (config.Config, error) {
+		next.Outbounds[0].Quota.Windows[0].Duration = "2h"
+		return next, nil
+	})
+	if err != nil || !result.QuotaStateReset {
+		t.Fatalf("incompatible mutation = %#v, err=%v", result, err)
+	}
+	assertOutboundUsage(t, app.outboundQuotaTracker, 0)
+}
+
+func applyReloadConfig(t *testing.T, app *App, path string, cfg config.Config) ReloadResult {
+	t.Helper()
+	writeConfigFile(t, path, cfg)
+	result, err := app.reloadManager.applyConfig(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("ApplyConfig() error = %v", err)
+	}
+	if !result.OK || !result.Applied {
+		t.Fatalf("ApplyConfig() = %#v, want applied", result)
+	}
+	return result
+}
+
+func assertOutboundUsage(t *testing.T, tracker *quota.Tracker, want ...int) {
+	t.Helper()
+	items := tracker.Snapshot()
+	if len(items) != 1 || len(items[0].Windows) != len(want) {
+		t.Fatalf("quota snapshot = %#v", items)
+	}
+	for i, used := range want {
+		if got := items[0].Windows[i].UsedRequests; got != used {
+			t.Fatalf("window %d used requests = %d, want %d", i, got, used)
+		}
 	}
 }
 

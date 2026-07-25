@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -114,6 +115,80 @@ routing:
       to_tags: [mock-tag]
       strategy: failover
 `
+}
+
+func TestProviderCheckRequiresModelForNonMockProvider(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "pong"}}}})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.admin = config.AdminConfig{Enabled: true, Token: "admin-token"}
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	content := strings.Replace(validGatewayConfigYAML(), "  - name: mock\n    protocol: mock\n    tag: mock-tag", "  - name: live\n    protocol: openai_chat\n    endpoint: "+upstream.URL+"\n    auth_token: test-token\n    tag: mock-tag", 1)
+	if err := os.WriteFile(h.configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	h.handleConfigProviderCheck(w, authorizedRequest(http.MethodPost, "/admin/config/provider/check", "admin-token", []byte(`{"name":"live"}`)))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "model is required") {
+		t.Fatalf("status = %d, body = %s; want 400 model error", w.Code, w.Body.String())
+	}
+}
+
+func TestProviderCheckForwardsExplicitModel(t *testing.T) {
+	modelSeen := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode upstream request: %v", err)
+		}
+		modelSeen <- request.Model
+		writeJSON(w, http.StatusOK, map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "pong"}}}})
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.admin = config.AdminConfig{Enabled: true, Token: "admin-token"}
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	content := strings.Replace(validGatewayConfigYAML(), "  - name: mock\n    protocol: mock\n    tag: mock-tag", "  - name: live\n    protocol: openai_chat\n    endpoint: "+upstream.URL+"\n    auth_token: test-token\n    tag: mock-tag", 1)
+	if err := os.WriteFile(h.configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	h.handleConfigProviderCheck(w, authorizedRequest(http.MethodPost, "/admin/config/provider/check", "admin-token", []byte(`{"name":"live","model":" explicit-model "}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if got := <-modelSeen; got != "explicit-model" {
+		t.Fatalf("upstream model = %q, want explicit-model", got)
+	}
+}
+
+func TestProviderCheckAllowsEmptyModelForMockAndRejectsUnknownFields(t *testing.T) {
+	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
+	h.admin = config.AdminConfig{Enabled: true, Token: "admin-token"}
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(h.configPath, []byte(validGatewayConfigYAML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	h.handleConfigProviderCheck(w, authorizedRequest(http.MethodPost, "/admin/config/provider/check", "admin-token", []byte(`{"name":"mock","model":""}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("mock status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	h.handleConfigProviderCheck(w, authorizedRequest(http.MethodPost, "/admin/config/provider/check", "admin-token", []byte(`{"name":"mock","model":"","unexpected":true}`)))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "unknown field") {
+		t.Fatalf("unknown field status = %d, body = %s", w.Code, w.Body.String())
+	}
 }
 
 func TestHealthzReturnsOK(t *testing.T) {
@@ -672,6 +747,210 @@ func TestChatCompletionsLogsDispatchErrorKind(t *testing.T) {
 	got := logBuf.String()
 	if !strings.Contains(got, "request dispatch failed") || !strings.Contains(got, "error_kind=auth_failed") {
 		t.Fatalf("logs = %q, want dispatch failure log with error_kind", got)
+	}
+}
+
+func TestExecutionErrorsUseInboundProtocolEnvelope(t *testing.T) {
+	const secretUpstreamBody = `{"sensitive":"provider detail"}`
+	tests := []struct {
+		name          string
+		path          string
+		token         string
+		body          func(stream bool) []byte
+		headerName    string
+		assertPayload func(*testing.T, map[string]any)
+	}{
+		{
+			name:       "OpenAI Chat",
+			path:       "/v1/chat/completions",
+			token:      "client-token",
+			headerName: "x-request-id",
+			body: func(stream bool) []byte {
+				payload, _ := json.Marshal(map[string]any{"model": "gpt-4", "stream": stream, "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+				return payload
+			},
+			assertPayload: assertOpenAIQuotaError,
+		},
+		{
+			name:       "OpenAI Responses",
+			path:       "/v1/responses",
+			token:      "responses-token",
+			headerName: "x-request-id",
+			body: func(stream bool) []byte {
+				payload, _ := json.Marshal(map[string]any{"model": "gpt-4", "stream": stream, "input": "hello"})
+				return payload
+			},
+			assertPayload: assertOpenAIQuotaError,
+		},
+		{
+			name:       "Anthropic Messages",
+			path:       "/v1/messages",
+			token:      "anthropic-token",
+			headerName: "request-id",
+			body: func(stream bool) []byte {
+				payload, _ := json.Marshal(map[string]any{"model": "claude-test", "max_tokens": 64, "stream": stream, "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+				return payload
+			},
+			assertPayload: assertAnthropicQuotaError,
+		},
+	}
+
+	for _, tt := range tests {
+		for _, stream := range []bool{false, true} {
+			mode := "non-streaming"
+			if stream {
+				mode = "pre-SSE"
+			}
+			t.Run(tt.name+"/"+mode, func(t *testing.T) {
+				upstreamErr := &provider.ProviderError{
+					Kind:       provider.ErrorKindQuotaExceeded,
+					Err:        errors.New(secretUpstreamBody),
+					StatusCode: http.StatusTooManyRequests,
+					RequestID:  "upstream-request-123",
+					RetryAfter: "17",
+				}
+				h := newTestHandler(t, map[string]provider.Provider{"mock": &failingProvider{name: "mock", err: upstreamErr}}, testRoutingConfig(), testDualProtocolInbounds(), testOutbounds())
+				mux := http.NewServeMux()
+				h.Register(mux)
+
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, authorizedRequest(http.MethodPost, tt.path, tt.token, tt.body(stream)))
+
+				if w.Code != http.StatusTooManyRequests {
+					t.Fatalf("status = %d, want 429, body = %s", w.Code, w.Body.String())
+				}
+				if got := w.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+					t.Fatalf("Content-Type = %q, want application/json", got)
+				}
+				if got := w.Header().Get(tt.headerName); got != "upstream-request-123" {
+					t.Fatalf("%s = %q, want upstream-request-123", tt.headerName, got)
+				}
+				if got := w.Header().Get("Retry-After"); got != "17" {
+					t.Fatalf("Retry-After = %q, want 17", got)
+				}
+				if strings.Contains(w.Body.String(), secretUpstreamBody) || strings.Contains(w.Body.String(), "provider detail") {
+					t.Fatalf("response leaked upstream error body: %s", w.Body.String())
+				}
+				var payload map[string]any
+				if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+					t.Fatalf("decode error response: %v; body = %s", err, w.Body.String())
+				}
+				tt.assertPayload(t, payload)
+			})
+		}
+	}
+}
+
+func assertOpenAIQuotaError(t *testing.T, payload map[string]any) {
+	t.Helper()
+	errorBody, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("error = %#v, want object", payload["error"])
+	}
+	if errorBody["type"] != "rate_limit_error" || errorBody["code"] != "rate_limit_exceeded" {
+		t.Fatalf("error = %#v, want OpenAI quota error", errorBody)
+	}
+	message, _ := errorBody["message"].(string)
+	if message != "upstream quota exceeded (request_id: upstream-request-123)" {
+		t.Fatalf("message = %q, want safe quota message with request id", message)
+	}
+}
+
+func assertAnthropicQuotaError(t *testing.T, payload map[string]any) {
+	t.Helper()
+	if payload["type"] != "error" {
+		t.Fatalf("type = %#v, want error", payload["type"])
+	}
+	errorBody, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("error = %#v, want object", payload["error"])
+	}
+	if errorBody["type"] != "rate_limit_error" {
+		t.Fatalf("error.type = %#v, want rate_limit_error", errorBody["type"])
+	}
+	message, _ := errorBody["message"].(string)
+	if message != "upstream quota exceeded (request_id: upstream-request-123)" {
+		t.Fatalf("message = %q, want safe quota message with request id", message)
+	}
+}
+
+func TestModelUnavailableUsesInboundProtocolEnvelope(t *testing.T) {
+	const requestedModel = "private-client-model"
+	tests := []struct {
+		name  string
+		path  string
+		token string
+		body  func(bool) []byte
+	}{
+		{name: "OpenAI Chat", path: "/v1/chat/completions", token: "client-token", body: func(stream bool) []byte {
+			payload, _ := json.Marshal(map[string]any{"model": requestedModel, "stream": stream, "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+			return payload
+		}},
+		{name: "OpenAI Responses", path: "/v1/responses", token: "responses-token", body: func(stream bool) []byte {
+			payload, _ := json.Marshal(map[string]any{"model": requestedModel, "stream": stream, "input": "hello"})
+			return payload
+		}},
+		{name: "Anthropic Messages", path: "/v1/messages", token: "anthropic-token", body: func(stream bool) []byte {
+			payload, _ := json.Marshal(map[string]any{"model": requestedModel, "max_tokens": 64, "stream": stream, "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+			return payload
+		}},
+	}
+	for _, tt := range tests {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tt.name, stream), func(t *testing.T) {
+				outbounds := testOutbounds()
+				outbounds[0].Models = []config.OutboundModelSpec{{Name: "allowed-model", Aliases: []string{"public-alias"}}}
+				h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testDualProtocolInbounds(), outbounds)
+				mux := http.NewServeMux()
+				h.Register(mux)
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, authorizedRequest(http.MethodPost, tt.path, tt.token, tt.body(stream)))
+				if w.Code != http.StatusNotFound {
+					t.Fatalf("status = %d, want 404, body = %s", w.Code, w.Body.String())
+				}
+				if got := w.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+					t.Fatalf("Content-Type = %q, want pre-SSE JSON", got)
+				}
+				if strings.Contains(w.Body.String(), "allowed-model") || strings.Contains(w.Body.String(), "public-alias") {
+					t.Fatalf("response leaked provider model allowlist: %s", w.Body.String())
+				}
+				var payload map[string]any
+				if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+					t.Fatalf("decode response: %v", err)
+				}
+				errorBody, _ := payload["error"].(map[string]any)
+				if tt.name == "Anthropic Messages" {
+					if payload["type"] != "error" || errorBody["type"] != "invalid_request_error" {
+						t.Fatalf("payload = %#v, want Anthropic invalid_request_error", payload)
+					}
+				} else if errorBody["type"] != "invalid_request_error" || errorBody["code"] != "model_not_found" {
+					t.Fatalf("payload = %#v, want OpenAI model_not_found", payload)
+				}
+				if message, _ := errorBody["message"].(string); !strings.Contains(message, requestedModel) {
+					t.Fatalf("message = %q, want requested model", message)
+				}
+			})
+		}
+	}
+}
+
+func TestExecutionErrorRejectsUnsafeMetadata(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeExecutionError(w, "openai_chat", &provider.ProviderError{
+		Kind:       provider.ErrorKindFatal,
+		Err:        errors.New("private upstream response body"),
+		RequestID:  "unsafe\r\nX-Injected: yes",
+		RetryAfter: "not-a-retry-delay",
+	})
+
+	if got := w.Header().Get("x-request-id"); got != "" {
+		t.Fatalf("x-request-id = %q, want empty", got)
+	}
+	if got := w.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After = %q, want empty", got)
+	}
+	if strings.Contains(w.Body.String(), "private upstream response body") {
+		t.Fatalf("response leaked upstream error body: %s", w.Body.String())
 	}
 }
 
@@ -3832,8 +4111,8 @@ func TestChatCompletionsReturnsBadGatewayForEmptyUpstreamResponse(t *testing.T) 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502, body = %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "upstream returned no content and no tool calls") {
-		t.Fatalf("body = %q, want explicit upstream empty response error", w.Body.String())
+	if !strings.Contains(w.Body.String(), `"message":"upstream request failed"`) || strings.Contains(w.Body.String(), "upstream returned no content and no tool calls") {
+		t.Fatalf("body = %q, want safe upstream failure error", w.Body.String())
 	}
 }
 
@@ -3866,8 +4145,8 @@ func TestChatCompletionsStreamingReturnsBadGatewayForEmptyUpstreamResponse(t *te
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502, body = %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "upstream returned no content and no tool calls") {
-		t.Fatalf("body = %q, want explicit upstream empty response error", w.Body.String())
+	if !strings.Contains(w.Body.String(), `"message":"upstream request failed"`) || strings.Contains(w.Body.String(), "upstream returned no content and no tool calls") {
+		t.Fatalf("body = %q, want safe upstream failure error", w.Body.String())
 	}
 }
 

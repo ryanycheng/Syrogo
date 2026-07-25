@@ -30,6 +30,7 @@ type ReloadManager struct {
 
 type ReloadResult struct {
 	OK              bool   `json:"ok"`
+	Saved           bool   `json:"saved"`
 	Applied         bool   `json:"applied"`
 	RestartRequired bool   `json:"restart_required"`
 	Reason          string `json:"reason,omitempty"`
@@ -61,6 +62,11 @@ func NewReloadManager(app *App, bindings []listenerBinding) *ReloadManager {
 
 func (m *ReloadManager) ApplyConfig(ctx context.Context) (gateway.ReloadResult, error) {
 	result, err := m.applyConfig(ctx, "apply")
+	return gateway.ReloadResult(result), err
+}
+
+func (m *ReloadManager) MutateConfig(ctx context.Context, reason string, mutate gateway.ConfigMutation) (gateway.ReloadResult, error) {
+	result, err := m.mutateConfig(ctx, reason, mutate)
 	return gateway.ReloadResult(result), err
 }
 
@@ -124,14 +130,74 @@ func (m *ReloadManager) applyConfigLocked(_ context.Context, reason string) (Rel
 	if restartReason := restartRequiredReason(m.app.cfg, next); restartReason != "" {
 		return ReloadResult{OK: true, Applied: false, RestartRequired: true, Reason: restartReason}, nil
 	}
+	runtime, err := buildRuntimeWithTrackers(next, m.app.accountingStore, m.app.outboundQuotaTracker, m.app.clientQuotaTracker, false)
+	if err != nil {
+		return ReloadResult{}, err
+	}
 	historyID, err := m.history.SaveConfig(m.app.configPath, m.app.cfg, reason)
 	if err != nil {
+		_ = runtime.quotaSnapshotStore.Close(context.Background())
 		return ReloadResult{}, err
 	}
-	runtime, err := buildRuntime(next, m.app.accountingStore)
+	quotaStateReset := m.applyRuntimeLocked(next, runtime)
+	return ReloadResult{OK: true, Applied: true, Reason: reason, HistoryID: historyID, QuotaStateReset: quotaStateReset}, nil
+}
+
+func (m *ReloadManager) mutateConfig(_ context.Context, reason string, mutate gateway.ConfigMutation) (ReloadResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.app.configPath == "" {
+		return ReloadResult{}, errors.New("config path is not configured")
+	}
+	if mutate == nil {
+		return ReloadResult{}, errors.New("config mutation is required")
+	}
+	currentData, err := os.ReadFile(m.app.configPath)
+	if err != nil {
+		return ReloadResult{}, fmt.Errorf("read config: %w", err)
+	}
+	current, err := config.ParseBytes(currentData)
 	if err != nil {
 		return ReloadResult{}, err
 	}
+	if pendingReason := restartRequiredReason(m.app.cfg, current); pendingReason != "" {
+		return ReloadResult{RestartRequired: true, Reason: pendingReason}, fmt.Errorf("config has pending restart-required change: %s", pendingReason)
+	}
+	next, err := mutate(current)
+	if err != nil {
+		return ReloadResult{}, err
+	}
+	nextData, err := yaml.Marshal(next)
+	if err != nil {
+		return ReloadResult{}, fmt.Errorf("marshal config: %w", err)
+	}
+	next, err = config.ParseBytes(nextData)
+	if err != nil {
+		return ReloadResult{}, err
+	}
+	if restartReason := restartRequiredReason(m.app.cfg, next); restartReason != "" {
+		return ReloadResult{RestartRequired: true, Reason: restartReason}, fmt.Errorf("config mutation requires restart: %s", restartReason)
+	}
+	runtime, err := buildRuntimeWithTrackers(next, m.app.accountingStore, m.app.outboundQuotaTracker, m.app.clientQuotaTracker, false)
+	if err != nil {
+		return ReloadResult{}, err
+	}
+	historyID, err := m.history.SaveBytes(m.app.configPath, currentData, reason)
+	if err != nil {
+		_ = runtime.quotaSnapshotStore.Close(context.Background())
+		return ReloadResult{}, err
+	}
+	if err := config.WriteValidatedFile(m.app.configPath, nextData); err != nil {
+		_ = runtime.quotaSnapshotStore.Close(context.Background())
+		return ReloadResult{}, err
+	}
+	quotaStateReset := m.applyRuntimeLocked(next, runtime)
+	return ReloadResult{OK: true, Saved: true, Applied: true, Reason: reason, HistoryID: historyID, QuotaStateReset: quotaStateReset}, nil
+}
+
+func (m *ReloadManager) applyRuntimeLocked(next config.Config, runtime appRuntime) bool {
+	quotaStateReset := runtime.outboundQuotaTracker.ReconfigureOutbounds(enabledOutbounds(next))
+	quotaStateReset = runtime.clientQuotaTracker.ReconfigureInbounds(next.Inbounds) || quotaStateReset
 	listeners := normalizedListeners(next)
 	for i, binding := range m.bindings {
 		binding.handler.ApplyRuntime(gateway.RuntimeState{
@@ -149,11 +215,13 @@ func (m *ReloadManager) applyConfigLocked(_ context.Context, reason string) (Rel
 	oldSnapshotStore := m.app.quotaSnapshotStore
 	m.app.cfg = next
 	m.app.dispatcher = runtime.dispatcher
+	m.app.outboundQuotaTracker = runtime.outboundQuotaTracker
+	m.app.clientQuotaTracker = runtime.clientQuotaTracker
 	m.app.quotaSnapshotStore = runtime.quotaSnapshotStore
 	if oldSnapshotStore != nil {
 		_ = oldSnapshotStore.Close(context.Background())
 	}
-	return ReloadResult{OK: true, Applied: true, HistoryID: historyID, QuotaStateReset: true}, nil
+	return quotaStateReset
 }
 
 func (m *ReloadManager) rollback(ctx context.Context, id string) (ReloadResult, error) {

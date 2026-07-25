@@ -95,7 +95,7 @@ func (openAIChatCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Request
 			slog.String("model", req.Model),
 			slog.Any("error", err),
 		)
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRoutingError(w, inbound.Protocol, err)
 		return
 	}
 	logger.Info("request routed",

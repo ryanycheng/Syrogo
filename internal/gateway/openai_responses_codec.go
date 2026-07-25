@@ -124,7 +124,7 @@ func (openAIResponsesCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Re
 			slog.String("model", req.Model),
 			slog.Any("error", err),
 		)
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRoutingError(w, inbound.Protocol, err)
 		return
 	}
 	logger.Info("request routed",

@@ -169,6 +169,95 @@ func TestClientTrackerAppliesWindows(t *testing.T) {
 	}
 }
 
+func TestTrackerDualDimensionsAndRollingRetryAfter(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	tracker := NewTestTracker([]OutboundConfig{{
+		Name: "primary", Windows: []WindowConfig{{Name: "hourly", Duration: time.Hour, MaxRequests: 10, MaxTokens: 100}},
+	}}, func() time.Time { return now })
+	tracker.RecordSuccess("primary", 60)
+	now = now.Add(10 * time.Minute)
+	tracker.RecordSuccess("primary", 50)
+
+	decision := tracker.BeforeAttempt("primary")
+	if decision.Allowed || !decision.RetryAfter.Equal(time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC)) {
+		t.Fatalf("BeforeAttempt() = %#v, want token limit until first event expires", decision)
+	}
+	window := tracker.Snapshot()[0].Windows[0]
+	if window.UsedRequests != 2 || window.UsedTokens != 110 || window.RemainingTokens != 0 || window.Used != window.UsedRequests {
+		t.Fatalf("Snapshot window = %#v, want dual usage and request aliases", window)
+	}
+}
+
+func TestTrackerFixedPeriods(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 3, 8, 1, 30, 0, 0, location)
+	tracker := NewTestTracker([]OutboundConfig{{Name: "primary", Windows: []WindowConfig{
+		{Name: "interval", Reset: "fixed", FixedPeriod: "interval", Duration: 2 * time.Hour, Anchor: time.Date(2026, 3, 8, 8, 0, 0, 0, time.UTC), MaxRequests: 1},
+		{Name: "daily", Reset: "fixed", FixedPeriod: "daily", Time: "01:00", Timezone: "America/New_York", MaxRequests: 1},
+		{Name: "weekly", Reset: "fixed", FixedPeriod: "weekly", Time: "01:00", Timezone: "America/New_York", Weekday: time.Sunday, MaxRequests: 1},
+	}}}, func() time.Time { return now })
+	tracker.RecordSuccess("primary")
+	windows := tracker.Snapshot()[0].Windows
+	if windows[0].ResetAt != "2026-03-08T08:00:00Z" { // now is before the anchor; floor selects 06:00Z-08:00Z.
+		t.Fatalf("interval reset_at = %q", windows[0].ResetAt)
+	}
+	if windows[1].ResetAt != "2026-03-09T05:00:00Z" || windows[2].ResetAt != "2026-03-15T05:00:00Z" {
+		t.Fatalf("civil reset_at daily=%q weekly=%q, want calendar boundaries across DST", windows[1].ResetAt, windows[2].ResetAt)
+	}
+
+	now = time.Date(2026, 3, 9, 1, 0, 0, 0, location)
+	windows = tracker.Snapshot()[0].Windows
+	if windows[1].UsedRequests != 0 || windows[2].UsedRequests != 1 {
+		t.Fatalf("usage after daily boundary = %#v, want weekly retained", windows)
+	}
+}
+
+func TestTrackerResetAllPreservesCooldownMetadata(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 30, 0, 0, time.UTC)
+	tracker := NewTestTracker([]OutboundConfig{{
+		Name: "primary", Cooldown: 2 * time.Hour, ProbeInterval: time.Hour,
+		ResetAll: ResetAllConfig{Enabled: true, Period: "daily", Time: "10:00", Timezone: "UTC"},
+		Windows:  []WindowConfig{{Name: "daily", Duration: 24 * time.Hour, MaxRequests: 2}},
+	}}, func() time.Time { return now })
+	tracker.RecordSuccess("primary")
+	tracker.RecordQuotaExceeded("primary")
+	now = time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC)
+	item := tracker.Snapshot()[0]
+	if item.Windows[0].UsedRequests != 0 || item.State != StateCooldown || item.LastQuotaExceededAt == "" || item.LastSuccessAt == "" {
+		t.Fatalf("Snapshot() = %#v, reset-all must only clear window usage", item)
+	}
+}
+
+func TestTrackerReconfigureCompatibility(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	base := OutboundConfig{Name: "primary", Cooldown: time.Hour, ProbeInterval: time.Minute, Windows: []WindowConfig{{Name: "window", Duration: time.Hour, MaxRequests: 2}}}
+	tracker := NewTestTracker([]OutboundConfig{base}, func() time.Time { return now })
+	tracker.RecordSuccess("primary", 20)
+	tracker.RecordQuotaExceeded("primary")
+
+	limitChanged := base
+	limitChanged.Windows = []WindowConfig{{Name: "window", Duration: time.Hour, MaxRequests: 5, MaxTokens: 100}}
+	if cleared := tracker.Reconfigure([]OutboundConfig{limitChanged}); cleared {
+		t.Fatal("compatible limit change reported a reset")
+	}
+	if got := tracker.Snapshot()[0].Windows[0].UsedTokens; got != 20 {
+		t.Fatalf("compatible usage = %d, want 20", got)
+	}
+
+	incompatible := limitChanged
+	incompatible.Windows = []WindowConfig{{Name: "window", Duration: 2 * time.Hour, MaxRequests: 5}}
+	if cleared := tracker.Reconfigure([]OutboundConfig{incompatible}); !cleared {
+		t.Fatal("incompatible duration change did not report reset")
+	}
+	item := tracker.Snapshot()[0]
+	if item.Windows[0].UsedRequests != 0 || item.State != StateCooldown {
+		t.Fatalf("Snapshot() = %#v, want local usage reset and cooldown retained", item)
+	}
+}
+
 func TestClientTrackerSnapshotReportsClientState(t *testing.T) {
 	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
 	tracker := NewTestClientTracker([]ClientConfig{{
