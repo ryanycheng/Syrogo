@@ -18,6 +18,10 @@ PURGE_CONFIG=0
 SERVICE_USER="syrogo"
 SKIP_HEALTHCHECK=0
 FORCE_CONFIG=0
+CONFIG_SOURCE_EXPLICIT=0
+BOOTSTRAP=0
+BOOTSTRAP_ADMIN_TOKEN=""
+BOOTSTRAP_CLIENT_TOKEN=""
 CONFIG_INITIALIZED=0
 CONFIG_UPDATED=0
 HEALTH_URL="http://127.0.0.1:23234/healthz"
@@ -34,6 +38,7 @@ Usage:
   sudo bash ./scripts/install.sh
   sudo bash ./scripts/install.sh --archive <path>
   sudo bash ./scripts/install.sh --version <tag>
+  sudo env SYROGO_BOOTSTRAP_ADMIN_TOKEN=<token> bash ./scripts/install.sh --bootstrap --version <tag>
   sudo bash ./scripts/install.sh --uninstall
   sudo bash ./scripts/install.sh --uninstall --purge-config
   curl -fsSL <raw-install-url> | sudo bash -s --
@@ -42,6 +47,7 @@ Usage:
 Options:
   --archive <path>       Local release archive (.tar.gz)
   --version <tag>        Release tag such as v0.1.0
+  --bootstrap            Initialize a new Console bootstrap config (requires --version and SYROGO_BOOTSTRAP_ADMIN_TOKEN)
   --uninstall            Remove installed service and files under /opt/syrogo
   --purge-config         Kept for compatibility; uninstall already removes the default /opt config
   --config <path>        Local config source path (default: /opt/syrogo/config/config.yaml)
@@ -68,7 +74,11 @@ EOF
 }
 
 log() {
-  printf '[install] %s\n' "$*"
+  if [ "$BOOTSTRAP" -eq 1 ]; then
+    printf '[install] %s\n' "$*" >&2
+  else
+    printf '[install] %s\n' "$*"
+  fi
 }
 
 fail() {
@@ -182,6 +192,10 @@ parse_args() {
         VERSION="$2"
         shift 2
         ;;
+      --bootstrap)
+        BOOTSTRAP=1
+        shift
+        ;;
       --uninstall)
         UNINSTALL=1
         shift
@@ -193,6 +207,7 @@ parse_args() {
       --config)
         [ "$#" -ge 2 ] || fail "missing value for --config"
         CONFIG_SOURCE="$2"
+        CONFIG_SOURCE_EXPLICIT=1
         shift 2
         ;;
       --force-config)
@@ -240,6 +255,10 @@ parse_args() {
 
   BIN_PATH="$INSTALL_ROOT/bin/syrogo"
   CONFIG_PATH="$INSTALL_ROOT/config/config.yaml"
+  DEFAULT_CONFIG_SOURCE="$CONFIG_PATH"
+  if [ "$CONFIG_SOURCE_EXPLICIT" -eq 0 ]; then
+    CONFIG_SOURCE="$DEFAULT_CONFIG_SOURCE"
+  fi
   SYSTEMD_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
   if [ "$UNINSTALL" -eq 1 ] && { [ -n "$ARCHIVE" ] || [ -n "$VERSION" ] || [ "$FORCE_CONFIG" -eq 1 ] || [ "$SKIP_HEALTHCHECK" -eq 1 ]; }; then
@@ -248,6 +267,24 @@ parse_args() {
 
   if [ "$PURGE_CONFIG" -eq 1 ] && [ "$UNINSTALL" -ne 1 ]; then
     fail "--purge-config requires --uninstall"
+  fi
+
+  if [ "$BOOTSTRAP" -eq 1 ]; then
+    [ -n "$VERSION" ] || fail "--bootstrap requires an explicit non-empty --version"
+    [ -z "$ARCHIVE" ] || fail "--bootstrap cannot be combined with --archive"
+    [ "$UNINSTALL" -eq 0 ] || fail "--bootstrap cannot be combined with --uninstall"
+    [ "$FORCE_CONFIG" -eq 0 ] || fail "--bootstrap cannot be combined with --force-config"
+    [ "$CONFIG_SOURCE_EXPLICIT" -eq 0 ] || fail "--bootstrap cannot be combined with --config"
+    if [ -e "$CONFIG_PATH" ] || [ -L "$CONFIG_PATH" ]; then
+      fail "--bootstrap requires a new config; refusing to overwrite: $CONFIG_PATH"
+    fi
+
+    BOOTSTRAP_ADMIN_TOKEN="${SYROGO_BOOTSTRAP_ADMIN_TOKEN:-}"
+    unset SYROGO_BOOTSTRAP_ADMIN_TOKEN
+    [ -n "$BOOTSTRAP_ADMIN_TOKEN" ] || fail "--bootstrap requires non-empty SYROGO_BOOTSTRAP_ADMIN_TOKEN"
+    case "$BOOTSTRAP_ADMIN_TOKEN" in
+      *[!A-Za-z0-9_-]*) fail "SYROGO_BOOTSTRAP_ADMIN_TOKEN must be hex or URL-safe" ;;
+    esac
   fi
 }
 
@@ -263,6 +300,11 @@ resolve_latest_version() {
 }
 
 config_init_url() {
+  if [ "$BOOTSTRAP" -eq 1 ]; then
+    printf 'https://raw.githubusercontent.com/%s/refs/tags/%s/configs/config.console-bootstrap.yaml' "$REPO" "$VERSION"
+    return
+  fi
+
   if [ -n "$VERSION" ]; then
     printf 'https://raw.githubusercontent.com/%s/refs/tags/%s/configs/config.example.yaml' "$REPO" "$VERSION"
     return
@@ -271,8 +313,68 @@ config_init_url() {
   printf 'https://raw.githubusercontent.com/%s/refs/heads/master/configs/config.example.yaml' "$REPO"
 }
 
+generate_bootstrap_client_token() {
+  od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+download_bootstrap_config() {
+  local url bootstrap_tmp admin_count client_count line rendered
+  command -v curl >/dev/null 2>&1 || fail "curl is required to initialize the bootstrap config"
+  command -v od >/dev/null 2>&1 || fail "od is required to generate the bootstrap client token"
+
+  install -d -m 0755 "$(dirname "$DEFAULT_CONFIG_SOURCE")"
+  bootstrap_tmp="$(mktemp "$(dirname "$DEFAULT_CONFIG_SOURCE")/.config.bootstrap.XXXXXX")"
+  chmod 0600 "$bootstrap_tmp"
+  url="$(config_init_url)"
+  log "downloading Console bootstrap config"
+  log "config source url: $url"
+  if ! curl_download "$url" "$bootstrap_tmp"; then
+    rm -f "$bootstrap_tmp"
+    fail "failed to download Console bootstrap config"
+  fi
+
+  admin_count="$({ grep -o '__SYROGO_CONSOLE_ADMIN_TOKEN__' "$bootstrap_tmp" || true; } | wc -l | tr -d '[:space:]')"
+  client_count="$({ grep -o '__SYROGO_CONSOLE_CLIENT_TOKEN__' "$bootstrap_tmp" || true; } | wc -l | tr -d '[:space:]')"
+  if [ "$admin_count" != "1" ] || [ "$client_count" != "1" ]; then
+    rm -f "$bootstrap_tmp"
+    fail "bootstrap config must contain exactly one admin and one client token placeholder"
+  fi
+
+  if ! BOOTSTRAP_CLIENT_TOKEN="$(generate_bootstrap_client_token)" || [ "${#BOOTSTRAP_CLIENT_TOKEN}" -ne 64 ]; then
+    rm -f "$bootstrap_tmp"
+    fail "failed to generate bootstrap client token"
+  fi
+
+  rendered="${bootstrap_tmp}.rendered"
+  : > "$rendered"
+  chmod 0600 "$rendered"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line//__SYROGO_CONSOLE_ADMIN_TOKEN__/$BOOTSTRAP_ADMIN_TOKEN}"
+    line="${line//__SYROGO_CONSOLE_CLIENT_TOKEN__/$BOOTSTRAP_CLIENT_TOKEN}"
+    printf '%s\n' "$line" >> "$rendered"
+  done < "$bootstrap_tmp"
+  rm -f "$bootstrap_tmp"
+
+  if grep -q '__SYROGO_CONSOLE_.*_TOKEN__' "$rendered"; then
+    rm -f "$rendered"
+    fail "bootstrap config contains unreplaced token placeholders"
+  fi
+  if ! ln "$rendered" "$DEFAULT_CONFIG_SOURCE"; then
+    rm -f "$rendered"
+    fail "bootstrap config appeared during installation; refusing to overwrite: $DEFAULT_CONFIG_SOURCE"
+  fi
+  rm -f "$rendered"
+  BOOTSTRAP_ADMIN_TOKEN=""
+  CONFIG_INITIALIZED=1
+}
+
 download_default_config() {
   local url
+  if [ "$BOOTSTRAP" -eq 1 ]; then
+    download_bootstrap_config
+    return
+  fi
+
   command -v curl >/dev/null 2>&1 || fail "curl is required to initialize the default config"
   install -d -m 0755 "$(dirname "$DEFAULT_CONFIG_SOURCE")"
   url="$(config_init_url)"
@@ -546,6 +648,11 @@ main() {
   healthcheck
   write_version_receipt
   chown "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_ROOT/VERSION"
+  if [ "$BOOTSTRAP" -eq 1 ]; then
+    [ -n "$BOOTSTRAP_CLIENT_TOKEN" ] || fail "bootstrap client token was not generated"
+    printf '%s\n' "$BOOTSTRAP_CLIENT_TOKEN"
+    return
+  fi
   log "installed Syrogo to $INSTALL_ROOT"
   log "command path: $SYMLINK_PATH"
   log "config path: $CONFIG_PATH"
