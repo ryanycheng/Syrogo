@@ -82,7 +82,7 @@ func TestRotatingWriterGzip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	zr, err := gzip.NewReader(file)
 	if err != nil {
 		t.Fatal(err)
@@ -279,12 +279,12 @@ func assertGzipContent(t *testing.T, path, want string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	zr, err := gzip.NewReader(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 	got, err := io.ReadAll(zr)
 	if err != nil {
 		t.Fatal(err)
@@ -320,7 +320,7 @@ func TestArchiveNamingSequenceAvoidsCollision(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
-		_, _ = w.Write([]byte(fmt.Sprint(i)))
+		_, _ = fmt.Fprint(w, i)
 	}
 	if err := w.Close(); err != nil {
 		t.Fatal(err)

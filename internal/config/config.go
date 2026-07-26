@@ -88,7 +88,6 @@ type QuotaWindowConfig struct {
 }
 
 func (w *QuotaWindowConfig) UnmarshalYAML(node *yaml.Node) error {
-	type rawWindow QuotaWindowConfig
 	var raw struct {
 		Name        string        `yaml:"name"`
 		Type        string        `yaml:"type"`

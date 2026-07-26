@@ -117,12 +117,10 @@ func (w *RotatingWriter) rotate(now time.Time) (string, error) {
 	}
 	archive, err := w.nextArchiveName(now)
 	if err != nil {
-		w.reopenCurrent(now)
-		return "", err
+		return "", errors.Join(err, w.reopenCurrent(now))
 	}
 	if err := os.Rename(w.opts.Path, archive); err != nil {
-		w.reopenCurrent(now)
-		return "", fmt.Errorf("logging: archive current file: %w", err)
+		return "", errors.Join(fmt.Errorf("logging: archive current file: %w", err), w.reopenCurrent(now))
 	}
 	if err := w.reopenCurrent(now); err != nil {
 		return "", err
@@ -233,12 +231,14 @@ func (w *RotatingWriter) reportError(err error) {
 	_, _ = fmt.Fprintf(w.opts.ErrorWriter, "logging rotation: %v\n", err)
 }
 
-func gzipArchive(path string) error {
+func gzipArchive(path string) (err error) {
 	source, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open archive for gzip: %w", err)
 	}
-	defer source.Close()
+	defer func() {
+		err = errors.Join(err, source.Close())
+	}()
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".log-gzip-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create gzip temporary file: %w", err)
