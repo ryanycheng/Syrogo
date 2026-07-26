@@ -314,6 +314,38 @@ detect_arch() {
   esac
 }
 
+verify_release_archive() {
+  local archive_name checksum_file checksum_name checksum_url expected actual file
+  archive_name="$(basename "$ARCHIVE")"
+  checksum_name="syrogo_${VERSION}_checksums.txt"
+  checksum_file="$TMP_DIR/$checksum_name"
+  checksum_url="https://github.com/${REPO}/releases/download/${VERSION}/${checksum_name}"
+
+  command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required to verify release downloads"
+  log "downloading ${checksum_url}"
+  curl_download "$checksum_url" "$checksum_file"
+
+  expected=""
+  while read -r hash file; do
+    file="${file#\*}"
+    if [ "$file" = "$archive_name" ]; then
+      expected="$hash"
+      break
+    fi
+  done < "$checksum_file"
+  [ -n "$expected" ] || fail "checksum for $archive_name not found in $checksum_name"
+  case "$expected" in
+    *[!0-9A-Fa-f]*|'') fail "invalid checksum for $archive_name in $checksum_name" ;;
+  esac
+  [ "${#expected}" -eq 64 ] || fail "invalid checksum for $archive_name in $checksum_name"
+
+  expected="${expected,,}"
+  actual="$(sha256sum "$ARCHIVE")"
+  actual="${actual%% *}"
+  [ "$actual" = "$expected" ] || fail "checksum verification failed for $archive_name"
+  log "verified release checksum: $archive_name"
+}
+
 download_archive() {
   local arch url
   arch="$(detect_arch)"
@@ -322,6 +354,7 @@ download_archive() {
   url="https://github.com/${REPO}/releases/download/${VERSION}/syrogo_${VERSION}_linux_${arch}.tar.gz"
   log "downloading ${url}"
   curl_download_resume "$url" "$ARCHIVE"
+  verify_release_archive
 }
 
 ensure_service_user() {
@@ -373,14 +406,26 @@ install_or_keep_config() {
   fi
 
   if [ "$CONFIG_SOURCE" = "$CONFIG_PATH" ]; then
+    chmod 0600 "$CONFIG_PATH"
     CONFIG_UPDATED=1
     log "using config in place: $CONFIG_PATH"
     return
   fi
 
-  install -m 0644 "$CONFIG_SOURCE" "$CONFIG_PATH"
+  install -m 0600 "$CONFIG_SOURCE" "$CONFIG_PATH"
   CONFIG_UPDATED=1
   log "installed config from $CONFIG_SOURCE"
+}
+
+write_version_receipt() {
+  local receipt_version
+  receipt_version="$VERSION"
+  if [ -z "$receipt_version" ]; then
+    receipt_version="local-archive"
+    log "local archive supplied; release checksum was not verified"
+  fi
+  printf '%s\n' "$receipt_version" > "$INSTALL_ROOT/VERSION"
+  chmod 0644 "$INSTALL_ROOT/VERSION"
 }
 
 install_unit() {
@@ -499,6 +544,8 @@ main() {
   chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_ROOT"
   start_service
   healthcheck
+  write_version_receipt
+  chown "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_ROOT/VERSION"
   log "installed Syrogo to $INSTALL_ROOT"
   log "command path: $SYMLINK_PATH"
   log "config path: $CONFIG_PATH"
@@ -510,4 +557,6 @@ main() {
   fi
 }
 
-main "$@"
+if [ "${SYROGO_INSTALL_TEST_MODE:-0}" -ne 1 ]; then
+  main "$@"
+fi

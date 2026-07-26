@@ -1687,6 +1687,34 @@ routing:
 	}
 }
 
+func TestConsoleBootstrapConfigIsMinimalAndValid(t *testing.T) {
+	path := filepath.Join("..", "..", "configs", "config.console-bootstrap.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	cfg, err := ParseBytes(data)
+	if err != nil {
+		t.Fatalf("ParseBytes() error = %v", err)
+	}
+
+	if len(cfg.Listeners) != 1 || cfg.Listeners[0].Listen != "127.0.0.1:23234" {
+		t.Fatalf("listeners = %#v, want one loopback listener", cfg.Listeners)
+	}
+	if !cfg.Admin.Enabled || cfg.Admin.Token != "__SYROGO_CONSOLE_ADMIN_TOKEN__" {
+		t.Fatalf("admin = %#v, want enabled with installer placeholder", cfg.Admin)
+	}
+	if len(cfg.Clients) != 1 || cfg.Clients[0].Token != "__SYROGO_CONSOLE_CLIENT_TOKEN__" {
+		t.Fatalf("clients = %#v, want one installer placeholder", cfg.Clients)
+	}
+	if len(cfg.Inbounds) != 1 || len(cfg.Routing.Rules) != 1 || len(cfg.Outbounds) != 1 || cfg.Outbounds[0].Protocol != "mock" {
+		t.Fatalf("bootstrap path is not minimal: inbounds=%#v routing=%#v outbounds=%#v", cfg.Inbounds, cfg.Routing, cfg.Outbounds)
+	}
+	if strings.Count(string(data), "__SYROGO_CONSOLE_") != 2 {
+		t.Fatalf("bootstrap placeholders = %d, want exactly 2", strings.Count(string(data), "__SYROGO_CONSOLE_"))
+	}
+}
+
 func TestLoadSuccess(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

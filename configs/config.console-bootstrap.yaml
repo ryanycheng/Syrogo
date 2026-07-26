@@ -1,0 +1,35 @@
+listeners:
+  - name: console-bootstrap
+    listen: "127.0.0.1:23234"
+    inbounds:
+      - mock-entry
+
+clients:
+  - name: console-bootstrap-client
+    token: "__SYROGO_CONSOLE_CLIENT_TOKEN__"
+
+inbounds:
+  - name: mock-entry
+    protocol: openai_chat
+    path: /v1/chat/completions
+    clients:
+      - ref: console-bootstrap-client
+        tag: console-bootstrap
+
+routing:
+  rules:
+    - name: console-bootstrap-route
+      from_tags:
+        - console-bootstrap
+      to_tags:
+        - mock
+      strategy: failover
+
+outbounds:
+  - name: mock
+    protocol: mock
+    tag: mock
+
+admin:
+  enabled: true
+  token: "__SYROGO_CONSOLE_ADMIN_TOKEN__"
