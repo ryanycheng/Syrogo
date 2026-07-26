@@ -15,13 +15,19 @@ const defaultRecentRecordsLimit = 10000
 var usageGroupBys = []string{"key", "provider", "model", "inbound", "source", "outbound", "error_kind", "date", "agent", "session"}
 
 type MemoryStore struct {
-	mu      sync.Mutex
-	totals  map[string]map[string]StatsItem
-	windows map[Window]map[string]map[string]StatsItem
-	recent  []runtime.UsageRecord
+	mu                sync.Mutex
+	totals            map[string]map[string]StatsItem
+	windows           map[Window]map[string]map[string]StatsItem
+	recent            []runtime.UsageRecord
+	trackingStartedAt time.Time
+	coverageKnown     bool
 }
 
 func NewMemoryStore() *MemoryStore {
+	return newMemoryStore(time.Now().UTC(), true)
+}
+
+func newMemoryStore(trackingStartedAt time.Time, coverageKnown bool) *MemoryStore {
 	return &MemoryStore{
 		totals: make(map[string]map[string]StatsItem),
 		windows: map[Window]map[string]map[string]StatsItem{
@@ -29,6 +35,8 @@ func NewMemoryStore() *MemoryStore {
 			WindowWeek:  make(map[string]map[string]StatsItem),
 			WindowMonth: make(map[string]map[string]StatsItem),
 		},
+		trackingStartedAt: trackingStartedAt.UTC(),
+		coverageKnown:     coverageKnown,
 	}
 }
 
@@ -44,6 +52,19 @@ func (s *MemoryStore) Record(record runtime.UsageRecord) {
 }
 
 func (s *MemoryStore) Query(query Query) ([]StatsItem, error) {
+	hasLegacy := query.Window != "" || query.Bucket != ""
+	hasDateRange := query.StartDate != "" || query.EndDate != ""
+	if query.ClientName != "" {
+		if query.GroupBy != "date" {
+			return nil, fmt.Errorf("client_name requires group_by=date")
+		}
+		if !hasDateRange {
+			return nil, fmt.Errorf("client_name requires start_date and end_date")
+		}
+		if hasLegacy {
+			return nil, fmt.Errorf("client_name start_date/end_date cannot be combined with window/bucket")
+		}
+	}
 	if query.GroupBy == "" {
 		query.GroupBy = "key"
 	}
@@ -60,7 +81,7 @@ func (s *MemoryStore) Query(query Query) ([]StatsItem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if query.StartDate != "" || query.EndDate != "" {
+	if hasDateRange {
 		start, end, err := parseDateRange(query.StartDate, query.EndDate)
 		if err != nil {
 			return nil, err
@@ -68,7 +89,7 @@ func (s *MemoryStore) Query(query Query) ([]StatsItem, error) {
 		if query.Window != WindowTotal || query.Bucket != "" {
 			return nil, fmt.Errorf("start_date/end_date cannot be combined with window/bucket")
 		}
-		return s.queryDateRange(query.GroupBy, start, end), nil
+		return s.queryDateRange(query.GroupBy, query.ClientName, start, end), nil
 	}
 
 	var source map[string]StatsItem
@@ -89,10 +110,17 @@ func (s *MemoryStore) Query(query Query) ([]StatsItem, error) {
 	return items, nil
 }
 
-func (s *MemoryStore) queryDateRange(groupBy string, start, end time.Time) []StatsItem {
+func (s *MemoryStore) queryDateRange(groupBy, clientName string, start, end time.Time) []StatsItem {
 	merged := make(map[string]StatsItem)
 	for day := start; day.Before(end); day = day.AddDate(0, 0, 1) {
 		bucket := day.Format("2006-01-02")
+		if clientName != "" {
+			clients := s.windows[WindowDay][bucketKey(WindowDay, bucket, "key")]
+			if item, ok := clients[clientName]; ok {
+				merged[bucket] = mergeStatsItem(merged[bucket], item, bucket)
+			}
+			continue
+		}
 		group := s.windows[WindowDay][bucketKey(WindowDay, bucket, groupBy)]
 		for value, item := range group {
 			key := value
@@ -175,6 +203,22 @@ func mergeStatsItem(dst, src StatsItem, value string) StatsItem {
 		}
 	}
 	return dst
+}
+
+func (s *MemoryStore) Coverage() Coverage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	coverage := Coverage{
+		Known:               s.coverageKnown,
+		Backend:             "memory",
+		AggregatesPersisted: false,
+		RawRetentionDays:    0,
+	}
+	if !s.trackingStartedAt.IsZero() {
+		coverage.TrackingStartedAt = s.trackingStartedAt.Format(time.RFC3339Nano)
+	}
+	return coverage
 }
 
 func (s *MemoryStore) RecentRecords(query RecentRecordsQuery) ([]runtime.UsageRecord, error) {

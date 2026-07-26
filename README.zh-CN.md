@@ -20,7 +20,7 @@ Syrogo 是一个面向多模型场景的 AI Gateway / Semantic Router。
 - 多种入口协议
 - 多上游 provider 接入
 - 按客户端场景进行路由
-- client 侧请求配额窗口
+- client 侧 requests、tokens、cost 单类型配额窗口
 - failover / round_robin 与 provider 健康感知 fallback 等基础调度
 - 后续额度切换、统计、治理与多节点串接能力
 
@@ -77,7 +77,7 @@ Syrogo 想解决的不是“再包一层 HTTP”，而是把这些变化收敛�
   - `POST /v1/responses`
   - `POST /v1/messages`
 - 按客户端场景进行 tag-first routing
-- client 侧请求配额窗口
+- client 侧 requests、tokens、cost 单类型配额窗口
 - 单条规则内支持：
   - `failover`
   - `round_robin`
@@ -148,7 +148,7 @@ cp configs/config.example.yaml configs/config.yaml
 
 然后把 `configs/config.yaml` 中的 token、endpoint、auth_token 改成你本地可用的真实值。
 
-现在每个 `inbounds[].clients[]` 还需要一个稳定的 `name`。这个名字是该 key 的 usage 统计身份；后续可以轮换 `token`，但如果希望统计连续，就应该保持 `name` 不变。
+顶层 `clients[]` 负责稳定身份与凭据，即 `name`、`token` 和可选 `quota`。每个 `inbounds[].clients[]` 条目只是一条 binding：`ref` 指向顶层 Client name，`tag` 是请求从该 Inbound 进入时使用的路由身份。轮换 token 时保持 Client `name` 不变，Usage 与 quota 就会跨全部 bindings 保持全局连续。
 
 注意：当前实现不会自动读取 `.env`，也不会自动展开 `${VAR}`。如果配置文件里保留占位符字符串，它会被原样读入。
 
@@ -388,36 +388,59 @@ outbounds:
 - 只在上游缺失 `usage` 时触发
 - 返回的是平台侧近似值，不是 provider 账单真值
 
-### 12. 限制 client 请求配额窗口
+### 12. 限制 Client quota 窗口
 
-对于 client 侧治理，可以在单个 inbound client 上配置请求配额窗口：
+对于 Client 侧治理，应在顶层 Client 配置 quota，并单独把它绑定到一个或多个 Inbound。下面的 canonical 示例分别展示三种支持的 window type：
 
 ```yaml
+clients:
+  - name: "office-key"
+    token: "${SYROGO_OPENAI_CLIENT_TOKEN}"
+    quota:
+      enabled: true
+      windows:
+        - name: "hourly-requests"
+          type: "requests"
+          duration: "1h"
+          max_requests: 1000
+        - name: "daily-tokens"
+          type: "tokens"
+          duration: "24h"
+          max_tokens: 1000000
+        - name: "monthly-cost"
+          type: "cost"
+          duration: "720h"
+          max_cost_usd: 25
+
 inbounds:
   - name: "openai-entry"
     protocol: "openai_chat"
     path: "/v1/chat/completions"
     clients:
-      - name: "office-key"
-        token: "${SYROGO_OPENAI_CLIENT_TOKEN}"
+      - ref: "office-key"
         tag: "office"
-        quota:
-          enabled: true
-          windows:
-            - name: "hourly"
-              duration: "1h"
-              max_requests: 100
-            - name: "daily"
-              duration: "24h"
-              max_requests: 1000
+  - name: "responses-entry"
+    protocol: "openai_responses"
+    path: "/v1/responses"
+    clients:
+      - ref: "office-key"
+        tag: "automation"
 ```
 
-当前范围：
+字段归属与行为：
 
-- 在路由前生效，超限 client 会直接收到 HTTP 429
-- 使用 `clients[].name` 作为稳定 quota 身份
-- 多个窗口会同时生效；任一窗口耗尽都会拦截该 client
-- 第一版只跟踪请求次数，不跟踪 token 或账单额度
+- 顶层 `clients[]` 只负责 `name`、`token`、`quota`；`inbounds[].clients[]` 只负责 binding 的 `ref`、`tag`
+- 同一个 Client 可以绑定多个 Inbound；鉴权会通过 binding `ref` 解析到同一个顶层 token
+- binding `tag` 由实际进入的 Inbound 决定，并用于匹配 `routing.rules[].from_tags`，因此同一 Client 可通过不同 binding 进入不同路由场景
+- quota 与 Usage/accounting 按稳定 Client `name` 全局聚合，不会按 Inbound 或 tag 分开计算
+- quota 在路由前生效，因此已确定耗尽的 Client 会在所有 bindings 上直接收到 HTTP 429
+- 多个窗口可以同时生效；每个窗口只能有一个 `type`（`requests`、`tokens` 或 `cost`），并且只能配置对应的 limit（`max_requests`、`max_tokens` 或 `max_cost_usd`）；任意窗口耗尽都会阻止该 Client
+- 旧 request window 省略 `type` 但设置了 `max_requests` 时保持兼容，保存后会 canonicalize 为 `type: requests`
+- Requests 在请求入口准入时计数。Tokens 与 Cost 只在成功 terminal response 后计入；由于准入与 terminal 记账分离，并发 in-flight 成功请求可能超过 token/cost 上限，下一次请求才会收到 HTTP 429
+- Cost 来自 Syrogo 配置或内置的模型 pricing，不是 Provider 账单。成功 terminal usage 的模型没有价格时按 `$0` 计入；runtime quota 输出会携带 `unpriced_count` 和 warning，提示运维补齐 pricing
+- Provider/outbound quota 只支持 requests 与 tokens，不支持 `type: cost` 或 `max_cost_usd`
+- 旧版将 Client `name`/`token`/`quota` 嵌套在 Inbound 下的 YAML 仍可读取以便迁移；下一次保存配置时会输出顶层 `clients` 加 `ref`/`tag` bindings 的 canonical 形式
+- 当 binding tag 是 `routing.rules[].from_tags` 引用的最后一个 Client 来源时，该来源会被保护。要解除或改 tag，必须先新增/更新另一条 binding 提供相同 tag，或者从错误列出的全部 route 的 `from_tags` 中删除/修改该 tag；结构化 Admin 错误会返回 tag 与 route names
 
 使用 accounting admin token 查看当前 client quota 状态：
 
@@ -550,7 +573,9 @@ admin:
 
 日志会在下一次写入将超过 `max_size_mb` 时轮转，并在本地自然日首次写入时按日轮转。历史文件使用 gzip 压缩，并按保留天数、文件数量和总磁盘占用清理；当前日志文件永不删除。`/admin/logs` 会自动查询当前文件和仍保留的归档。完整落在有界近期缓存内的查询（最近 5 分钟、最多 8 MiB）优先从内存返回；cursor、历史、覆盖不完整或需要分页的查询会自动回退文件，避免遗漏结果。状态筛选支持精确状态码以及 `4xx`、`5xx` 状态族。成功的 `/admin/logs` 自动轮询不会生成 `admin_audit` 日志。
 
-UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/overview`、`/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`、`/admin/config/apply`、`/admin/config/history`、`/admin/config/history/diff`、`/admin/config/rollback`、`/admin/debug/traces`、`/admin/debug/route-dry-run`、`/admin/debug/providers`。Overview 会展示请求、错误、fallback、latency、quota、provider health、最近治理事件，以及 config path、logs 可用性等 Admin 自检摘要卡片。Provider 编辑会完整 round-trip 模型 canonical 名称与 alias，空列表会明确显示为 unrestricted。Provider 保存、启停和删除会原子更新配置并立即热应用，不需要再单独点击 Apply。Usage 默认展示最近 7 个 UTC 自然日，并支持 UTC 日期范围和 `group_by` 筛选。Debug 会展示最近 trace 的 matched rule、routing strategy、planned steps、fallback count、spans，并提供无副作用 route dry-run 表单，以及 provider health/quota/event/latency 聚合信息。日志只会读取配置指定的本地日志文件，支持行数/字节限制，会展示 path、是否截断、读取上限等元信息，并对常见 token、key、authorization、secret 字段做脱敏。当前配置读取会返回脱敏展示副本；配置更新前会展示脱敏 diff preview，并要求浏览器二次确认后才写入；Apply 会热加载安全的运行时变更；History/Rollback 会保留并恢复最近的本地配置版本，并支持查看脱敏 diff。Admin API 操作会写入 `admin_audit` 日志，但不会记录 Authorization header、token、请求 body、配置内容或日志内容。它是内置单页控制台，不需要额外前端构建步骤。
+UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/overview`、`/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`、`/admin/config/apply`、`/admin/config/history`、`/admin/config/history/diff`、`/admin/config/rollback`、`/admin/config/clients`、`/admin/config/clients/metrics`、`/admin/config/client/usage`、`/admin/config/client-binding/upsert`、`/admin/config/client-binding/delete`、`/admin/debug/traces`、`/admin/debug/route-dry-run`、`/admin/debug/providers`。Provider 和 Client 保存/删除都会原子更新配置并立即热应用，不需要再点击 Apply。Client CRUD 只处理顶层 `name`、`token`、`quota`；binding 使用 `inbound`、`ref`、`tag` 独立管理。删除 Client 前必须先解除它在所有 Inbound 上的 bindings。Client name 是稳定的 quota/accounting identity：轮换 token 时保持 name 不变，可保留跨全部 bindings 的全局连续性；编辑已有 Client 时 token 留空或填 `<redacted>` 会保留原值。Client quota 会完整 round-trip。若变更或删除 binding 会让 `routing.rules[].from_tags` 引用的 tag 失去最后一个来源，操作会被拒绝，应先让其他 binding 提供该 tag。
+
+Clients 列表独立请求配置与 metrics，因此 metrics 失败只显示 warning，CRUD 仍可用。紧凑 **Usage** 是全量历史，**Frequency** 是所选最近 7/30/90 个 UTC 自然日。点击 Client 可查看原生 CSS Grid contribution heatmap 和 Requests/Tokens/Cost/Errors 每日聚合。日期范围采用 UTC 前闭后开（含 `start_date`、不含 `end_date`）；当前 UTC 日标为 `partial`，已知 coverage 之前的旧日期标为 `unknown`，不能当作零值。“Daily records”是每日聚合，不是逐请求审计。内置无依赖单页控制台仍提供 Usage、Debug、Logs、脱敏配置、History/Rollback 与安全审计能力。
 
 ### 15. 校验配置变更
 
@@ -686,7 +711,7 @@ curl http://127.0.0.1:23234/stats/usage?group_by=error_kind \
 - `group_by=error_kind` 会把成功请求归到 `none`，失败请求归到 `quota_exceeded`、`timeout`、`upstream_server_error`、`auth_failed`、`capability_unsupported` 等分类
 - fallback 只会在 quota、timeout、临时错误或上游 5xx 等可恢复错误上继续切换；鉴权、capability 与请求结构错误会直接暴露
 - 查询始终读取内存聚合视图，不会在请求时扫盘
-- `local_file` backend 会把原始记录按天切分为 JSONL，并定期写 snapshot 用于重启恢复
+- `local_file` 将 append-only 原始记录按天保存为 JSONL，并按 `retention_days` 清理；每日聚合 snapshot 使用独立的 `snapshot_retention_days`，因此聚合 coverage 可以长于原始记录。此类聚合用于趋势和 “Daily records”，不是逐请求审计
 
 对应配置示例：
 

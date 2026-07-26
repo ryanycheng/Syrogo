@@ -9,6 +9,7 @@ import (
 type Store interface {
 	Record(runtime.UsageRecord)
 	Query(Query) ([]StatsItem, error)
+	Coverage() Coverage
 	RecentRecords(RecentRecordsQuery) ([]runtime.UsageRecord, error)
 	Close(context.Context) error
 }

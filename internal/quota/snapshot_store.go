@@ -93,7 +93,7 @@ func (s *SnapshotStore) Save() error {
 	if s == nil {
 		return nil
 	}
-	snapshot := snapshotFile{Version: 2, CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	snapshot := snapshotFile{Version: 3, CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if s.outboundTracker != nil {
 		snapshot.Outbound = s.outboundTracker.ExportState()
 	}

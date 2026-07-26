@@ -2,6 +2,7 @@ package accounting
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,6 +40,74 @@ func testUsageRecord(client string, ts time.Time) runtime.UsageRecord {
 		},
 		StartedAt:  ts.UTC().Format(time.RFC3339Nano),
 		FinishedAt: ts.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func TestLocalFileStorePersistsCoverageInNewSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testLocalFileConfig(dir)
+	store, err := NewLocalFileStore(cfg)
+	if err != nil {
+		t.Fatalf("NewLocalFileStore() error = %v", err)
+	}
+	beforeClose := store.Coverage()
+	if !beforeClose.Known || beforeClose.TrackingStartedAt == "" || beforeClose.Backend != "local_file" || !beforeClose.AggregatesPersisted || beforeClose.RawRetentionDays != cfg.RetentionDays {
+		t.Fatalf("Coverage() = %#v, want known local_file persisted coverage", beforeClose)
+	}
+	if err := store.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	recovered, err := NewLocalFileStore(cfg)
+	if err != nil {
+		t.Fatalf("NewLocalFileStore() recover error = %v", err)
+	}
+	defer func() { _ = recovered.Close(context.Background()) }()
+	afterRecover := recovered.Coverage()
+	if !afterRecover.Known || afterRecover.TrackingStartedAt != beforeClose.TrackingStartedAt {
+		t.Fatalf("recovered Coverage() = %#v, want tracking start %q", afterRecover, beforeClose.TrackingStartedAt)
+	}
+}
+
+func TestLocalFileStoreRestoresLegacySnapshotWithUnknownCoverage(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testLocalFileConfig(dir)
+	if err := os.MkdirAll(filepath.Join(dir, "records"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(records) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "snapshots"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(snapshots) error = %v", err)
+	}
+	legacy := snapshotState{
+		Totals:     map[string]map[string]StatsItem{"key": {"client-a": {Value: "client-a", RequestCount: 1}}},
+		Windows:    map[string]map[string]map[string]StatsItem{},
+		CapturedAt: "2026-04-29T00:00:00Z",
+	}
+	payload, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "snapshots", "latest.json"), payload, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	store, err := NewLocalFileStore(cfg)
+	if err != nil {
+		t.Fatalf("NewLocalFileStore() error = %v", err)
+	}
+	coverage := store.Coverage()
+	if coverage.Known || coverage.TrackingStartedAt != "" || coverage.Backend != "local_file" || !coverage.AggregatesPersisted || coverage.RawRetentionDays != cfg.RetentionDays {
+		t.Fatalf("Coverage() = %#v, want unknown legacy snapshot coverage", coverage)
+	}
+	items, err := store.Query(Query{GroupBy: "key", Window: WindowTotal})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Value != "client-a" || items[0].RequestCount != 1 {
+		t.Fatalf("items = %#v, want legacy aggregates restored", items)
+	}
+	if err := store.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 }
 

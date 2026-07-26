@@ -7,6 +7,61 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/runtime"
 )
 
+func TestMemoryStoreReportsEphemeralCoverage(t *testing.T) {
+	startedAt := time.Date(2026, 4, 27, 12, 30, 0, 123, time.FixedZone("UTC+8", 8*60*60))
+	store := newMemoryStore(startedAt, true)
+	coverage := store.Coverage()
+	if coverage.TrackingStartedAt != startedAt.UTC().Format(time.RFC3339Nano) || !coverage.Known || coverage.Backend != "memory" || coverage.AggregatesPersisted || coverage.RawRetentionDays != 0 {
+		t.Fatalf("Coverage() = %#v, want known ephemeral memory coverage", coverage)
+	}
+}
+
+func TestMemoryStoreClientDateQueryIsolatesClientsAcrossDays(t *testing.T) {
+	store := NewMemoryStore()
+	for _, record := range []runtime.UsageRecord{
+		testUsageRecord("client-a", time.Date(2026, 4, 26, 20, 0, 0, 0, time.FixedZone("UTC-7", -7*60*60))),
+		testUsageRecord("client-b", time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)),
+		testUsageRecord("client-a", time.Date(2026, 4, 28, 23, 59, 0, 0, time.UTC)),
+		testUsageRecord("client-b", time.Date(2026, 4, 29, 0, 0, 0, 0, time.UTC)),
+	} {
+		store.Record(record)
+	}
+
+	items, err := store.Query(Query{
+		ClientName: "client-a",
+		GroupBy:    "date",
+		StartDate:  "2026-04-27",
+		EndDate:    "2026-04-29",
+	})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("len(items) = %d, want 2: %#v", len(items), items)
+	}
+	if items[0].Value != "2026-04-27" || items[0].RequestCount != 1 || items[0].TotalTokens != 15 {
+		t.Fatalf("items[0] = %#v, want client-a UTC day 2026-04-27", items[0])
+	}
+	if items[1].Value != "2026-04-28" || items[1].RequestCount != 1 || items[1].TotalTokens != 15 {
+		t.Fatalf("items[1] = %#v, want client-a UTC day 2026-04-28", items[1])
+	}
+}
+
+func TestMemoryStoreRejectsUnsupportedClientQueries(t *testing.T) {
+	store := NewMemoryStore()
+	for _, query := range []Query{
+		{ClientName: "client-a", GroupBy: "key", StartDate: "2026-04-27", EndDate: "2026-04-28"},
+		{ClientName: "client-a", GroupBy: "provider", StartDate: "2026-04-27", EndDate: "2026-04-28"},
+		{ClientName: "client-a", GroupBy: "date"},
+		{ClientName: "client-a", GroupBy: "date", Window: WindowTotal, StartDate: "2026-04-27", EndDate: "2026-04-28"},
+		{ClientName: "client-a", GroupBy: "date", Bucket: "2026-04-27", StartDate: "2026-04-27", EndDate: "2026-04-28"},
+	} {
+		if _, err := store.Query(query); err == nil {
+			t.Fatalf("Query(%#v) error = nil, want client query validation error", query)
+		}
+	}
+}
+
 func TestMemoryStoreQueriesUTCDateRangeFromDayBuckets(t *testing.T) {
 	store := NewMemoryStore()
 	before := testUsageRecord("office-key", time.Date(2026, 4, 26, 23, 59, 0, 0, time.UTC))

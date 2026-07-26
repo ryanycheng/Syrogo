@@ -18,6 +18,7 @@ type Session struct {
 	ID          string     `json:"id"`
 	ClientName  string     `json:"client_name"`
 	InboundName string     `json:"inbound_name"`
+	Tag         string     `json:"tag"`
 	Host        string     `json:"host"`
 	PID         int        `json:"pid"`
 	CWD         string     `json:"cwd"`

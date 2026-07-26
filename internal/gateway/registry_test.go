@@ -11,7 +11,7 @@ import (
 
 type stubInboundCodec struct{}
 
-func (stubInboundCodec) Handle(_ *Handler, _ http.ResponseWriter, _ *http.Request, _ config.InboundSpec, _ config.ClientSpec, _ *slog.Logger) {
+func (stubInboundCodec) Handle(_ *Handler, _ http.ResponseWriter, _ *http.Request, _ config.InboundSpec, _ config.ResolvedClientBinding, _ *slog.Logger) {
 }
 
 func TestInboundRegistryGetReturnsRegisteredCodec(t *testing.T) {
@@ -55,7 +55,7 @@ func TestInboundRegistryRejectsDuplicateRegister(t *testing.T) {
 func TestHandlerHandleByCodecRejectsUnknownProtocol(t *testing.T) {
 	h := &Handler{registry: NewInboundRegistry(), logger: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))}
 	w := loggingResponseWriter{ResponseWriter: newTestResponseWriter()}
-	ok := h.handleByCodec(&w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "token", nil), config.InboundSpec{Protocol: "missing"}, config.ClientSpec{}, h.logger)
+	ok := h.handleByCodec(&w, authorizedRequest(http.MethodPost, "/v1/chat/completions", "token", nil), config.InboundSpec{Protocol: "missing"}, config.ResolvedClientBinding{}, h.logger)
 	if ok {
 		t.Fatal("handleByCodec() ok = true, want false")
 	}

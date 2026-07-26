@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/accounting"
+	"github.com/ryanycheng/Syrogo/internal/config"
 	"github.com/ryanycheng/Syrogo/internal/latency"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/quota"
@@ -893,6 +894,78 @@ func TestDispatchStreamFailuresDoNotRecordSuccessfulQuota(t *testing.T) {
 			t.Fatalf("quota usage = %d/%d, want 0/0", requests, tokens)
 		}
 	})
+}
+
+func TestDispatchRecordsClientTerminalUsage(t *testing.T) {
+	clientTracker := quota.NewClientTracker([]quota.ClientConfig{{Name: "client", Windows: []quota.WindowConfig{
+		{Name: "tokens", Type: "tokens", Duration: time.Hour, MaxTokens: 1000},
+		{Name: "cost", Type: "cost", Duration: time.Hour, MaxCostMicroUSD: 1_000_000},
+	}}})
+	prices := accounting.NewPriceCalculator([]config.AccountingPriceConfig{{Provider: "test-provider", Model: "priced-model", InputPerMillionUSD: 2}})
+	dispatcher := NewDispatcherWithStoreQuotasHealthEventsLatencyAndPricing(accounting.NewMemoryStore(), nil, clientTracker, nil, nil, nil, prices)
+	provider := &stubProvider{name: "test-provider", resp: runtime.Response{Model: "priced-model", Usage: &runtime.Usage{InputTokens: 250, OutputTokens: 10, TotalTokens: 260}}}
+	plan := runtime.ExecutionPlan{ClientName: "client", Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: provider, Model: "priced-model"}}}
+
+	if _, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "priced-model"}, plan); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	windows := clientTracker.ClientSnapshot()[0].Windows
+	if windows[0].UsedTokens != 260 || windows[1].UsedCostUSD != "0.0005" || windows[1].UnpricedCount != 0 {
+		t.Fatalf("client terminal usage = %#v", windows)
+	}
+}
+
+func TestDispatchRecordsUnpricedAndFallbackClientTerminalUsageOnce(t *testing.T) {
+	clientTracker := quota.NewClientTracker([]quota.ClientConfig{{Name: "client", Windows: []quota.WindowConfig{
+		{Name: "tokens", Type: "tokens", Duration: time.Hour, MaxTokens: 1000},
+		{Name: "cost", Type: "cost", Duration: time.Hour, MaxCostMicroUSD: 1_000_000},
+	}}})
+	dispatcher := NewDispatcherWithStoreQuotasHealthEventsLatencyAndPricing(accounting.NewMemoryStore(), nil, clientTracker, nil, nil, nil, accounting.NewPriceCalculator(nil))
+	primary := &stubProvider{name: "unknown", err: provider.NewRetryableError(errors.New("temporary"))}
+	fallback := &stubProvider{name: "unknown", resp: runtime.Response{Model: "unknown-model", Usage: &runtime.Usage{TotalTokens: 17}}}
+	plan := runtime.ExecutionPlan{ClientName: "client", Steps: []runtime.ExecutionStep{
+		{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: primary, Model: "unknown-model", OnError: runtime.FallbackOnRetryable},
+		{Type: runtime.StepTypeOutbound, OutboundName: "fallback", OutboundTarget: fallback, Model: "unknown-model"},
+	}}
+
+	if _, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "unknown-model"}, plan); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	windows := clientTracker.ClientSnapshot()[0].Windows
+	if windows[0].UsedTokens != 17 || windows[1].UsedCostUSD != "" || windows[1].UnpricedCount != 1 || windows[1].Warning == "" {
+		t.Fatalf("fallback unpriced terminal usage = %#v", windows)
+	}
+}
+
+func TestDispatchFailuresDoNotRecordClientTerminalUsage(t *testing.T) {
+	clientTracker := quota.NewClientTracker([]quota.ClientConfig{{Name: "client", Windows: []quota.WindowConfig{{Name: "tokens", Type: "tokens", Duration: time.Hour, MaxTokens: 1000}}}})
+	dispatcher := NewDispatcherWithStoreQuotasHealthEventsLatencyAndPricing(accounting.NewMemoryStore(), nil, clientTracker, nil, nil, nil, accounting.NewPriceCalculator(nil))
+	failed := &stubProvider{name: "unknown", err: provider.NewFatalError(errors.New("failed"))}
+	plan := runtime.ExecutionPlan{ClientName: "client", Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: failed, Model: "unknown-model"}}}
+
+	if _, err := dispatcher.Dispatch(context.Background(), runtime.Request{Model: "unknown-model"}, plan); err == nil {
+		t.Fatal("Dispatch() error = nil")
+	}
+	if got := clientTracker.ClientSnapshot()[0].Windows[0].UsedTokens; got != 0 {
+		t.Fatalf("failed terminal tokens = %d, want 0", got)
+	}
+}
+
+func TestDispatchStreamRecordsClientTerminalUsageOnlyOnNormalClose(t *testing.T) {
+	clientTracker := quota.NewClientTracker([]quota.ClientConfig{{Name: "client", Windows: []quota.WindowConfig{{Name: "tokens", Type: "tokens", Duration: time.Hour, MaxTokens: 1000}}}})
+	dispatcher := NewDispatcherWithStoreQuotasHealthEventsLatencyAndPricing(accounting.NewMemoryStore(), nil, clientTracker, nil, nil, nil, accounting.NewPriceCalculator(nil))
+	provider := &stubProvider{name: "unknown", streamEvents: []runtime.StreamEvent{{Type: runtime.StreamEventUsage, Usage: &runtime.Usage{TotalTokens: 23}}, {Type: runtime.StreamEventMessageEnd}}}
+	plan := runtime.ExecutionPlan{ClientName: "client", Steps: []runtime.ExecutionStep{{Type: runtime.StepTypeOutbound, OutboundName: "primary", OutboundTarget: provider, Model: "unknown-model"}}}
+
+	events, err := dispatcher.DispatchStream(context.Background(), runtime.Request{Model: "unknown-model"}, plan)
+	if err != nil {
+		t.Fatalf("DispatchStream() error = %v", err)
+	}
+	for range events {
+	}
+	if got := clientTracker.ClientSnapshot()[0].Windows[0].UsedTokens; got != 23 {
+		t.Fatalf("stream terminal tokens = %d, want 23", got)
+	}
 }
 
 func TestDispatchFailsWhenPlanHasNoSteps(t *testing.T) {

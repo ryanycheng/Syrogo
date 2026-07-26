@@ -73,6 +73,14 @@ func (s *LocalFileStore) Query(query Query) ([]StatsItem, error) {
 	return s.memory.Query(query)
 }
 
+func (s *LocalFileStore) Coverage() Coverage {
+	coverage := s.memory.Coverage()
+	coverage.Backend = "local_file"
+	coverage.AggregatesPersisted = true
+	coverage.RawRetentionDays = s.cfg.RetentionDays
+	return coverage
+}
+
 func (s *LocalFileStore) RecentRecords(query RecentRecordsQuery) ([]runtime.UsageRecord, error) {
 	return s.memory.RecentRecords(query)
 }
@@ -229,6 +237,9 @@ func (s *LocalFileStore) writeSnapshot() error {
 		Cursor:     s.lastRecordRef,
 		CapturedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
+	if s.memory.coverageKnown && !s.memory.trackingStartedAt.IsZero() {
+		state.TrackingStartedAt = s.memory.trackingStartedAt.Format(time.RFC3339Nano)
+	}
 	payload, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -253,6 +264,14 @@ func (s *LocalFileStore) recover() error {
 			s.memory.totals = cloneStatsGroups(state.Totals)
 			s.memory.windows = cloneWindowGroupsFromStrings(state.Windows)
 			s.lastRecordRef = state.Cursor
+			trackingStartedAt, parseErr := time.Parse(time.RFC3339Nano, state.TrackingStartedAt)
+			if parseErr == nil {
+				s.memory.trackingStartedAt = trackingStartedAt.UTC()
+				s.memory.coverageKnown = true
+			} else {
+				s.memory.trackingStartedAt = time.Time{}
+				s.memory.coverageKnown = false
+			}
 		}
 	}
 	return s.replayRecords()

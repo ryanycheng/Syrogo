@@ -2,19 +2,17 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
 	"github.com/ryanycheng/Syrogo/internal/protocol"
-
-	"gopkg.in/yaml.v3"
 )
-
-type configResourceMutation func(config.Config) (config.Config, error)
 
 type providerResourceRequest struct {
 	Name         string                      `json:"name"`
@@ -39,16 +37,36 @@ type deleteProviderRequest struct {
 }
 
 type clientResourceRequest struct {
-	Inbound string                   `json:"inbound"`
-	Name    string                   `json:"name"`
-	Token   string                   `json:"token"`
-	Tag     string                   `json:"tag"`
-	Quota   config.ClientQuotaConfig `json:"quota"`
+	Name  string                   `json:"name"`
+	Token string                   `json:"token"`
+	Quota config.ClientQuotaConfig `json:"quota"`
 }
 
 type deleteClientRequest struct {
+	Name string `json:"name"`
+}
+
+type clientBindingRequest struct {
 	Inbound string `json:"inbound"`
-	Name    string `json:"name"`
+	Ref     string `json:"ref"`
+	Tag     string `json:"tag"`
+}
+
+type deleteClientBindingRequest struct {
+	Inbound string `json:"inbound"`
+	Ref     string `json:"ref"`
+}
+
+type bindingTagLastSourceError struct {
+	Operation  string
+	Client     string
+	Inbound    string
+	Tag        string
+	RouteNames []string
+}
+
+func (e *bindingTagLastSourceError) Error() string {
+	return fmt.Sprintf("cannot %s tag %q from client binding %q in inbound %q: routing rule(s) %s reference tag %q", e.Operation, e.Tag, e.Client, e.Inbound, strings.Join(e.RouteNames, ", "), e.Tag)
 }
 
 type routeResourceRequest struct {
@@ -78,14 +96,19 @@ type providerResourceResponse struct {
 	Proxy        config.OutboundProxyConfig  `json:"proxy"`
 }
 
+type clientBindingResourceResponse struct {
+	Inbound         string `json:"inbound"`
+	InboundProtocol string `json:"inbound_protocol"`
+	InboundPath     string `json:"inbound_path"`
+	Ref             string `json:"ref"`
+	Tag             string `json:"tag"`
+}
+
 type clientResourceResponse struct {
-	Inbound         string                   `json:"inbound"`
-	InboundProtocol string                   `json:"inbound_protocol"`
-	InboundPath     string                   `json:"inbound_path"`
-	Name            string                   `json:"name"`
-	Token           string                   `json:"token"`
-	Tag             string                   `json:"tag"`
-	Quota           config.ClientQuotaConfig `json:"quota"`
+	Name     string                          `json:"name"`
+	Token    string                          `json:"token"`
+	Quota    config.ClientQuotaConfig        `json:"quota"`
+	Bindings []clientBindingResourceResponse `json:"bindings"`
 }
 
 type routeResourceResponse struct {
@@ -134,9 +157,9 @@ func (h *Handler) handleConfigOptions(w http.ResponseWriter, r *http.Request) {
 	clientTags := map[string]struct{}{}
 	for _, inbound := range redacted.Inbounds {
 		clients := make([]map[string]any, 0, len(inbound.Clients))
-		for _, client := range inbound.Clients {
-			clientTags[client.Tag] = struct{}{}
-			clients = append(clients, map[string]any{"name": client.Name, "tag": client.Tag})
+		for _, binding := range inbound.Clients {
+			clientTags[binding.Tag] = struct{}{}
+			clients = append(clients, map[string]any{"ref": binding.Ref, "tag": binding.Tag})
 		}
 		inbounds = append(inbounds, map[string]any{"name": inbound.Name, "protocol": inbound.Protocol, "path": inbound.Path, "clients": clients})
 	}
@@ -279,19 +302,9 @@ func (h *Handler) handleConfigClients(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redacted := config.RedactedConfig(cfg)
-	items := []clientResourceResponse{}
-	for _, inbound := range redacted.Inbounds {
-		for _, client := range inbound.Clients {
-			items = append(items, clientResourceResponse{
-				Inbound:         inbound.Name,
-				InboundProtocol: inbound.Protocol,
-				InboundPath:     inbound.Path,
-				Name:            client.Name,
-				Token:           client.Token,
-				Tag:             client.Tag,
-				Quota:           client.Quota,
-			})
-		}
+	items := make([]clientResourceResponse, 0, len(redacted.Clients))
+	for _, client := range redacted.Clients {
+		items = append(items, clientResource(redacted, client))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -309,21 +322,15 @@ func (h *Handler) handleConfigClientUpsert(w http.ResponseWriter, r *http.Reques
 	if !decodeJSONResourceRequest(w, r, &req) {
 		return
 	}
-	h.writeAdminConfigResource(w, func(cfg config.Config) (config.Config, error) {
-		next := config.ClientSpec{Name: req.Name, Token: req.Token, Tag: req.Tag, Quota: req.Quota}
-		for _, inbound := range cfg.Inbounds {
-			if inbound.Name != req.Inbound {
-				continue
-			}
-			for _, client := range inbound.Clients {
-				if client.Name == next.Name {
-					next.Token = config.PreserveSecret(next.Token, client.Token)
-					break
-				}
-			}
-			break
+	h.writeAdminConfigMutation(w, r, "client_upsert_"+req.Name, func(cfg config.Config) (config.Config, error) {
+		next := config.ClientSpec{Name: req.Name, Token: req.Token, Quota: req.Quota}
+		current, found := config.FindClient(cfg, req.Name)
+		if found {
+			next.Token = config.PreserveSecret(next.Token, current.Token)
+		} else if next.Token == "" || next.Token == config.RedactedValue {
+			return cfg, fmt.Errorf("cannot create client %q: token is required", req.Name)
 		}
-		return config.UpsertClient(cfg, req.Inbound, next)
+		return config.UpsertClient(cfg, next), nil
 	})
 }
 
@@ -340,8 +347,69 @@ func (h *Handler) handleConfigClientDelete(w http.ResponseWriter, r *http.Reques
 	if !decodeJSONResourceRequest(w, r, &req) {
 		return
 	}
-	h.writeAdminConfigResource(w, func(cfg config.Config) (config.Config, error) {
-		return config.DeleteClient(cfg, req.Inbound, req.Name)
+	h.writeAdminConfigMutation(w, r, "client_delete_"+req.Name, func(cfg config.Config) (config.Config, error) {
+		if _, found := config.FindClient(cfg, req.Name); !found {
+			return cfg, fmt.Errorf("client %q not found", req.Name)
+		}
+		if bindings := config.ClientBindings(cfg, req.Name); len(bindings) > 0 {
+			return cfg, fmt.Errorf("cannot delete client %q: %d binding(s) still reference it", req.Name, len(bindings))
+		}
+		return config.DeleteClient(cfg, req.Name), nil
+	})
+}
+
+func (h *Handler) handleConfigClientBindingUpsert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAdmin(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	var req clientBindingRequest
+	if !decodeJSONResourceRequest(w, r, &req) {
+		return
+	}
+	h.writeAdminConfigMutation(w, r, "client_binding_upsert_"+req.Inbound+"_"+req.Ref, func(cfg config.Config) (config.Config, error) {
+		current, found, err := config.FindBinding(cfg, req.Inbound, req.Ref)
+		if err != nil {
+			return cfg, err
+		}
+		if found && current.Tag != req.Tag {
+			if err := validateClientTagRemoval(cfg, "update", req.Inbound, req.Ref, current.Tag); err != nil {
+				return cfg, err
+			}
+		}
+		return config.UpsertBinding(cfg, req.Inbound, config.ClientBindingSpec{Ref: req.Ref, Tag: req.Tag})
+	})
+}
+
+func (h *Handler) handleConfigClientBindingDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAdmin(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	var req deleteClientBindingRequest
+	if !decodeJSONResourceRequest(w, r, &req) {
+		return
+	}
+	h.writeAdminConfigMutation(w, r, "client_binding_delete_"+req.Inbound+"_"+req.Ref, func(cfg config.Config) (config.Config, error) {
+		current, found, err := config.FindBinding(cfg, req.Inbound, req.Ref)
+		if err != nil {
+			return cfg, err
+		}
+		if !found {
+			return cfg, fmt.Errorf("client binding for %q not found in inbound %q", req.Ref, req.Inbound)
+		}
+		if err := validateClientTagRemoval(cfg, "delete", req.Inbound, req.Ref, current.Tag); err != nil {
+			return cfg, err
+		}
+		return config.DeleteBinding(cfg, req.Inbound, req.Ref)
 	})
 }
 
@@ -386,7 +454,7 @@ func (h *Handler) handleConfigRouteUpsert(w http.ResponseWriter, r *http.Request
 	if !decodeJSONResourceRequest(w, r, &req) {
 		return
 	}
-	h.writeAdminConfigResource(w, func(cfg config.Config) (config.Config, error) {
+	h.writeAdminConfigMutation(w, r, "route_upsert_"+req.Name, func(cfg config.Config) (config.Config, error) {
 		return config.UpsertRoute(cfg, config.RoutingRule(req)), nil
 	})
 }
@@ -404,7 +472,7 @@ func (h *Handler) handleConfigRouteDelete(w http.ResponseWriter, r *http.Request
 	if !decodeJSONResourceRequest(w, r, &req) {
 		return
 	}
-	h.writeAdminConfigResource(w, func(cfg config.Config) (config.Config, error) {
+	h.writeAdminConfigMutation(w, r, "route_delete_"+req.Name, func(cfg config.Config) (config.Config, error) {
 		return config.DeleteRoute(cfg, req.Name), nil
 	})
 }
@@ -428,34 +496,6 @@ func (h *Handler) readAdminConfigForResource(w http.ResponseWriter) (config.Conf
 	return cfg, true
 }
 
-func (h *Handler) writeAdminConfigResource(w http.ResponseWriter, mutate configResourceMutation) (config.Config, bool) {
-	state := h.runtimeState()
-	cfg, ok := h.readAdminConfigForResource(w)
-	if !ok {
-		return config.Config{}, false
-	}
-	next, err := mutate(cfg)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-		return config.Config{}, false
-	}
-	data, err := yaml.Marshal(next)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "marshal config: "+err.Error())
-		return config.Config{}, false
-	}
-	if _, err := config.ParseBytes(data); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-		return config.Config{}, false
-	}
-	if err := config.WriteValidatedFile(state.ConfigPath, data); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-		return config.Config{}, false
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": state.ConfigPath, "applied": false})
-	return next, true
-}
-
 func (h *Handler) writeAdminConfigMutation(w http.ResponseWriter, r *http.Request, reason string, mutate ConfigMutation) {
 	if h.configReloader == nil {
 		writeError(w, http.StatusServiceUnavailable, "config reload is not configured")
@@ -473,10 +513,45 @@ func (h *Handler) writeAdminConfigMutation(w http.ResponseWriter, r *http.Reques
 			"quota_state_reset": result.QuotaStateReset,
 			"error":             err.Error(),
 		}
+		var bindingErr *bindingTagLastSourceError
+		if errors.As(err, &bindingErr) {
+			response["error_code"] = "binding_tag_last_source"
+			response["details"] = map[string]any{
+				"operation":   bindingErr.Operation,
+				"client":      bindingErr.Client,
+				"inbound":     bindingErr.Inbound,
+				"tag":         bindingErr.Tag,
+				"route_names": bindingErr.RouteNames,
+			}
+		}
 		writeJSON(w, http.StatusBadRequest, response)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func validateClientTagRemoval(cfg config.Config, operation, inboundName, ref, tag string) error {
+	for _, inbound := range cfg.Inbounds {
+		for _, binding := range inbound.Clients {
+			if inbound.Name == inboundName && binding.Ref == ref {
+				continue
+			}
+			if binding.Tag == tag {
+				return nil
+			}
+		}
+	}
+	routeNames := make([]string, 0)
+	for _, rule := range cfg.Routing.Rules {
+		if slices.Contains(rule.FromTags, tag) {
+			routeNames = append(routeNames, rule.Name)
+		}
+	}
+	if len(routeNames) == 0 {
+		return nil
+	}
+	slices.Sort(routeNames)
+	return &bindingTagLastSourceError{Operation: operation, Client: ref, Inbound: inboundName, Tag: tag, RouteNames: routeNames}
 }
 
 func validateProviderDelete(cfg config.Config, name string) error {

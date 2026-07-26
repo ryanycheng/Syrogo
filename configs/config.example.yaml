@@ -6,42 +6,64 @@ listeners:
       - "responses-entry"
       - "anthropic-entry"
 
+clients:
+  # Top-level Clients own name, token, quota, and global Usage identity.
+  - name: "office-key"
+    token: "${SYROGO_OPENAI_CLIENT_TOKEN}"
+    # Optional typed Client quota. Each window has exactly one type and matching max field.
+    # Requests count at entry. Tokens/cost count after successful terminal usage, so concurrent
+    # requests may overshoot and the next request gets 429. Cost uses Syrogo pricing, not a
+    # Provider bill; unpriced models count as $0 and produce a runtime warning.
+    # A legacy window without type remains compatible when max_requests is set.
+    # quota:
+    #   enabled: true
+    #   windows:
+    #     - name: "hourly-requests"
+    #       type: "requests"
+    #       duration: "1h"
+    #       max_requests: 1000
+    #     - name: "daily-tokens"
+    #       type: "tokens"
+    #       duration: "24h"
+    #       max_tokens: 1000000
+    #     - name: "monthly-cost"
+    #       type: "cost"
+    #       duration: "720h"
+    #       max_cost_usd: 25
+  - name: "mobile-key"
+    token: "${SYROGO_MOBILE_CLIENT_TOKEN}"
+  - name: "responses-key"
+    token: "${SYROGO_RESPONSES_CLIENT_TOKEN}"
+  - name: "anthropic-key"
+    token: "${SYROGO_ANTHROPIC_CLIENT_TOKEN}"
+
 inbounds:
+  # Inbound clients are bindings only: ref selects a top-level Client, tag selects routing.
+  # A tag referenced by routing.rules[].from_tags cannot lose its last Client binding source.
+  # Before removing/retagging it, either add another binding with that tag or remove/change the
+  # tag in every referencing route's from_tags; the structured Admin error lists those routes.
+  # The same ref may be bound to multiple Inbounds; quota and Usage remain global by Client name.
   - name: "openai-entry"
     protocol: "openai_chat"
     path: "/v1/chat/completions"
     clients:
-      - name: "office-key"
-        token: "${SYROGO_OPENAI_CLIENT_TOKEN}"
+      - ref: "office-key"
         tag: "office"
-        # Optional client-side request quota. Exceeding this returns 429 before routing.
-        # quota:
-        #   enabled: true
-        #   windows:
-        #     - name: "hourly"
-        #       duration: "1h"
-        #       max_requests: 100
-        #     - name: "daily"
-        #       duration: "24h"
-        #       max_requests: 1000
-      - name: "mobile-key"
-        token: "${SYROGO_MOBILE_CLIENT_TOKEN}"
+      - ref: "mobile-key"
         tag: "mobile"
 
   - name: "responses-entry"
     protocol: "openai_responses"
     path: "/v1/responses"
     clients:
-      - name: "responses-key"
-        token: "${SYROGO_RESPONSES_CLIENT_TOKEN}"
+      - ref: "responses-key"
         tag: "responses"
 
   - name: "anthropic-entry"
     protocol: "anthropic_messages"
     path: "/v1/messages"
     clients:
-      - name: "anthropic-key"
-        token: "${SYROGO_ANTHROPIC_CLIENT_TOKEN}"
+      - ref: "anthropic-key"
         tag: "anthropic-to-responses"
 
 routing:
@@ -110,6 +132,7 @@ outbounds:
     # proxy:
     #   url: "http://127.0.0.1:7890"
     # Optional outbound-only quota tracker for upstream subscription limits.
+    # Provider quota supports requests and tokens together, but not Client type: cost/max_cost_usd.
     # Keep disabled/commented until values match the real upstream contract.
     # Requests and outbound tokens can be limited together; any exhausted dimension/window skips this outbound.
     # quota:

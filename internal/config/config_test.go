@@ -7,16 +7,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func validConfig() Config {
 	return Config{
+		Clients:   []ClientSpec{{Name: "office-key", Token: "client-token"}},
 		Listeners: []ListenerSpec{{Name: "public", Listen: ":8080", Inbounds: []string{"openai-entry"}}},
 		Inbounds: []InboundSpec{{
 			Name:     "openai-entry",
 			Protocol: "openai_chat",
 			Path:     "/v1/chat/completions",
-			Clients:  []ClientSpec{{Name: "office-key", Token: "client-token", Tag: "office"}},
+			Clients:  []ClientBindingSpec{{Ref: "office-key", Tag: "office"}},
 		}},
 		Routing: RoutingConfig{Rules: []RoutingRule{{
 			Name:     "office-route",
@@ -58,6 +61,96 @@ routing:
 	}
 	if cfg.Inbounds[0].Name != "openai-entry" {
 		t.Fatalf("ParseBytes() inbound = %#v, want openai-entry", cfg.Inbounds[0])
+	}
+}
+
+func TestParseBytesMigratesLegacyClientsAndMarshalsCanonical(t *testing.T) {
+	cfg, err := ParseBytes([]byte(`
+server:
+  listen: ":8080"
+inbounds:
+  - name: openai-entry
+    protocol: openai_chat
+    path: /v1/chat/completions
+    clients:
+      - name: office-key
+        token: client-token
+        tag: office
+        quota:
+          enabled: true
+          windows:
+            - name: hourly
+              duration: 1h
+              max_requests: 10
+outbounds:
+  - name: mock
+    protocol: mock
+    tag: mock-tag
+routing:
+  rules:
+    - from_tags: [unused-source]
+      to_tags: [mock-tag]
+      strategy: failover
+`))
+	if err != nil {
+		t.Fatalf("ParseBytes() error = %v", err)
+	}
+	if len(cfg.Clients) != 1 || cfg.Clients[0].Name != "office-key" || !cfg.Clients[0].Quota.Enabled {
+		t.Fatalf("Clients = %#v", cfg.Clients)
+	}
+	if got := cfg.Inbounds[0].Clients; len(got) != 1 || got[0] != (ClientBindingSpec{Ref: "office-key", Tag: "office"}) {
+		t.Fatalf("bindings = %#v", got)
+	}
+	encoded, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal() error = %v", err)
+	}
+	text := string(encoded)
+	if !strings.Contains(text, "clients:\n    - name: office-key\n      token: client-token") || !strings.Contains(text, "ref: office-key") {
+		t.Fatalf("canonical YAML =\n%s", text)
+	}
+	if strings.Contains(text, "tag: office\n      quota:") || strings.Contains(text, "name: office-key\n        token:") {
+		t.Fatalf("canonical YAML retained legacy nesting =\n%s", text)
+	}
+}
+
+func TestParseBytesAcceptsCanonicalClients(t *testing.T) {
+	cfg, err := ParseBytes([]byte(`
+server: {listen: ":8080"}
+clients:
+  - name: office-key
+    token: client-token
+inbounds:
+  - name: openai-entry
+    protocol: openai_chat
+    path: /v1/chat/completions
+    clients:
+      - ref: office-key
+        tag: office
+outbounds: [{name: mock, protocol: mock, tag: mock-tag}]
+routing:
+  rules: [{from_tags: [office], to_tags: [mock-tag], strategy: failover}]
+`))
+	if err != nil {
+		t.Fatalf("ParseBytes() error = %v", err)
+	}
+	if cfg.Clients[0].Name != "office-key" || cfg.Inbounds[0].Clients[0].Ref != "office-key" {
+		t.Fatalf("Config = %#v", cfg)
+	}
+}
+
+func TestParseBytesRejectsMixedClientSchemas(t *testing.T) {
+	cases := []string{
+		`server: {listen: ":8080"}
+clients: [{name: top, token: top-token}]
+inbounds: [{name: entry, protocol: openai_chat, path: /v1, clients: [{name: legacy, token: legacy-token, tag: legacy}]}]`,
+		`server: {listen: ":8080"}
+inbounds: [{name: entry, protocol: openai_chat, path: /v1, clients: [{ref: top, tag: canonical}, {name: legacy, token: legacy-token, tag: legacy}]}]`,
+	}
+	for _, data := range cases {
+		if _, err := ParseBytes([]byte(data)); err == nil || err.Error() != "mixed canonical and legacy client configuration is not supported" {
+			t.Fatalf("ParseBytes() error = %v", err)
+		}
 	}
 }
 
@@ -164,7 +257,7 @@ func TestConfigValidateAdminRejectsInboundClientToken(t *testing.T) {
 	cfg.Admin.Token = "client-token"
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "admin.token duplicates inbound client token used by openai-entry" {
+	if err == nil || err.Error() != "admin.token duplicates client token used by office-key" {
 		t.Fatalf("Validate() error = %v, want duplicate client token error", err)
 	}
 }
@@ -308,7 +401,7 @@ func TestConfigInboundByNameReturnsMatchedInbound(t *testing.T) {
 			Name:     "office-entry",
 			Protocol: "openai_chat",
 			Path:     "/v1/chat/completions",
-			Clients:  []ClientSpec{{Name: "office-key", Token: "token", Tag: "office"}},
+			Clients:  []ClientBindingSpec{{Ref: "office-key", Tag: "office"}},
 		}},
 	}
 
@@ -324,8 +417,8 @@ func TestConfigInboundByNameReturnsMatchedInbound(t *testing.T) {
 func TestConfigListenerInboundsReturnsAllMatchedInbounds(t *testing.T) {
 	cfg := Config{
 		Inbounds: []InboundSpec{
-			{Name: "openai-entry", Protocol: "openai_chat", Path: "/v1/chat/completions", Clients: []ClientSpec{{Name: "office-key", Token: "a", Tag: "office"}}},
-			{Name: "anthropic-entry", Protocol: "anthropic_messages", Path: "/v1/messages", Clients: []ClientSpec{{Name: "thinking-key", Token: "b", Tag: "thinking"}}},
+			{Name: "openai-entry", Protocol: "openai_chat", Path: "/v1/chat/completions", Clients: []ClientBindingSpec{{Ref: "office-key", Tag: "office"}}},
+			{Name: "anthropic-entry", Protocol: "anthropic_messages", Path: "/v1/messages", Clients: []ClientBindingSpec{{Ref: "thinking-key", Tag: "thinking"}}},
 		},
 	}
 
@@ -374,7 +467,7 @@ func TestConfigValidateSupportsAnthropicInboundProtocol(t *testing.T) {
 		Name:     "anthropic-entry",
 		Protocol: "anthropic_messages",
 		Path:     "/v1/messages",
-		Clients:  []ClientSpec{{Name: "anthropic-key", Token: "anthropic-token", Tag: "office"}},
+		Clients:  []ClientBindingSpec{{Ref: "office-key", Tag: "office"}},
 	})
 	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "anthropic-entry")
 
@@ -385,69 +478,91 @@ func TestConfigValidateSupportsAnthropicInboundProtocol(t *testing.T) {
 
 func TestConfigValidateRequiresClientName(t *testing.T) {
 	cfg := validConfig()
-	cfg.Inbounds[0].Clients[0].Name = ""
+	cfg.Clients[0].Name = ""
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "inbounds.openai-entry.clients[0].name is required" {
+	if err == nil || err.Error() != "clients[0].name is required" {
 		t.Fatalf("Validate() error = %v, want missing client name error", err)
 	}
 }
 
 func TestConfigValidateRequiresClientToken(t *testing.T) {
 	cfg := validConfig()
-	cfg.Inbounds[0].Clients[0].Token = ""
+	cfg.Clients[0].Token = ""
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "inbounds.openai-entry.clients[0].token is required" {
+	if err == nil || err.Error() != "clients[0].token is required" {
 		t.Fatalf("Validate() error = %v, want missing client token error", err)
 	}
 }
 
-func TestConfigValidateRequiresClientTag(t *testing.T) {
+func TestConfigValidateRequiresBindingTag(t *testing.T) {
 	cfg := validConfig()
 	cfg.Inbounds[0].Clients[0].Tag = ""
 
 	err := cfg.Validate()
 	if err == nil || err.Error() != "inbounds.openai-entry.clients[0].tag is required" {
-		t.Fatalf("Validate() error = %v, want missing client tag error", err)
+		t.Fatalf("Validate() error = %v, want missing binding tag error", err)
 	}
 }
 
 func TestConfigValidateRejectsDuplicateClientName(t *testing.T) {
 	cfg := validConfig()
-	cfg.Inbounds = append(cfg.Inbounds, InboundSpec{
-		Name:     "other-entry",
-		Protocol: "openai_chat",
-		Path:     "/other",
-		Clients:  []ClientSpec{{Name: "office-key", Token: "other-token", Tag: "other"}},
-	})
-	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "other-entry")
+	cfg.Clients = append(cfg.Clients, ClientSpec{Name: "office-key", Token: "other-token"})
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "inbounds.other-entry.clients[0].name duplicates client name used by openai-entry" {
+	if err == nil || err.Error() != "clients[1].name duplicates \"office-key\"" {
 		t.Fatalf("Validate() error = %v, want duplicate client name error", err)
 	}
 }
 
 func TestConfigValidateRejectsDuplicateClientToken(t *testing.T) {
 	cfg := validConfig()
-	cfg.Inbounds = append(cfg.Inbounds, InboundSpec{
-		Name:     "other-entry",
-		Protocol: "openai_chat",
-		Path:     "/other",
-		Clients:  []ClientSpec{{Name: "other-key", Token: "client-token", Tag: "other"}},
-	})
-	cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "other-entry")
+	cfg.Clients = append(cfg.Clients, ClientSpec{Name: "other-key", Token: "client-token"})
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "inbounds.other-entry.clients[0].token duplicates token used by openai-entry" {
+	if err == nil || err.Error() != "clients[1].token duplicates token used by office-key" {
 		t.Fatalf("Validate() error = %v, want duplicate token error", err)
 	}
 }
 
+func TestConfigValidateBindingContract(t *testing.T) {
+	t.Run("missing ref", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Inbounds[0].Clients[0].Ref = ""
+		if err := cfg.Validate(); err == nil || err.Error() != "inbounds.openai-entry.clients[0].ref is required" {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+	t.Run("unknown ref", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Inbounds[0].Clients[0].Ref = "missing"
+		if err := cfg.Validate(); err == nil || err.Error() != "inbounds.openai-entry.clients[0].ref \"missing\" not found in clients" {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+	t.Run("duplicate ref in inbound", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Inbounds[0].Clients = append(cfg.Inbounds[0].Clients, ClientBindingSpec{Ref: "office-key", Tag: "shared"})
+		if err := cfg.Validate(); err == nil || err.Error() != "inbounds.openai-entry.clients[1].ref duplicates \"office-key\"" {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+	t.Run("shared tag and zero bindings", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Clients = append(cfg.Clients, ClientSpec{Name: "mobile", Token: "mobile-token"})
+		cfg.Inbounds[0].Clients = append(cfg.Inbounds[0].Clients, ClientBindingSpec{Ref: "mobile", Tag: "office"})
+		cfg.Inbounds = append(cfg.Inbounds, InboundSpec{Name: "empty-entry", Protocol: "openai_chat", Path: "/empty"})
+		cfg.Listeners[0].Inbounds = append(cfg.Listeners[0].Inbounds, "empty-entry")
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+}
+
 func TestConfigValidateSupportsClientQuotaWindows(t *testing.T) {
 	cfg := validConfig()
-	cfg.Inbounds[0].Clients[0].Quota = ClientQuotaConfig{
+	cfg.Clients[0].Quota = ClientQuotaConfig{
 		Enabled: true,
 		Windows: []QuotaWindowConfig{
 			{Name: "hourly", Duration: DurationValue("1h"), MaxRequests: 100},
@@ -462,17 +577,17 @@ func TestConfigValidateSupportsClientQuotaWindows(t *testing.T) {
 
 func TestConfigValidateRequiresClientQuotaWindows(t *testing.T) {
 	cfg := validConfig()
-	cfg.Inbounds[0].Clients[0].Quota = ClientQuotaConfig{Enabled: true}
+	cfg.Clients[0].Quota = ClientQuotaConfig{Enabled: true}
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "inbounds.openai-entry.clients[0].quota.windows is required when quota is enabled" {
+	if err == nil || err.Error() != "clients[0].quota.windows is required when quota is enabled" {
 		t.Fatalf("Validate() error = %v, want missing client quota windows error", err)
 	}
 }
 
 func TestConfigValidateRejectsDuplicateClientQuotaWindowName(t *testing.T) {
 	cfg := validConfig()
-	cfg.Inbounds[0].Clients[0].Quota = ClientQuotaConfig{
+	cfg.Clients[0].Quota = ClientQuotaConfig{
 		Enabled: true,
 		Windows: []QuotaWindowConfig{
 			{Name: "daily", Duration: DurationValue("24h"), MaxRequests: 100},
@@ -481,34 +596,85 @@ func TestConfigValidateRejectsDuplicateClientQuotaWindowName(t *testing.T) {
 	}
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "inbounds.openai-entry.clients[0].quota.windows[1].name duplicates \"daily\"" {
+	if err == nil || err.Error() != "clients[0].quota.windows[1].name duplicates \"daily\"" {
 		t.Fatalf("Validate() error = %v, want duplicate client quota window name error", err)
 	}
 }
 
 func TestConfigValidateRequiresPositiveClientQuotaDuration(t *testing.T) {
 	cfg := validConfig()
-	cfg.Inbounds[0].Clients[0].Quota = ClientQuotaConfig{
+	cfg.Clients[0].Quota = ClientQuotaConfig{
 		Enabled: true,
 		Windows: []QuotaWindowConfig{{Name: "daily", Duration: DurationValue("0s"), MaxRequests: 100}},
 	}
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "inbounds.openai-entry.clients[0].quota.windows[0].duration must be a positive duration" {
+	if err == nil || err.Error() != "clients[0].quota.windows[0].duration must be a positive duration" {
 		t.Fatalf("Validate() error = %v, want invalid client quota duration error", err)
 	}
 }
 
 func TestConfigValidateRequiresPositiveClientQuotaLimit(t *testing.T) {
 	cfg := validConfig()
-	cfg.Inbounds[0].Clients[0].Quota = ClientQuotaConfig{
+	cfg.Clients[0].Quota = ClientQuotaConfig{
 		Enabled: true,
 		Windows: []QuotaWindowConfig{{Name: "daily", Duration: DurationValue("24h"), MaxRequests: 0}},
 	}
 
 	err := cfg.Validate()
-	if err == nil || err.Error() != "inbounds.openai-entry.clients[0].quota.windows[0].max_requests must be greater than 0" {
+	if err == nil || err.Error() != "clients[0].quota.windows[0].max_requests must be greater than 0" {
 		t.Fatalf("Validate() error = %v, want invalid client quota limit error", err)
+	}
+}
+
+func TestConfigValidateClientTypedQuotaWindows(t *testing.T) {
+	cfg := validConfig()
+	cfg.Clients[0].Quota = ClientQuotaConfig{Enabled: true, Windows: []QuotaWindowConfig{
+		{Name: "requests", Type: "requests", Duration: "1h", MaxRequests: 10},
+		{Name: "tokens", Type: "tokens", Duration: "1h", MaxTokens: 1000},
+		{Name: "cost", Type: "cost", Duration: "1h", MaxCostUSD: "1.234567"},
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestParseBytesCanonicalizesLegacyClientQuotaType(t *testing.T) {
+	cfg := validConfig()
+	cfg.Clients[0].Quota = ClientQuotaConfig{Enabled: true, Windows: []QuotaWindowConfig{{Name: "hourly", Duration: "1h", MaxRequests: 10}}}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Clients[0].Quota.Windows[0].Type != "requests" {
+		t.Fatalf("type = %q, want requests", parsed.Clients[0].Quota.Windows[0].Type)
+	}
+	canonical, err := yaml.Marshal(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(canonical), "type: requests") {
+		t.Fatalf("canonical config = %s", canonical)
+	}
+}
+
+func TestConfigValidateRejectsInvalidTypedClientQuotaFields(t *testing.T) {
+	tests := []QuotaWindowConfig{
+		{Name: "w", Type: "requests", Duration: "1h", MaxRequests: 1, MaxTokens: 1},
+		{Name: "w", Type: "tokens", Duration: "1h"},
+		{Name: "w", Type: "cost", Duration: "1h", MaxCostUSD: "0.0000001"},
+		{Name: "w", Type: "cost", Duration: "1h", MaxCostUSD: "0"},
+	}
+	for _, window := range tests {
+		cfg := validConfig()
+		cfg.Clients[0].Quota = ClientQuotaConfig{Enabled: true, Windows: []QuotaWindowConfig{window}}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("Validate(%#v) error = nil", window)
+		}
 	}
 }
 

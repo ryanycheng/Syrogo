@@ -11,7 +11,7 @@ import (
 )
 
 type InboundCodec interface {
-	Handle(h *Handler, w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger)
+	Handle(h *Handler, w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ResolvedClientBinding, logger *slog.Logger)
 }
 
 type InboundRegistry struct {

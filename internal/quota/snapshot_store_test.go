@@ -71,8 +71,8 @@ func TestSnapshotStoreSavesAndLoadsTrackers(t *testing.T) {
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		t.Fatal(err)
 	}
-	if raw["version"] != float64(2) {
-		t.Fatalf("snapshot version = %#v, want 2", raw["version"])
+	if raw["version"] != float64(3) {
+		t.Fatalf("snapshot version = %#v, want 3", raw["version"])
 	}
 }
 
@@ -125,6 +125,27 @@ func TestSnapshotStoreLoadsLegacyStringEvents(t *testing.T) {
 	window := tracker.Snapshot()[0].Windows[0]
 	if window.UsedRequests != 1 || window.UsedTokens != 0 {
 		t.Fatalf("legacy restored window = %#v", window)
+	}
+}
+
+func TestClientSnapshotV3PersistsTypedUsageAndV2DefaultsToRequests(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	typed := NewTestClientTracker([]ClientConfig{{Name: "client", Windows: []WindowConfig{{Name: "cost", Type: "cost", Duration: time.Hour, MaxCostMicroUSD: 2_000_000}}}}, func() time.Time { return now })
+	typed.RecordClientTerminalUsage("client", 10, 1_250_001, true)
+	state := typed.ExportState()
+	if state.Version != 3 || state.Subjects["client"].Windows["cost"].Type != "cost" {
+		t.Fatalf("exported state = %#v", state)
+	}
+	restored := NewTestClientTracker([]ClientConfig{{Name: "client", Windows: []WindowConfig{{Name: "cost", Type: "cost", Duration: time.Hour, MaxCostMicroUSD: 2_000_000}}}}, func() time.Time { return now })
+	restored.ImportState(state)
+	if got := restored.ClientSnapshot()[0].Windows[0].UsedCostUSD; got != "1.250001" {
+		t.Fatalf("restored cost = %q", got)
+	}
+
+	legacy := NewTestClientTracker([]ClientConfig{{Name: "client", Windows: []WindowConfig{{Name: "window", Type: "requests", Duration: time.Hour, MaxRequests: 2}}}}, func() time.Time { return now })
+	legacy.ImportState(PersistedState{Version: 2, Subjects: map[string]PersistedSubject{"client": {Windows: map[string]PersistedWindowState{"window": {Reset: "rolling", Schedule: "1h0m0s", Events: []PersistedEvent{{At: formatTime(now), Requests: 1}}}}}}})
+	if got := legacy.ClientSnapshot()[0].Windows[0].UsedRequests; got != 1 {
+		t.Fatalf("legacy client requests = %d", got)
 	}
 }
 

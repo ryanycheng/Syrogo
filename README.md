@@ -20,7 +20,7 @@ It is not just a thin proxy for forwarding a single protocol. It sits between cl
 - multiple inbound protocols
 - multiple upstream providers
 - routing by client scenario
-- client-side request quota windows
+- typed client-side request, token, and cost quota windows
 - basic scheduling such as failover, round_robin, and provider health-aware fallback
 - future governance capabilities such as quota switching, usage statistics, and multi-node chaining
 
@@ -77,7 +77,7 @@ The current version supports:
   - `POST /v1/responses`
   - `POST /v1/messages`
 - tag-first routing by client scenario
-- client-side request quota windows
+- typed client-side request, token, and cost quota windows
 - per-rule support for:
   - `failover`
   - `round_robin`
@@ -148,7 +148,7 @@ cp configs/config.example.yaml configs/config.yaml
 
 Then replace the token, endpoint, and auth_token fields in `configs/config.yaml` with real values available in your environment.
 
-Each `inbounds[].clients[]` entry now also requires a stable `name`. This is the usage-accounting identity for that key. You can rotate `token`, but keep `name` unchanged if you want usage to continue accumulating under the same key identity.
+Top-level `clients[]` own stable identity and credentials: `name`, `token`, and optional `quota`. Each `inbounds[].clients[]` item is only a binding with `ref` (the top-level Client name) and `tag` (the routing identity for requests entering through that Inbound). Keep the Client `name` unchanged when rotating its token so global usage and quota continuity is preserved across all bindings.
 
 Note: the current implementation does not automatically read `.env` and does not expand `${VAR}`. If placeholder strings remain in the config file, they will be read as-is.
 
@@ -388,36 +388,59 @@ Current scope:
 - only runs when the upstream response omits `usage`
 - returns a platform-side estimate, not provider billing truth
 
-### 12. Limit client request windows
+### 12. Limit client quota windows
 
-For client-side governance, you can set request quota windows on individual inbound clients:
+For client-side governance, configure quota on the top-level Client and bind it to one or more Inbounds separately. This canonical example shows one window for each supported type:
 
 ```yaml
+clients:
+  - name: "office-key"
+    token: "${SYROGO_OPENAI_CLIENT_TOKEN}"
+    quota:
+      enabled: true
+      windows:
+        - name: "hourly-requests"
+          type: "requests"
+          duration: "1h"
+          max_requests: 1000
+        - name: "daily-tokens"
+          type: "tokens"
+          duration: "24h"
+          max_tokens: 1000000
+        - name: "monthly-cost"
+          type: "cost"
+          duration: "720h"
+          max_cost_usd: 25
+
 inbounds:
   - name: "openai-entry"
     protocol: "openai_chat"
     path: "/v1/chat/completions"
     clients:
-      - name: "office-key"
-        token: "${SYROGO_OPENAI_CLIENT_TOKEN}"
+      - ref: "office-key"
         tag: "office"
-        quota:
-          enabled: true
-          windows:
-            - name: "hourly"
-              duration: "1h"
-              max_requests: 100
-            - name: "daily"
-              duration: "24h"
-              max_requests: 1000
+  - name: "responses-entry"
+    protocol: "openai_responses"
+    path: "/v1/responses"
+    clients:
+      - ref: "office-key"
+        tag: "automation"
 ```
 
-Scope:
+Field ownership and behavior:
 
-- applies before routing, so exceeded clients receive HTTP 429 directly
-- uses `clients[].name` as the stable quota identity
-- multiple windows can be active at the same time; any exhausted window blocks the client
-- the first version tracks request counts, not token or billing quotas
+- top-level `clients[]` owns `name`, `token`, and `quota`; `inbounds[].clients[]` owns only binding `ref` and `tag`
+- one Client can have bindings on multiple Inbounds; authentication resolves the binding `ref` to the same top-level token
+- the binding `tag` is selected by the concrete Inbound and matched against `routing.rules[].from_tags`, so the same Client can enter different routing scenarios through different bindings
+- quota and Usage/accounting aggregate globally by stable Client `name`, not separately by Inbound or tag
+- quota applies before routing, so a Client already known to be exhausted receives HTTP 429 directly on every binding
+- multiple windows can be active at the same time; each window has exactly one `type` (`requests`, `tokens`, or `cost`) and only its matching limit (`max_requests`, `max_tokens`, or `max_cost_usd`); any exhausted window blocks the Client
+- legacy request windows that omit `type` remain compatible when `max_requests` is set and are canonicalized as `type: requests`
+- request quota is counted at request admission. Token and cost quota are counted only after a successful terminal response; admission and terminal accounting are separate, so concurrent in-flight successes can overshoot the configured token/cost limit and the next request receives HTTP 429
+- cost is calculated from Syrogo's configured/built-in model pricing, not from a Provider bill. Successful terminal usage whose model has no price is counted as `$0`; runtime quota output reports `unpriced_count` and a warning so operators can fix pricing coverage
+- Provider/outbound quota supports requests and tokens but does not support `type: cost` or `max_cost_usd`
+- legacy YAML with nested Client `name`/`token`/`quota` remains readable for migration; the next config save emits the canonical top-level `clients` plus `ref`/`tag` bindings form
+- a binding tag referenced by `routing.rules[].from_tags` is protected when that binding is its last Client source. To remove or retag it, either first add/update another binding that supplies the same tag, or remove/change that tag in every listed route's `from_tags`; the structured Admin error includes the tag and route names
 
 Read current client quota state with the accounting admin token:
 
@@ -550,7 +573,9 @@ admin:
 
 Log files rotate before a write would exceed `max_size_mb` and at the first write on a new local calendar day. Historical files are compressed with gzip and cleaned by age, file count, and total disk usage; the active file is never removed. `/admin/logs` automatically searches the active file and retained archives. Queries fully covered by the bounded recent cache (last 5 minutes, up to 8 MiB) use memory; cursor, older, incomplete, or multi-page queries fall back to files so results are not omitted. Status filters accept exact codes and families such as `4xx` and `5xx`. Successful `/admin/logs` polling does not emit an `admin_audit` entry.
 
-The UI stores the Admin UI token only in browser local storage and uses `/admin/overview`, `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, `/admin/config/update`, `/admin/config/apply`, `/admin/config/history`, `/admin/config/history/diff`, `/admin/config/rollback`, `/admin/debug/traces`, `/admin/debug/route-dry-run`, and `/admin/debug/providers`. The Overview page shows request, error, fallback, latency, quota, provider health, recent governance event, and Admin self-check summaries such as config path and log availability. Provider editing round-trips model canonical names and aliases; an empty list is shown as unrestricted. Provider save, enable/disable, and delete mutations atomically update the config and hot-apply the result immediately, so no separate Apply click is needed. Usage defaults to the last seven UTC calendar days and supports explicit UTC date ranges plus `group_by` filters. Debug shows recent traces with matched rule, routing strategy, planned steps, fallback count, spans, a side-effect-free route dry-run form, and provider health/quota/event/latency aggregates. Logs are read only from the configured local log path, support line/byte limits, show path/truncation/read-limit metadata, and are redacted for common token, key, authorization, and secret fields. Current config loading returns a redacted display copy; config updates show a redacted diff preview plus browser confirmation before writing; Apply hot-reloads safe runtime changes and History/Rollback keeps recent local config versions with redacted diff viewing. Admin API operations emit `admin_audit` log entries without recording Authorization headers, tokens, request bodies, config content, or log content. It is an embedded single-page console and does not require a frontend build step.
+The UI stores the Admin UI token only in browser local storage and uses `/admin/overview`, `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, `/admin/config/update`, `/admin/config/apply`, `/admin/config/history`, `/admin/config/history/diff`, `/admin/config/rollback`, `/admin/config/clients`, `/admin/config/clients/metrics`, `/admin/config/client/usage`, `/admin/config/client-binding/upsert`, `/admin/config/client-binding/delete`, `/admin/debug/traces`, `/admin/debug/route-dry-run`, and `/admin/debug/providers`. The Overview page shows request, error, fallback, latency, quota, provider health, recent governance event, and Admin self-check summaries. Provider and Client save/delete operations atomically update the config and hot-apply it, so no separate Apply click is needed. Client CRUD handles only top-level `name`, `token`, and `quota`; bindings are managed independently with `inbound`, `ref`, and `tag`. A bound Client must be unbound from every Inbound before deletion. Client names are stable quota/accounting identities: rotate a token without renaming the Client to preserve global continuity across all bindings; an empty or `<redacted>` token on an existing Client keeps its current token. Client quota objects round-trip in full. Changing or deleting a binding that supplies the last source of a tag referenced by `routing.rules[].from_tags` is rejected; another binding must supply that tag first.
+
+The Clients list combines independent config and metrics requests, so CRUD remains available with a metrics warning if accounting metrics fail. Its compact **Usage** is all-time, while **Frequency** covers the selected recent 7/30/90 UTC calendar days. Inline Client detail shows a native CSS Grid contribution heatmap and daily aggregates for Requests, Tokens, Cost, and Errors. Date ranges are UTC and half-open (`start_date` inclusive, `end_date` exclusive); the current UTC day is `partial`, while legacy dates before known coverage are `unknown` rather than zero. “Daily records” are aggregates, not a per-request audit trail. Other Usage, Debug, Logs, redaction, History/Rollback, and audit behavior remains available through the embedded dependency-free single-page console.
 
 ### 15. Validate config changes
 
@@ -686,7 +711,7 @@ Notes:
 - `group_by=error_kind` uses `none` for successful requests and values such as `quota_exceeded`, `timeout`, `upstream_server_error`, `auth_failed`, or `capability_unsupported` for failures
 - failover only continues on recoverable errors such as quota, timeout, transient, or upstream 5xx failures; auth, capability, and request-shape failures are surfaced directly
 - queries always read the in-memory aggregate view instead of scanning disk on request
-- `local_file` persists append-only records as day-partitioned JSONL files and periodically writes snapshots for restart recovery
+- `local_file` persists append-only raw records as day-partitioned JSONL files for `retention_days`; daily aggregate snapshots have their independent `snapshot_retention_days`, so aggregate coverage may outlive raw records. These aggregates support trends and “Daily records”, not per-request auditing
 
 Config example:
 

@@ -70,11 +70,37 @@ func (m *ReloadManager) MutateConfig(ctx context.Context, reason string, mutate 
 	return gateway.ReloadResult(result), err
 }
 
+func (m *ReloadManager) UpdateConfig(_ context.Context, expectedRevision string, data []byte) (gateway.ConfigUpdateResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.app.configPath == "" {
+		return gateway.ConfigUpdateResult{}, errors.New("config path is not configured")
+	}
+	current, err := os.ReadFile(m.app.configPath)
+	if err != nil {
+		return gateway.ConfigUpdateResult{}, fmt.Errorf("read current config: %w", err)
+	}
+	currentRevision := configRevision(current)
+	if expectedRevision != "*" && strings.TrimSpace(expectedRevision) != currentRevision {
+		return gateway.ConfigUpdateResult{}, &gateway.ConfigRevisionConflictError{CurrentRevision: currentRevision}
+	}
+	if _, err := config.ParseBytes(data); err != nil {
+		return gateway.ConfigUpdateResult{}, err
+	}
+	if err := config.WriteValidatedFile(m.app.configPath, data); err != nil {
+		return gateway.ConfigUpdateResult{}, err
+	}
+	checksum := checksumHex(data)
+	return gateway.ConfigUpdateResult{Saved: true, Applied: false, Revision: "sha256:" + checksum, Checksum: checksum}, nil
+}
+
 func (m *ReloadManager) History() []gateway.HistoryItem {
 	items, _ := m.history.List()
 	converted := make([]gateway.HistoryItem, 0, len(items))
 	for _, item := range items {
-		converted = append(converted, gateway.HistoryItem(item))
+		converted = append(converted, gateway.HistoryItem{
+			ID: item.ID, CreatedAt: item.CreatedAt, Reason: item.Reason, Checksum: item.Checksum,
+		})
 	}
 	return converted
 }
@@ -197,12 +223,13 @@ func (m *ReloadManager) mutateConfig(_ context.Context, reason string, mutate ga
 
 func (m *ReloadManager) applyRuntimeLocked(next config.Config, runtime appRuntime) bool {
 	quotaStateReset := runtime.outboundQuotaTracker.ReconfigureOutbounds(enabledOutbounds(next))
-	quotaStateReset = runtime.clientQuotaTracker.ReconfigureInbounds(next.Inbounds) || quotaStateReset
+	quotaStateReset = runtime.clientQuotaTracker.ReconfigureClientSpecs(next.Clients) || quotaStateReset
 	listeners := normalizedListeners(next)
 	for i, binding := range m.bindings {
 		binding.handler.ApplyRuntime(gateway.RuntimeState{
 			Router:             runtime.router,
 			Dispatcher:         runtime.dispatcher,
+			Clients:            next.Clients,
 			Inbounds:           next.ListenerInbounds(listeners[i]),
 			ClientQuotaTracker: runtime.clientQuotaTracker,
 			EventRecorder:      runtime.eventRecorder,
@@ -423,25 +450,49 @@ func (h *configHistory) Prune(limit int) error {
 }
 
 func redactedConfigYAML(data []byte) (string, error) {
-	cfg, err := config.ParseBytes(data)
-	if err != nil {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
 		return "", err
 	}
-	cfg.Admin.Token = "<redacted>"
-	cfg.Accounting.AdminToken = "<redacted>"
-	for inboundIndex := range cfg.Inbounds {
-		for clientIndex := range cfg.Inbounds[inboundIndex].Clients {
-			cfg.Inbounds[inboundIndex].Clients[clientIndex].Token = "<redacted>"
-		}
-	}
-	for outboundIndex := range cfg.Outbounds {
-		cfg.Outbounds[outboundIndex].AuthToken = "<redacted>"
-	}
-	redacted, err := yaml.Marshal(cfg)
+	redactYAMLNode(&document)
+	redacted, err := yaml.Marshal(&document)
 	if err != nil {
 		return "", err
 	}
 	return string(redacted), nil
+}
+
+func redactYAMLNode(node *yaml.Node) {
+	if node == nil {
+		return
+	}
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key, value := node.Content[i], node.Content[i+1]
+			if isSensitiveConfigKey(key.Value) {
+				value.Kind = yaml.ScalarNode
+				value.Tag = "!!str"
+				value.Value = config.RedactedValue
+				value.Content = nil
+				continue
+			}
+			redactYAMLNode(value)
+		}
+		return
+	}
+	for _, child := range node.Content {
+		redactYAMLNode(child)
+	}
+}
+
+func isSensitiveConfigKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	return normalized == "token" || normalized == "auth_token" || normalized == "admin_token" || normalized == "api_key" || normalized == "secret" || strings.HasSuffix(normalized, "_secret") || strings.HasSuffix(normalized, "_token")
+}
+
+func configRevision(data []byte) string {
+	return "sha256:" + checksumHex(data)
 }
 
 func checksumHex(data []byte) string {

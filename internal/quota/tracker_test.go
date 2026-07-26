@@ -1,9 +1,89 @@
 package quota
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/ryanycheng/Syrogo/internal/config"
 )
+
+func TestClientTrackerBuildsFromTopLevelClients(t *testing.T) {
+	tracker := NewClientTrackerFromClients([]config.ClientSpec{
+		{Name: "office-key", Quota: config.ClientQuotaConfig{Enabled: true, Windows: []config.QuotaWindowConfig{{Name: "hourly", Duration: "1h", MaxRequests: 2}}}},
+		{Name: "unlimited"},
+	})
+	if tracker == nil {
+		t.Fatal("NewClientTrackerFromClients() = nil")
+	}
+	items := tracker.ClientSnapshot()
+	if len(items) != 1 || items[0].Client != "office-key" || items[0].Inbound != "" {
+		t.Fatalf("ClientSnapshot() = %#v", items)
+	}
+}
+
+func TestClientTrackerTypedWindows(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	tracker := NewTestClientTracker([]ClientConfig{{Name: "client", Windows: []WindowConfig{
+		{Name: "requests", Type: "requests", Duration: time.Hour, MaxRequests: 1},
+		{Name: "tokens", Type: "tokens", Duration: time.Hour, MaxTokens: 100},
+		{Name: "cost", Type: "cost", Duration: time.Hour, MaxCostMicroUSD: 1_500_000},
+	}}}, func() time.Time { return now })
+
+	tracker.RecordClientRequest("client")
+	windows := tracker.ClientSnapshot()[0].Windows
+	if windows[0].UsedRequests != 1 || windows[1].UsedTokens != 0 || windows[2].UsedCostUSD != "" {
+		t.Fatalf("request snapshot = %#v", windows)
+	}
+	tracker.RecordClientTerminalUsage("client", 100, 1_250_001, true)
+	decision := tracker.BeforeClientRequest("client")
+	if decision.Allowed || !decision.RetryAfter.Equal(now.Add(time.Hour)) {
+		t.Fatalf("typed limit decision = %#v", decision)
+	}
+	if len(decision.BlockingWindows) != 2 {
+		t.Fatalf("blocking windows = %#v, want request and token limits", decision.BlockingWindows)
+	}
+	if got := decision.BlockingWindows[1]; got.Type != "tokens" || got.Limit != 100 || got.Used != 100 || got.Unit != "tokens" {
+		t.Fatalf("token blocking window = %#v", got)
+	}
+	tracker.RecordClientTerminalUsage("client", 50, 1_500_000, true)
+	decision = tracker.BeforeClientRequest("client")
+	if len(decision.BlockingWindows) != 3 {
+		t.Fatalf("blocking windows after cost limit = %#v, want all typed limits", decision.BlockingWindows)
+	}
+	if got := decision.BlockingWindows[2]; got.Type != "cost" || got.Limit != json.Number("1.5") || got.Used != json.Number("2.750001") || got.Unit != "USD" {
+		t.Fatalf("cost blocking window = %#v", got)
+	}
+	windows = tracker.ClientSnapshot()[0].Windows
+	if windows[1].UsedTokens != 150 || windows[2].UsedCostUSD != "2.750001" || windows[2].RemainingCostUSD != "" {
+		t.Fatalf("terminal snapshot = %#v", windows)
+	}
+}
+
+func TestClientTrackerCostTracksUnpricedUsage(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	tracker := NewTestClientTracker([]ClientConfig{{Name: "client", Windows: []WindowConfig{{Name: "cost", Type: "cost", Duration: time.Hour, MaxCostMicroUSD: 1_000_000}}}}, func() time.Time { return now })
+	tracker.RecordClientTerminalUsage("client", 50, 900_000, false)
+	window := tracker.ClientSnapshot()[0].Windows[0]
+	if window.UsedCostUSD != "" || window.UnpricedCount != 1 || window.Warning == "" {
+		t.Fatalf("unpriced snapshot = %#v", window)
+	}
+	if decision := tracker.BeforeClientRequest("client"); !decision.Allowed {
+		t.Fatalf("unpriced usage limited request = %#v", decision)
+	}
+}
+
+func TestClientReconfigureTypeChangeResetsUsage(t *testing.T) {
+	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	tracker := NewTestClientTracker([]ClientConfig{{Name: "client", Windows: []WindowConfig{{Name: "window", Type: "requests", Duration: time.Hour, MaxRequests: 10}}}}, func() time.Time { return now })
+	tracker.RecordClientRequest("client")
+	if cleared := tracker.ReconfigureClients([]ClientConfig{{Name: "client", Windows: []WindowConfig{{Name: "window", Type: "requests", Duration: time.Hour, MaxRequests: 20}}}}); cleared {
+		t.Fatal("limit change reset usage")
+	}
+	if cleared := tracker.ReconfigureClients([]ClientConfig{{Name: "client", Windows: []WindowConfig{{Name: "window", Type: "tokens", Duration: time.Hour, MaxTokens: 20}}}}); !cleared {
+		t.Fatal("type change did not reset usage")
+	}
+}
 
 func TestTrackerAppliesMultipleWindows(t *testing.T) {
 	now := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)

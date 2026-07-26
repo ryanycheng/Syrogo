@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,21 +10,34 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/ryanycheng/Syrogo/internal/config"
 )
 
 func TestParseLauncherOptionsInfersBaseURLFromConfig(t *testing.T) {
 	configPath := writeLauncherConfig(t, `
 listeners:
+  - name: "admin"
+    listen: ":23234"
+    inbounds: ["admin-entry"]
   - name: "debug"
     listen: ":23235"
     inbounds: ["responses-entry"]
+clients:
+  - name: "responses-key"
+    token: "token"
 inbounds:
+  - name: "admin-entry"
+    protocol: "openai_chat"
+    path: "/v1/chat/completions"
+    clients:
+      - ref: "responses-key"
+        tag: "responses"
   - name: "responses-entry"
     protocol: "openai_responses"
     path: "/v1/responses"
     clients:
-      - name: "responses-key"
-        token: "token"
+      - ref: "responses-key"
         tag: "responses"
 outbounds:
   - name: "mock"
@@ -46,17 +60,56 @@ routing:
 	}
 }
 
-func TestParseLauncherOptionsKeepsExplicitBaseURL(t *testing.T) {
+func TestParseLauncherOptionsRejectsInboundOnMultipleListeners(t *testing.T) {
 	configPath := writeLauncherConfig(t, `
-server:
-  listen: ":23235"
+listeners:
+  - name: "public"
+    listen: ":23234"
+    inbounds: ["responses-entry"]
+  - name: "private"
+    listen: ":23235"
+    inbounds: ["responses-entry"]
+clients:
+  - name: "responses-key"
+    token: "token"
 inbounds:
   - name: "responses-entry"
     protocol: "openai_responses"
     path: "/v1/responses"
     clients:
-      - name: "responses-key"
-        token: "token"
+      - ref: "responses-key"
+        tag: "responses"
+outbounds:
+  - name: "mock"
+    protocol: "mock"
+    tag: "mock"
+routing:
+  rules:
+    - from_tags: ["responses"]
+      to_tags: ["mock"]
+      strategy: "failover"
+`)
+
+	var opts launcherOptions
+	err := parseLauncherOptions([]string{"codex", "--config", configPath, "exec", "hello"}, &opts)
+	if err == nil || !strings.Contains(err.Error(), `inbound "responses-entry" is bound to multiple listeners`) || !strings.Contains(err.Error(), "pass --base-url") {
+		t.Fatalf("parseLauncherOptions() error = %v, want ambiguous listener error", err)
+	}
+}
+
+func TestParseLauncherOptionsKeepsExplicitBaseURL(t *testing.T) {
+	configPath := writeLauncherConfig(t, `
+server:
+  listen: ":23235"
+clients:
+  - name: "responses-key"
+    token: "token"
+inbounds:
+  - name: "responses-entry"
+    protocol: "openai_responses"
+    path: "/v1/responses"
+    clients:
+      - ref: "responses-key"
         tag: "responses"
 outbounds:
   - name: "mock"
@@ -83,13 +136,15 @@ func TestParseLauncherOptionsPassesAgentFlagsWithoutSeparator(t *testing.T) {
 	configPath := writeLauncherConfig(t, `
 server:
   listen: ":23234"
+clients:
+  - name: "claude-key"
+    token: "token"
 inbounds:
   - name: "anthropic-entry"
     protocol: "anthropic_messages"
     path: "/v1/messages"
     clients:
-      - name: "claude-key"
-        token: "token"
+      - ref: "claude-key"
         tag: "claude"
 outbounds:
   - name: "mock"
@@ -120,13 +175,15 @@ func TestParseLauncherOptionsPassesAgentCommandArguments(t *testing.T) {
 	configPath := writeLauncherConfig(t, `
 server:
   listen: ":23235"
+clients:
+  - name: "responses-key"
+    token: "token"
 inbounds:
   - name: "responses-entry"
     protocol: "openai_responses"
     path: "/v1/responses"
     clients:
-      - name: "responses-key"
-        token: "token"
+      - ref: "responses-key"
         tag: "responses"
 outbounds:
   - name: "mock"
@@ -154,13 +211,15 @@ func TestBuildLaunchPlanForClaude(t *testing.T) {
 	configPath := writeLauncherConfig(t, `
 server:
   listen: ":23234"
+clients:
+  - name: "claude-key"
+    token: "claude-token"
 inbounds:
   - name: "anthropic-entry"
     protocol: "anthropic_messages"
     path: "/v1/messages"
     clients:
-      - name: "claude-key"
-        token: "claude-token"
+      - ref: "claude-key"
         tag: "claude"
 outbounds:
   - name: "mock"
@@ -202,16 +261,19 @@ func TestBuildLaunchPlanRequiresDisambiguatedClient(t *testing.T) {
 	configPath := writeLauncherConfig(t, `
 server:
   listen: ":23234"
+clients:
+  - name: "claude-a"
+    token: "token-a"
+  - name: "claude-b"
+    token: "token-b"
 inbounds:
   - name: "anthropic-entry"
     protocol: "anthropic_messages"
     path: "/v1/messages"
     clients:
-      - name: "claude-a"
-        token: "token-a"
+      - ref: "claude-a"
         tag: "a"
-      - name: "claude-b"
-        token: "token-b"
+      - ref: "claude-b"
         tag: "b"
 outbounds:
   - name: "mock"
@@ -234,6 +296,28 @@ routing:
 	}
 	if plan.Env["ANTHROPIC_AUTH_TOKEN"] != "token-b" {
 		t.Fatalf("plan env = %#v, want selected client token", plan.Env)
+	}
+}
+
+func TestSelectLauncherClientResolvesBindingMetadata(t *testing.T) {
+	cfg := config.Config{
+		Clients: []config.ClientSpec{{Name: "shared", Token: "shared-token"}},
+		Inbounds: []config.InboundSpec{
+			{Name: "claude-first", Protocol: "anthropic_messages", Clients: []config.ClientBindingSpec{{Ref: "shared", Tag: "first-tag"}}},
+			{Name: "claude-second", Protocol: "anthropic_messages", Clients: []config.ClientBindingSpec{{Ref: "shared", Tag: "second-tag"}}},
+		},
+	}
+
+	if _, err := selectLauncherClient(cfg, "", "shared", "claude"); err == nil || !strings.Contains(err.Error(), "multiple clients matched") {
+		t.Fatalf("selectLauncherClient() error = %v, want ambiguous binding error", err)
+	}
+	selected, err := selectLauncherClient(cfg, "claude-second", "shared", "claude")
+	if err != nil {
+		t.Fatalf("selectLauncherClient() error = %v", err)
+	}
+	want := launcherClient{InboundName: "claude-second", ClientName: "shared", Token: "shared-token", Tag: "second-tag"}
+	if selected != want {
+		t.Fatalf("selected = %#v, want %#v", selected, want)
 	}
 }
 
@@ -328,6 +412,13 @@ func TestLaunchAgentInjectsClaudeHooksWithSettingsOverlay(t *testing.T) {
 
 	var registerSeen, stoppedSeen bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode %s body: %v", r.URL.Path, err)
+		}
+		if body["inbound_name"] != "anthropic-entry" {
+			t.Errorf("%s inbound_name = %#v, want anthropic-entry", r.URL.Path, body["inbound_name"])
+		}
 		switch r.URL.Path {
 		case "/session/register":
 			registerSeen = true
@@ -349,6 +440,7 @@ func TestLaunchAgentInjectsClaudeHooksWithSettingsOverlay(t *testing.T) {
 
 	err := launchAgent(launcherOptions{
 		BaseURL: server.URL,
+		Inbound: "anthropic-entry",
 		Token:   "client-token",
 		Args:    []string{"claude", "--model", "claude-sonnet-4-6"},
 		Stdin:   strings.NewReader(""),

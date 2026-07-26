@@ -35,14 +35,19 @@ func NewPriceCalculator(items []config.AccountingPriceConfig) PriceCalculator {
 }
 
 func (c PriceCalculator) CostUSD(provider, model string, usage runtime.UsageBreakdown) float64 {
+	cost, _ := c.CostUSDWithMatch(provider, model, usage)
+	return cost
+}
+
+func (c PriceCalculator) CostUSDWithMatch(provider, model string, usage runtime.UsageBreakdown) (float64, bool) {
 	price, ok := c.match(provider, model)
 	if !ok {
-		return 0
+		return 0, false
 	}
 	return perMillion(usage.InputTokens, price.InputPerMillionUSD) +
 		perMillion(usage.OutputTokens, price.OutputPerMillionUSD) +
 		perMillion(usage.CachedInputWriteTokens, price.CacheCreatePerMillionUSD) +
-		perMillion(usage.CachedInputReadTokens, price.CacheReadPerMillionUSD)
+		perMillion(usage.CachedInputReadTokens, price.CacheReadPerMillionUSD), true
 }
 
 func (c PriceCalculator) match(provider, model string) (config.AccountingPriceConfig, bool) {

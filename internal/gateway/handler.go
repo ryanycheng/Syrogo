@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -40,10 +41,24 @@ type ConfigMutation func(config.Config) (config.Config, error)
 type ConfigReloader interface {
 	ApplyConfig(context.Context) (ReloadResult, error)
 	MutateConfig(context.Context, string, ConfigMutation) (ReloadResult, error)
+	UpdateConfig(context.Context, string, []byte) (ConfigUpdateResult, error)
 	History() []HistoryItem
 	HistoryDiff(id string) (HistoryDiff, error)
 	Rollback(context.Context, string) (ReloadResult, error)
 }
+
+type ConfigUpdateResult struct {
+	Saved    bool   `json:"saved"`
+	Applied  bool   `json:"applied"`
+	Revision string `json:"revision"`
+	Checksum string `json:"checksum"`
+}
+
+type ConfigRevisionConflictError struct {
+	CurrentRevision string
+}
+
+func (e *ConfigRevisionConflictError) Error() string { return "config revision conflict" }
 
 type ReloadResult struct {
 	OK              bool   `json:"ok"`
@@ -59,7 +74,6 @@ type HistoryItem struct {
 	ID        string `json:"id"`
 	CreatedAt string `json:"created_at"`
 	Reason    string `json:"reason"`
-	Path      string `json:"path"`
 	Checksum  string `json:"checksum"`
 }
 
@@ -73,6 +87,7 @@ type RuntimeState struct {
 	Router             *router.Router
 	Dispatcher         *execution.Dispatcher
 	Inbounds           []config.InboundSpec
+	Clients            []config.ClientSpec
 	ClientQuotaTracker *quota.Tracker
 	EventRecorder      *quota.EventRecorder
 	LatencyStore       *latency.Store
@@ -107,12 +122,20 @@ func (w *loggingResponseWriter) Flush() {
 	}
 }
 
-func withRequestContext(ctx context.Context, requestID string, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, sessionStore *sessions.Store) context.Context {
+func withRequestContext(ctx context.Context, requestID string, r *http.Request, inbound config.InboundSpec, resolved config.ResolvedClientBinding, sessionStore *sessions.Store) context.Context {
 	ctx = context.WithValue(ctx, runtime.ContextKeyRequestID, requestID)
-	sessionID := strings.TrimSpace(r.Header.Get("X-Syrogo-Session-ID"))
+	explicitSessionID := strings.TrimSpace(r.Header.Get("X-Syrogo-Session-ID"))
+	sessionID := ""
 	agent := strings.TrimSpace(r.Header.Get("X-Syrogo-Agent"))
-	if sessionID == "" && sessionStore != nil {
-		if session, ok := sessionStore.LatestActive(client.Name, inbound.Name); ok {
+	if explicitSessionID != "" && sessionStore != nil {
+		if session, ok := sessionStore.GetOwned(explicitSessionID, resolved.Client.Name, inbound.Name); ok {
+			sessionID = session.ID
+			if agent == "" && len(session.Command) > 0 {
+				agent = session.Command[0]
+			}
+		}
+	} else if explicitSessionID == "" && sessionStore != nil {
+		if session, ok := sessionStore.LatestActive(resolved.Client.Name, inbound.Name); ok {
 			sessionID = session.ID
 			if agent == "" && len(session.Command) > 0 {
 				agent = session.Command[0]
@@ -128,31 +151,31 @@ func withRequestContext(ctx context.Context, requestID string, r *http.Request, 
 	return ctx
 }
 
-func New(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
-	return NewWithClientQuota(r, dispatcher, inbounds, nil, accountingCfg, logger)
+func New(r *router.Router, dispatcher *execution.Dispatcher, clients []config.ClientSpec, inbounds []config.InboundSpec, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
+	return NewWithClientQuota(r, dispatcher, clients, inbounds, nil, accountingCfg, logger)
 }
 
-func NewWithClientQuota(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
-	return NewWithClientQuotaAndEvents(r, dispatcher, inbounds, clientQuotaTracker, nil, accountingCfg, logger)
+func NewWithClientQuota(r *router.Router, dispatcher *execution.Dispatcher, clients []config.ClientSpec, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
+	return NewWithClientQuotaAndEvents(r, dispatcher, clients, inbounds, clientQuotaTracker, nil, accountingCfg, logger)
 }
 
-func NewWithClientQuotaAndEvents(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
-	return NewWithClientQuotaEventsAndLatency(r, dispatcher, inbounds, clientQuotaTracker, eventRecorder, nil, accountingCfg, logger)
+func NewWithClientQuotaAndEvents(r *router.Router, dispatcher *execution.Dispatcher, clients []config.ClientSpec, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
+	return NewWithClientQuotaEventsAndLatency(r, dispatcher, clients, inbounds, clientQuotaTracker, eventRecorder, nil, accountingCfg, logger)
 }
 
-func NewWithClientQuotaEventsAndLatency(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
-	return NewWithClientQuotaEventsLatencyAndConfig(r, dispatcher, inbounds, clientQuotaTracker, eventRecorder, latencyStore, "", accountingCfg, logger)
+func NewWithClientQuotaEventsAndLatency(r *router.Router, dispatcher *execution.Dispatcher, clients []config.ClientSpec, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
+	return NewWithClientQuotaEventsLatencyAndConfig(r, dispatcher, clients, inbounds, clientQuotaTracker, eventRecorder, latencyStore, "", accountingCfg, logger)
 }
 
-func NewWithClientQuotaEventsLatencyAndConfig(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
-	return NewWithClientQuotaEventsLatencyConfigAndAdmin(r, dispatcher, inbounds, clientQuotaTracker, eventRecorder, latencyStore, configPath, accountingCfg, config.AdminConfig{}, logger)
+func NewWithClientQuotaEventsLatencyAndConfig(r *router.Router, dispatcher *execution.Dispatcher, clients []config.ClientSpec, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, accountingCfg config.AccountingConfig, logger *slog.Logger) *Handler {
+	return NewWithClientQuotaEventsLatencyConfigAndAdmin(r, dispatcher, clients, inbounds, clientQuotaTracker, eventRecorder, latencyStore, configPath, accountingCfg, config.AdminConfig{}, logger)
 }
 
-func NewWithClientQuotaEventsLatencyConfigAndAdmin(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, accountingCfg config.AccountingConfig, adminCfg config.AdminConfig, logger *slog.Logger) *Handler {
-	return NewWithClientQuotaEventsLatencyConfigAdminAndSessions(r, dispatcher, inbounds, clientQuotaTracker, eventRecorder, latencyStore, configPath, accountingCfg, adminCfg, nil, logger)
+func NewWithClientQuotaEventsLatencyConfigAndAdmin(r *router.Router, dispatcher *execution.Dispatcher, clients []config.ClientSpec, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, accountingCfg config.AccountingConfig, adminCfg config.AdminConfig, logger *slog.Logger) *Handler {
+	return NewWithClientQuotaEventsLatencyConfigAdminAndSessions(r, dispatcher, clients, inbounds, clientQuotaTracker, eventRecorder, latencyStore, configPath, accountingCfg, adminCfg, nil, logger)
 }
 
-func NewWithClientQuotaEventsLatencyConfigAdminAndSessions(r *router.Router, dispatcher *execution.Dispatcher, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, accountingCfg config.AccountingConfig, adminCfg config.AdminConfig, sessionStore *sessions.Store, logger *slog.Logger) *Handler {
+func NewWithClientQuotaEventsLatencyConfigAdminAndSessions(r *router.Router, dispatcher *execution.Dispatcher, clients []config.ClientSpec, inbounds []config.InboundSpec, clientQuotaTracker *quota.Tracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, configPath string, accountingCfg config.AccountingConfig, adminCfg config.AdminConfig, sessionStore *sessions.Store, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -167,6 +190,7 @@ func NewWithClientQuotaEventsLatencyConfigAdminAndSessions(r *router.Router, dis
 	h.ApplyRuntime(RuntimeState{
 		Router:             r,
 		Dispatcher:         dispatcher,
+		Clients:            clients,
 		Inbounds:           inbounds,
 		ClientQuotaTracker: clientQuotaTracker,
 		EventRecorder:      eventRecorder,
@@ -180,6 +204,7 @@ func NewWithClientQuotaEventsLatencyConfigAdminAndSessions(r *router.Router, dis
 
 func (h *Handler) ApplyRuntime(state RuntimeState) {
 	state.Inbounds = append([]config.InboundSpec(nil), state.Inbounds...)
+	state.Clients = append([]config.ClientSpec(nil), state.Clients...)
 	state.Admin = normalizeAdminConfig(state.Admin)
 	h.runtime.Store(state)
 }
@@ -239,8 +264,12 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/config/provider/enabled", h.withAdminAudit("config_provider_enabled", h.handleConfigProviderEnabled))
 	mux.HandleFunc("/admin/config/provider/delete", h.withAdminAudit("config_provider_delete", h.handleConfigProviderDelete))
 	mux.HandleFunc("/admin/config/clients", h.withAdminAudit("config_clients", h.handleConfigClients))
+	mux.HandleFunc("/admin/config/clients/metrics", h.withAdminAudit("config_client_metrics", h.handleConfigClientMetrics))
+	mux.HandleFunc("/admin/config/client/usage", h.withAdminAudit("config_client_usage", h.handleConfigClientUsage))
 	mux.HandleFunc("/admin/config/client/upsert", h.withAdminAudit("config_client_upsert", h.handleConfigClientUpsert))
 	mux.HandleFunc("/admin/config/client/delete", h.withAdminAudit("config_client_delete", h.handleConfigClientDelete))
+	mux.HandleFunc("/admin/config/client-binding/upsert", h.withAdminAudit("config_client_binding_upsert", h.handleConfigClientBindingUpsert))
+	mux.HandleFunc("/admin/config/client-binding/delete", h.withAdminAudit("config_client_binding_delete", h.handleConfigClientBindingDelete))
 	mux.HandleFunc("/admin/config/routes", h.withAdminAudit("config_routes", h.handleConfigRoutes))
 	mux.HandleFunc("/admin/config/route/upsert", h.withAdminAudit("config_route_upsert", h.handleConfigRouteUpsert))
 	mux.HandleFunc("/admin/config/route/delete", h.withAdminAudit("config_route_delete", h.handleConfigRouteDelete))
@@ -391,29 +420,39 @@ func (h *Handler) handleConfigUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !h.authorizeAdminOrAccounting(r) {
+	if !h.authorizeAdmin(r) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
-	state := h.runtimeState()
-	if state.ConfigPath == "" {
-		writeError(w, http.StatusServiceUnavailable, "config path is not configured")
+	if h.configReloader == nil {
+		writeError(w, http.StatusServiceUnavailable, "config reload is not configured")
 		return
 	}
-
+	ifMatch := strings.TrimSpace(r.Header.Get("If-Match"))
+	if ifMatch == "" {
+		writeJSON(w, http.StatusPreconditionRequired, map[string]any{"ok": false, "code": "if_match_required", "error": "If-Match header is required"})
+		return
+	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "read config: "+err.Error())
 		return
 	}
-	if err := config.WriteValidatedFile(state.ConfigPath, body); err != nil {
+	result, err := h.configReloader.UpdateConfig(r.Context(), ifMatch, body)
+	if err != nil {
+		var conflict *ConfigRevisionConflictError
+		if errors.As(err, &conflict) {
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "config_revision_conflict", "error": err.Error(), "current_revision": conflict.CurrentRevision})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": state.ConfigPath, "applied": false})
+	w.Header().Set("ETag", result.Revision)
+	writeJSON(w, http.StatusOK, result)
 }
 
-func (h *Handler) handleByCodec(w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) bool {
+func (h *Handler) handleByCodec(w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ResolvedClientBinding, logger *slog.Logger) bool {
 	codec, ok := h.registry.Get(inbound.Protocol)
 	if !ok {
 		logger.Warn("request rejected", slog.String("reason", "unsupported inbound protocol"))
@@ -485,12 +524,28 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		h.handleConfigClients(w, r)
 		return
 	}
+	if r.URL.Path == "/admin/config/clients/metrics" {
+		h.handleConfigClientMetrics(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/client/usage" {
+		h.handleConfigClientUsage(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/config/client/upsert" {
 		h.handleConfigClientUpsert(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/config/client/delete" {
 		h.handleConfigClientDelete(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/client-binding/upsert" {
+		h.handleConfigClientBindingUpsert(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/client-binding/delete" {
+		h.handleConfigClientBindingDelete(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/config/routes" {
@@ -570,7 +625,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	latencyRecorder.SetRoute(inbound.Name, inbound.Protocol, client.Name, client.Tag)
+	latencyRecorder.SetRoute(inbound.Name, inbound.Protocol, client.Client.Name, client.Binding.Tag)
 	r = r.WithContext(withRequestContext(ctx, requestID, r, inbound, client, h.sessionStore))
 
 	requestLogger := h.logger.With(
@@ -579,22 +634,22 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		slog.String("path", r.URL.Path),
 		slog.String("inbound", inbound.Name),
 		slog.String("protocol", inbound.Protocol),
-		slog.String("client_name", client.Name),
-		slog.String("active_tag", client.Tag),
+		slog.String("client_name", client.Client.Name),
+		slog.String("active_tag", client.Binding.Tag),
 		slog.String("remote", r.RemoteAddr),
 	)
 	requestLogger.Info("request started")
-	if decision := h.beforeClientRequest(client.Name); !decision.Allowed {
-		h.recordClientLimited(client.Name, inbound.Name, decision)
+	if decision := h.beforeClientRequest(client.Client.Name); !decision.Allowed {
+		h.recordClientLimited(client.Client.Name, inbound.Name, decision)
 		requestLogger.Warn("request rejected", slog.String("reason", "client quota exceeded"))
-		writeClientQuotaError(lw, client.Name, inbound.Name, decision)
+		writeClientQuotaError(lw, client.Client.Name, inbound.Name, decision)
 		requestLogger.Info("request completed",
 			slog.Int("status", lw.statusCode),
 			slog.Duration("duration", time.Since(startedAt)),
 		)
 		return
 	}
-	h.recordClientRequest(client.Name)
+	h.recordClientRequest(client.Client.Name)
 	h.handleByCodec(lw, r, inbound, client, requestLogger)
 	requestLogger.Info("request completed",
 		slog.Int("status", lw.statusCode),
@@ -602,23 +657,25 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-func (h *Handler) matchInbound(r *http.Request) (config.InboundSpec, config.ClientSpec, bool) {
+func (h *Handler) matchInbound(r *http.Request) (config.InboundSpec, config.ResolvedClientBinding, bool) {
 	token := bearerToken(r.Header.Get("Authorization"))
 	if token == "" {
-		return config.InboundSpec{}, config.ClientSpec{}, false
+		return config.InboundSpec{}, config.ResolvedClientBinding{}, false
 	}
 
-	for _, inbound := range h.runtimeState().Inbounds {
+	state := h.runtimeState()
+	cfg := config.Config{Clients: state.Clients}
+	for _, inbound := range state.Inbounds {
 		if inbound.Path != r.URL.Path {
 			continue
 		}
-		for _, client := range inbound.Clients {
-			if client.Token == token {
+		for _, client := range config.ResolveInboundClients(cfg, inbound) {
+			if client.Client.Token == token {
 				return inbound, client, true
 			}
 		}
 	}
-	return config.InboundSpec{}, config.ClientSpec{}, false
+	return config.InboundSpec{}, config.ResolvedClientBinding{}, false
 }
 
 func bearerToken(header string) string {
@@ -666,16 +723,16 @@ func formatRetryAfter(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
-func (h *Handler) planRequest(ctx context.Context, req runtime.Request, inbound config.InboundSpec, client config.ClientSpec) (runtime.ExecutionPlan, error) {
+func (h *Handler) planRequest(ctx context.Context, req runtime.Request, inbound config.InboundSpec, client config.ResolvedClientBinding) (runtime.ExecutionPlan, error) {
 	startedAt := time.Now()
 	plan, err := h.runtimeState().Router.Plan(runtime.RouteContext{
 		Request:         req,
-		ClientName:      client.Name,
+		ClientName:      client.Client.Name,
 		InboundName:     inbound.Name,
 		InboundProtocol: inbound.Protocol,
-		ActiveTag:       client.Tag,
+		ActiveTag:       client.Binding.Tag,
 	})
-	attrs := map[string]string{"inbound": inbound.Name, "active_tag": client.Tag}
+	attrs := map[string]string{"inbound": inbound.Name, "active_tag": client.Binding.Tag}
 	if len(plan.Steps) > 0 {
 		attrs["matched_rule"] = plan.MatchedRule
 		attrs["outbound"] = plan.Steps[0].OutboundName
@@ -827,13 +884,15 @@ func nonEmpty(value, fallback string) string {
 }
 
 func writeClientQuotaError(w http.ResponseWriter, clientName string, inboundName string, decision quota.Decision) {
-	writeJSON(w, http.StatusTooManyRequests, map[string]string{
-		"error":         "client quota exceeded",
-		"type":          quota.EventClientLimited,
-		"quota_subject": clientName,
-		"inbound":       inboundName,
-		"reason":        decision.Reason,
-		"retry_after":   formatRetryAfter(decision.RetryAfter),
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{
+		"error":            "client quota exceeded",
+		"type":             quota.EventClientLimited,
+		"code":             "client_quota_exceeded",
+		"quota_subject":    clientName,
+		"inbound":          inboundName,
+		"reason":           decision.Reason,
+		"retry_after":      formatRetryAfter(decision.RetryAfter),
+		"blocking_windows": decision.BlockingWindows,
 	})
 }
 

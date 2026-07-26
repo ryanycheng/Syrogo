@@ -3,6 +3,7 @@ package quota
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -18,16 +19,18 @@ const (
 )
 
 type WindowConfig struct {
-	Name        string
-	Reset       string
-	Duration    time.Duration
-	FixedPeriod string
-	Anchor      time.Time
-	Time        string
-	Timezone    string
-	Weekday     time.Weekday
-	MaxRequests int
-	MaxTokens   int
+	Name            string
+	Type            string
+	Reset           string
+	Duration        time.Duration
+	FixedPeriod     string
+	Anchor          time.Time
+	Time            string
+	Timezone        string
+	Weekday         time.Weekday
+	MaxRequests     int
+	MaxTokens       int
+	MaxCostMicroUSD int64
 }
 
 type ResetAllConfig struct {
@@ -55,15 +58,26 @@ type ClientConfig struct {
 }
 
 type Decision struct {
-	Allowed    bool
-	Reason     string
-	Probe      bool
-	RetryAfter time.Time
+	Allowed         bool             `json:"allowed"`
+	Reason          string           `json:"reason,omitempty"`
+	Probe           bool             `json:"probe,omitempty"`
+	RetryAfter      time.Time        `json:"-"`
+	BlockingWindows []BlockingWindow `json:"blocking_windows,omitempty"`
+}
+
+type BlockingWindow struct {
+	Window     string `json:"window"`
+	Type       string `json:"type"`
+	Limit      any    `json:"limit"`
+	Used       any    `json:"used"`
+	Unit       string `json:"unit"`
+	RetryAfter string `json:"retry_after"`
 }
 
 type Tracker struct {
 	mu       sync.Mutex
 	now      func() time.Time
+	client   bool
 	subjects map[string]*subjectState
 }
 
@@ -82,19 +96,23 @@ type subjectState struct {
 }
 
 type usageEvent struct {
-	At       time.Time `json:"-"`
-	Requests int       `json:"requests"`
-	Tokens   int       `json:"tokens"`
+	At           time.Time `json:"-"`
+	Requests     int       `json:"requests"`
+	Tokens       int       `json:"tokens"`
+	CostMicroUSD int64     `json:"cost_micro_usd,omitempty"`
+	Unpriced     int       `json:"unpriced,omitempty"`
 }
 
 type windowState struct {
-	name        string
-	reset       string
-	duration    time.Duration
-	fixed       schedule
-	maxRequests int
-	maxTokens   int
-	events      []usageEvent
+	name            string
+	typeName        string
+	reset           string
+	duration        time.Duration
+	fixed           schedule
+	maxRequests     int
+	maxTokens       int
+	maxCostMicroUSD int64
+	events          []usageEvent
 }
 
 type schedule struct {
@@ -120,20 +138,26 @@ type SnapshotItem struct {
 }
 
 type SnapshotWindow struct {
-	Name              string `json:"name"`
-	Reset             string `json:"reset"`
-	FixedPeriod       string `json:"fixed_period,omitempty"`
-	Duration          string `json:"duration,omitempty"`
-	MaxRequests       int    `json:"max_requests"`
-	UsedRequests      int    `json:"used_requests"`
-	RemainingRequests int    `json:"remaining_requests"`
-	MaxTokens         int    `json:"max_tokens"`
-	UsedTokens        int    `json:"used_tokens"`
-	RemainingTokens   int    `json:"remaining_tokens"`
-	ResetAt           string `json:"reset_at"`
-	Limit             int    `json:"limit"`
-	Used              int    `json:"used"`
-	Remaining         int    `json:"remaining"`
+	Name              string      `json:"name"`
+	Type              string      `json:"type,omitempty"`
+	Reset             string      `json:"reset"`
+	FixedPeriod       string      `json:"fixed_period,omitempty"`
+	Duration          string      `json:"duration,omitempty"`
+	MaxRequests       int         `json:"max_requests"`
+	UsedRequests      int         `json:"used_requests"`
+	RemainingRequests int         `json:"remaining_requests"`
+	MaxTokens         int         `json:"max_tokens"`
+	UsedTokens        int         `json:"used_tokens"`
+	RemainingTokens   int         `json:"remaining_tokens"`
+	MaxCostUSD        json.Number `json:"max_cost_usd,omitempty"`
+	UsedCostUSD       json.Number `json:"used_cost_usd,omitempty"`
+	RemainingCostUSD  json.Number `json:"remaining_cost_usd,omitempty"`
+	UnpricedCount     int         `json:"unpriced_count,omitempty"`
+	Warning           string      `json:"warning,omitempty"`
+	ResetAt           string      `json:"reset_at"`
+	Limit             int         `json:"limit"`
+	Used              int         `json:"used"`
+	Remaining         int         `json:"remaining"`
 }
 
 type PersistedState struct {
@@ -154,12 +178,15 @@ type PersistedSubject struct {
 }
 
 type PersistedEvent struct {
-	At       string `json:"at"`
-	Requests int    `json:"requests"`
-	Tokens   int    `json:"tokens"`
+	At           string `json:"at"`
+	Requests     int    `json:"requests"`
+	Tokens       int    `json:"tokens"`
+	CostMicroUSD int64  `json:"cost_micro_usd,omitempty"`
+	Unpriced     int    `json:"unpriced,omitempty"`
 }
 
 type PersistedWindowState struct {
+	Type        string           `json:"type,omitempty"`
 	Reset       string           `json:"reset,omitempty"`
 	Duration    string           `json:"duration,omitempty"`
 	FixedPeriod string           `json:"fixed_period,omitempty"`
@@ -169,18 +196,18 @@ type PersistedWindowState struct {
 }
 
 func (p *PersistedWindowState) UnmarshalJSON(data []byte) error {
-	type fields struct {
+	var decoded struct {
+		Type        string          `json:"type"`
 		Reset       string          `json:"reset"`
 		Duration    string          `json:"duration"`
 		FixedPeriod string          `json:"fixed_period"`
 		Schedule    string          `json:"schedule"`
 		Events      json.RawMessage `json:"events"`
 	}
-	var decoded fields
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	p.Reset, p.Duration, p.FixedPeriod, p.Schedule = decoded.Reset, decoded.Duration, decoded.FixedPeriod, decoded.Schedule
+	p.Type, p.Reset, p.Duration, p.FixedPeriod, p.Schedule = decoded.Type, decoded.Reset, decoded.Duration, decoded.FixedPeriod, decoded.Schedule
 	if len(decoded.Events) == 0 || bytes.Equal(decoded.Events, []byte("null")) {
 		return nil
 	}
@@ -209,8 +236,8 @@ func NewTrackerFromOutbounds(outbounds []config.OutboundSpec) *Tracker {
 	return NewTracker(cfgs)
 }
 
-func NewClientTrackerFromInbounds(inbounds []config.InboundSpec) *Tracker {
-	cfgs := clientConfigs(inbounds)
+func NewClientTrackerFromClients(clients []config.ClientSpec) *Tracker {
+	cfgs := clientConfigs(clients)
 	if len(cfgs) == 0 {
 		return nil
 	}
@@ -236,13 +263,11 @@ func outboundConfigs(outbounds []config.OutboundSpec) []OutboundConfig {
 	return result
 }
 
-func clientConfigs(inbounds []config.InboundSpec) []ClientConfig {
+func clientConfigs(clients []config.ClientSpec) []ClientConfig {
 	result := make([]ClientConfig, 0)
-	for _, inbound := range inbounds {
-		for _, client := range inbound.Clients {
-			if client.Quota.Enabled {
-				result = append(result, ClientConfig{Name: client.Name, Inbound: inbound.Name, Windows: clientWindowsFromConfig(client.Quota.Windows)})
-			}
+	for _, client := range clients {
+		if client.Quota.Enabled {
+			result = append(result, ClientConfig{Name: client.Name, Windows: clientWindowsFromConfig(client.Quota.Windows)})
 		}
 	}
 	return result
@@ -251,7 +276,7 @@ func clientConfigs(inbounds []config.InboundSpec) []ClientConfig {
 func clientWindowsFromConfig(windows []config.QuotaWindowConfig) []WindowConfig {
 	result := make([]WindowConfig, 0, len(windows))
 	for _, window := range windows {
-		result = append(result, WindowConfig{Name: window.Name, Reset: "rolling", Duration: window.Duration.Duration(), MaxRequests: window.MaxRequests})
+		result = append(result, WindowConfig{Name: window.Name, Type: window.Type, Reset: "rolling", Duration: window.Duration.Duration(), MaxRequests: window.MaxRequests, MaxTokens: window.MaxTokens, MaxCostMicroUSD: window.MaxCostMicroUSD()})
 	}
 	return result
 }
@@ -302,11 +327,22 @@ func newTrackerFromClients(cfgs []ClientConfig, now func() time.Time) *Tracker {
 	if now == nil {
 		now = time.Now
 	}
-	tracker := &Tracker{now: now, subjects: make(map[string]*subjectState, len(cfgs))}
+	tracker := &Tracker{now: now, client: true, subjects: make(map[string]*subjectState, len(cfgs))}
 	for _, cfg := range cfgs {
-		tracker.subjects[cfg.Name] = newSubjectState(cfg.Name, cfg.Inbound, cfg.Windows, 0, 0, ResetAllConfig{})
+		windows := normalizeClientWindows(cfg.Windows)
+		tracker.subjects[cfg.Name] = newSubjectState(cfg.Name, cfg.Inbound, windows, 0, 0, ResetAllConfig{})
 	}
 	return tracker
+}
+
+func normalizeClientWindows(windows []WindowConfig) []WindowConfig {
+	normalized := append([]WindowConfig(nil), windows...)
+	for i := range normalized {
+		if normalized[i].Type == "" {
+			normalized[i].Type = "requests"
+		}
+	}
+	return normalized
 }
 
 func newSubjectState(name, inbound string, windows []WindowConfig, cooldown, probeInterval time.Duration, resetAll ResetAllConfig) *subjectState {
@@ -322,7 +358,7 @@ func newWindowState(cfg WindowConfig) windowState {
 	if reset == "" {
 		reset = "rolling"
 	}
-	return windowState{name: cfg.Name, reset: reset, duration: cfg.Duration, fixed: newSchedule(cfg.FixedPeriod, cfg.Duration, cfg.Anchor, cfg.Time, cfg.Timezone, cfg.Weekday), maxRequests: cfg.MaxRequests, maxTokens: cfg.MaxTokens}
+	return windowState{name: cfg.Name, typeName: cfg.Type, reset: reset, duration: cfg.Duration, fixed: newSchedule(cfg.FixedPeriod, cfg.Duration, cfg.Anchor, cfg.Time, cfg.Timezone, cfg.Weekday), maxRequests: cfg.MaxRequests, maxTokens: cfg.MaxTokens, maxCostMicroUSD: cfg.MaxCostMicroUSD}
 }
 
 func newResetSchedule(cfg ResetAllConfig) schedule {
@@ -364,8 +400,8 @@ func (t *Tracker) beforeAttempt(name string, allowProbe bool) Decision {
 		}
 		return Decision{Allowed: false, Reason: StateCooldown, RetryAfter: state.nextProbeAt}
 	}
-	if retryAfter, limited := state.limitReached(now); limited {
-		return Decision{Allowed: false, Reason: StateLimited, RetryAfter: retryAfter}
+	if retryAfter, blocking := state.blockingWindows(now); len(blocking) > 0 {
+		return Decision{Allowed: false, Reason: StateLimited, RetryAfter: retryAfter, BlockingWindows: blocking}
 	}
 	return Decision{Allowed: true}
 }
@@ -377,7 +413,53 @@ func (t *Tracker) RecordSuccess(outbound string, tokens ...int) {
 	}
 	t.recordSuccess(outbound, true, tokenCount)
 }
-func (t *Tracker) RecordClientRequest(client string) { t.recordSuccess(client, false, 0) }
+func (t *Tracker) RecordClientRequest(client string) {
+	t.recordClientUsage(client, usageEvent{Requests: 1})
+}
+
+func (t *Tracker) RecordClientTerminalUsage(client string, tokens int, costMicroUSD int64, priced bool) {
+	event := usageEvent{Tokens: tokens, CostMicroUSD: costMicroUSD}
+	if !priced {
+		event.Unpriced = 1
+		event.CostMicroUSD = 0
+	}
+	t.recordClientUsage(client, event)
+}
+
+func (t *Tracker) recordClientUsage(name string, event usageEvent) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	state := t.subjects[name]
+	if state == nil {
+		return
+	}
+	now := t.now()
+	state.rollover(now)
+	event.At = now
+	for i := range state.windows {
+		window := &state.windows[i]
+		switch window.typeName {
+		case "requests":
+			if event.Requests > 0 {
+				window.events = append(window.events, event)
+			}
+		case "tokens":
+			if event.Tokens > 0 {
+				window.events = append(window.events, event)
+			}
+		case "cost":
+			if event.CostMicroUSD > 0 || event.Unpriced > 0 {
+				window.events = append(window.events, event)
+			}
+		default:
+			window.events = append(window.events, event)
+		}
+	}
+	state.lastSuccessAt = now
+}
 
 func (t *Tracker) recordSuccess(name string, clearCooldown bool, tokens int) {
 	if t == nil {
@@ -424,7 +506,7 @@ func (t *Tracker) Snapshot() []SnapshotItem       { return t.snapshot(false) }
 func (t *Tracker) ClientSnapshot() []SnapshotItem { return t.snapshot(true) }
 
 func (t *Tracker) ExportState() PersistedState {
-	state := PersistedState{Version: 2, CapturedAt: formatTime(time.Now().UTC()), Subjects: map[string]PersistedSubject{}}
+	state := PersistedState{Version: 3, CapturedAt: formatTime(time.Now().UTC()), Subjects: map[string]PersistedSubject{}}
 	if t == nil {
 		return state
 	}
@@ -438,9 +520,9 @@ func (t *Tracker) ExportState() PersistedState {
 		for _, window := range subject.windows {
 			events := make([]PersistedEvent, 0, len(window.events))
 			for _, event := range window.events {
-				events = append(events, PersistedEvent{At: formatTime(event.At), Requests: event.Requests, Tokens: event.Tokens})
+				events = append(events, PersistedEvent{At: formatTime(event.At), Requests: event.Requests, Tokens: event.Tokens, CostMicroUSD: event.CostMicroUSD, Unpriced: event.Unpriced})
 			}
-			windows[window.name] = PersistedWindowState{Reset: window.reset, Duration: window.duration.String(), FixedPeriod: window.fixed.period, Schedule: window.scheduleKey(), Events: events}
+			windows[window.name] = PersistedWindowState{Type: window.typeName, Reset: window.reset, Duration: window.duration.String(), FixedPeriod: window.fixed.period, Schedule: window.scheduleKey(), Events: events}
 		}
 		state.Subjects[name] = PersistedSubject{Name: subject.name, Inbound: subject.inbound, CooldownUntil: formatTime(subject.cooldownUntil), NextProbeAt: formatTime(subject.nextProbeAt), LastQuotaExceededAt: formatTime(subject.lastQuotaExceededAt), LastSuccessAt: formatTime(subject.lastSuccessAt), ResetAll: subject.resetAll.key(), Windows: windows}
 	}
@@ -478,14 +560,14 @@ func (t *Tracker) ImportState(persisted PersistedState) {
 				continue
 			}
 			savedWindow, ok := saved.Windows[window.name]
-			if !ok || !window.persistedCompatible(savedWindow, persisted.Version) {
+			if !ok || !window.persistedCompatible(savedWindow, persisted.Version, t.client) {
 				continue
 			}
 			events := make([]usageEvent, 0, len(savedWindow.Events))
 			for _, event := range savedWindow.Events {
 				at, ok := parsePersistedTime(event.At)
 				if ok {
-					events = append(events, usageEvent{At: at, Requests: event.Requests, Tokens: event.Tokens})
+					events = append(events, usageEvent{At: at, Requests: event.Requests, Tokens: event.Tokens, CostMicroUSD: event.CostMicroUSD, Unpriced: event.Unpriced})
 				}
 			}
 			sort.SliceStable(events, func(i, j int) bool { return events[i].At.Before(events[j].At) })
@@ -517,7 +599,7 @@ func (t *Tracker) ReconfigureClients(cfgs []ClientConfig) bool {
 	changed := false
 	next := make(map[string]*subjectState, len(cfgs))
 	for _, cfg := range cfgs {
-		fresh := newSubjectState(cfg.Name, cfg.Inbound, cfg.Windows, 0, 0, ResetAllConfig{})
+		fresh := newSubjectState(cfg.Name, cfg.Inbound, normalizeClientWindows(cfg.Windows), 0, 0, ResetAllConfig{})
 		if old := t.subjects[cfg.Name]; old != nil {
 			changed = mergeWindows(old, fresh) || changed
 		}
@@ -532,8 +614,8 @@ func (t *Tracker) ReconfigureClients(cfgs []ClientConfig) bool {
 	return changed
 }
 
-func (t *Tracker) ReconfigureInbounds(inbounds []config.InboundSpec) bool {
-	return t.ReconfigureClients(clientConfigs(inbounds))
+func (t *Tracker) ReconfigureClientSpecs(clients []config.ClientSpec) bool {
+	return t.ReconfigureClients(clientConfigs(clients))
 }
 
 func (t *Tracker) reconfigureOutbound(cfgs []OutboundConfig) bool {
@@ -621,18 +703,39 @@ func (s *subjectState) inCooldown(now time.Time) bool {
 }
 
 func (s *subjectState) limitReached(now time.Time) (time.Time, bool) {
+	retryAfter, blocking := s.blockingWindows(now)
+	return retryAfter, len(blocking) > 0
+}
+
+func (s *subjectState) blockingWindows(now time.Time) (time.Time, []BlockingWindow) {
 	var retryAfter time.Time
-	limited := false
+	blocking := make([]BlockingWindow, 0)
 	for i := range s.windows {
-		resetAt, hit := s.windows[i].retryAfter(now)
-		if hit {
-			limited = true
-			if retryAfter.IsZero() || resetAt.After(retryAfter) {
-				retryAfter = resetAt
-			}
+		window := &s.windows[i]
+		resetAt, hit := window.retryAfter(now)
+		if !hit {
+			continue
 		}
+		if retryAfter.IsZero() || resetAt.After(retryAfter) {
+			retryAfter = resetAt
+		}
+		requests, tokens, costMicroUSD, _ := window.usage()
+		typeName := window.typeName
+		if typeName == "" {
+			typeName = "requests"
+		}
+		item := BlockingWindow{Window: window.name, Type: typeName, RetryAfter: formatTime(resetAt)}
+		switch typeName {
+		case "tokens":
+			item.Limit, item.Used, item.Unit = window.maxTokens, tokens, "tokens"
+		case "cost":
+			item.Limit, item.Used, item.Unit = formatMicroUSD(window.maxCostMicroUSD), formatMicroUSD(costMicroUSD), "USD"
+		default:
+			item.Limit, item.Used, item.Unit = window.maxRequests, requests, "requests"
+		}
+		blocking = append(blocking, item)
 	}
-	return retryAfter, limited
+	return retryAfter, blocking
 }
 
 func (s *subjectState) rollover(now time.Time) {
@@ -681,19 +784,22 @@ func (w *windowState) drop(count int) {
 	w.events = w.events[:len(w.events)-count]
 }
 
-func (w windowState) usage() (requests, tokens int) {
+func (w windowState) usage() (requests, tokens int, costMicroUSD int64, unpriced int) {
 	for _, event := range w.events {
 		requests += event.Requests
 		tokens += event.Tokens
+		costMicroUSD += event.CostMicroUSD
+		unpriced += event.Unpriced
 	}
 	return
 }
 
 func (w windowState) retryAfter(now time.Time) (time.Time, bool) {
-	requests, tokens := w.usage()
+	requests, tokens, costMicroUSD, _ := w.usage()
 	requestLimited := w.maxRequests > 0 && requests >= w.maxRequests
 	tokenLimited := w.maxTokens > 0 && tokens >= w.maxTokens
-	if !requestLimited && !tokenLimited {
+	costLimited := w.maxCostMicroUSD > 0 && costMicroUSD >= w.maxCostMicroUSD
+	if !requestLimited && !tokenLimited && !costLimited {
 		return time.Time{}, false
 	}
 	if w.reset == "fixed" {
@@ -701,17 +807,23 @@ func (w windowState) retryAfter(now time.Time) (time.Time, bool) {
 		return end, true
 	}
 	needRequests, needTokens := 0, 0
+	needCost := int64(0)
 	if requestLimited {
 		needRequests = requests - w.maxRequests + 1
 	}
 	if tokenLimited {
 		needTokens = tokens - w.maxTokens + 1
 	}
+	if costLimited {
+		needCost = costMicroUSD - w.maxCostMicroUSD + 1
+	}
 	removedRequests, removedTokens := 0, 0
+	removedCost := int64(0)
 	for _, event := range w.events {
 		removedRequests += event.Requests
 		removedTokens += event.Tokens
-		if removedRequests >= needRequests && removedTokens >= needTokens {
+		removedCost += event.CostMicroUSD
+		if removedRequests >= needRequests && removedTokens >= needTokens && removedCost >= needCost {
 			return event.At.Add(w.duration), true
 		}
 	}
@@ -719,7 +831,7 @@ func (w windowState) retryAfter(now time.Time) (time.Time, bool) {
 }
 
 func (w windowState) compatible(other windowState) bool {
-	if w.reset != other.reset {
+	if w.typeName != other.typeName || w.reset != other.reset {
 		return false
 	}
 	if w.reset == "rolling" {
@@ -733,11 +845,20 @@ func (w windowState) scheduleKey() string {
 	}
 	return w.fixed.key()
 }
-func (w windowState) persistedCompatible(saved PersistedWindowState, version int) bool {
+func (w windowState) persistedCompatible(saved PersistedWindowState, version int, client bool) bool {
 	if version < 2 || saved.legacy {
+		if client && w.typeName != "requests" {
+			return false
+		}
 		return w.reset == "rolling" && (saved.Duration == "" || saved.Duration == w.duration.String())
 	}
-	return saved.Reset == w.reset && saved.Schedule == w.scheduleKey()
+	if version < 3 {
+		if client && w.typeName != "requests" {
+			return false
+		}
+		return saved.Reset == w.reset && saved.Schedule == w.scheduleKey()
+	}
+	return saved.Type == w.typeName && saved.Reset == w.reset && saved.Schedule == w.scheduleKey()
 }
 
 func (s schedule) key() string {
@@ -821,9 +942,10 @@ func (s *subjectState) snapshot(now time.Time, client bool) SnapshotItem {
 	}
 	windows := make([]SnapshotWindow, 0, len(s.windows))
 	for _, window := range s.windows {
-		requests, tokens := window.usage()
+		requests, tokens, costMicroUSD, unpriced := window.usage()
 		remainingRequests := remaining(window.maxRequests, requests)
 		remainingTokens := remaining(window.maxTokens, tokens)
+		remainingCostMicroUSD := remaining64(window.maxCostMicroUSD, costMicroUSD)
 		resetAt := time.Time{}
 		if window.reset == "fixed" {
 			_, resetAt = window.fixed.bounds(now)
@@ -832,7 +954,11 @@ func (s *subjectState) snapshot(now time.Time, client bool) SnapshotItem {
 		} else if len(window.events) > 0 {
 			resetAt = window.events[0].At.Add(window.duration)
 		}
-		windows = append(windows, SnapshotWindow{Name: window.name, Reset: window.reset, FixedPeriod: window.fixed.period, Duration: durationString(window), MaxRequests: window.maxRequests, UsedRequests: requests, RemainingRequests: remainingRequests, MaxTokens: window.maxTokens, UsedTokens: tokens, RemainingTokens: remainingTokens, ResetAt: formatTime(resetAt), Limit: window.maxRequests, Used: requests, Remaining: remainingRequests})
+		warning := ""
+		if unpriced > 0 {
+			warning = "cost quota excludes unpriced terminal usage"
+		}
+		windows = append(windows, SnapshotWindow{Name: window.name, Type: window.typeName, Reset: window.reset, FixedPeriod: window.fixed.period, Duration: durationString(window), MaxRequests: window.maxRequests, UsedRequests: requests, RemainingRequests: remainingRequests, MaxTokens: window.maxTokens, UsedTokens: tokens, RemainingTokens: remainingTokens, MaxCostUSD: formatMicroUSD(window.maxCostMicroUSD), UsedCostUSD: formatMicroUSD(costMicroUSD), RemainingCostUSD: formatMicroUSD(remainingCostMicroUSD), UnpricedCount: unpriced, Warning: warning, ResetAt: formatTime(resetAt), Limit: window.maxRequests, Used: requests, Remaining: remainingRequests})
 	}
 	item := SnapshotItem{Enabled: true, State: state, CooldownUntil: formatTime(s.cooldownUntil), NextProbeAt: formatTime(s.nextProbeAt), LastQuotaExceededAt: formatTime(s.lastQuotaExceededAt), LastSuccessAt: formatTime(s.lastSuccessAt), Windows: windows}
 	if client {
@@ -856,6 +982,29 @@ func remaining(maximum, used int) int {
 	}
 	return value
 }
+func remaining64(maximum, used int64) int64 {
+	if maximum == 0 {
+		return 0
+	}
+	value := maximum - used
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func formatMicroUSD(value int64) json.Number {
+	if value == 0 {
+		return ""
+	}
+	whole := value / 1_000_000
+	fraction := value % 1_000_000
+	if fraction == 0 {
+		return json.Number(fmt.Sprintf("%d", whole))
+	}
+	return json.Number(strings.TrimRight(fmt.Sprintf("%d.%06d", whole, fraction), "0"))
+}
+
 func durationString(window windowState) string {
 	if window.duration <= 0 {
 		return ""

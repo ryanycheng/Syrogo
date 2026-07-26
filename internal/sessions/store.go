@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -22,9 +23,14 @@ func NewStore() *Store {
 	}
 }
 
-func (s *Store) Register(session Session) Session {
+var ErrSessionOwnerMismatch = errors.New("session ID belongs to a different owner")
+
+func (s *Store) Register(session Session) (Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if existing, ok := s.sessions[session.ID]; ok && (existing.ClientName != session.ClientName || existing.InboundName != session.InboundName) {
+		return Session{}, ErrSessionOwnerMismatch
+	}
 	now := s.now()
 	if session.StartedAt.IsZero() {
 		session.StartedAt = now
@@ -37,14 +43,24 @@ func (s *Store) Register(session Session) Session {
 	}
 	session.Command = append([]string(nil), session.Command...)
 	s.sessions[session.ID] = session
-	return session
+	return cloneSession(session), nil
 }
 
-func (s *Store) ApplyHookEvent(event HookEvent) (Session, bool) {
+func (s *Store) GetOwned(sessionID, clientName, inboundName string) (Session, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	session, ok := s.sessions[sessionID]
+	if !ok || session.ClientName != clientName || session.InboundName != inboundName {
+		return Session{}, false
+	}
+	return cloneSession(session), true
+}
+
+func (s *Store) ApplyHookEvent(clientName, inboundName string, event HookEvent) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	session, ok := s.sessions[event.SessionID]
-	if !ok {
+	if !ok || session.ClientName != clientName || session.InboundName != inboundName {
 		return Session{}, false
 	}
 	if event.ReceivedAt.IsZero() {
@@ -61,11 +77,11 @@ func (s *Store) ApplyHookEvent(event HookEvent) (Session, bool) {
 	return cloneSession(session), true
 }
 
-func (s *Store) MarkStopped(sessionID string, exitCode int) (Session, bool) {
+func (s *Store) MarkStopped(clientName, inboundName, sessionID string, exitCode int) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	session, ok := s.sessions[sessionID]
-	if !ok {
+	if !ok || session.ClientName != clientName || session.InboundName != inboundName {
 		return Session{}, false
 	}
 	now := s.now()

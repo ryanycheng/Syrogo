@@ -28,7 +28,7 @@ type openAIChatInboundRequest struct {
 	OutputConfig       json.RawMessage            `json:"output_config"`
 }
 
-func (openAIChatCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) {
+func (openAIChatCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ResolvedClientBinding, logger *slog.Logger) {
 	if r.Method != http.MethodPost {
 		logger.Warn("request rejected", slog.String("reason", "method not allowed"))
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")

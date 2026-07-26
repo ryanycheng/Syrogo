@@ -16,11 +16,20 @@ const (
 )
 
 type Query struct {
-	GroupBy   string
-	Window    Window
-	Bucket    string
-	StartDate string
-	EndDate   string
+	GroupBy    string
+	Window     Window
+	Bucket     string
+	StartDate  string
+	EndDate    string
+	ClientName string
+}
+
+type Coverage struct {
+	TrackingStartedAt   string `json:"tracking_started_at,omitempty"`
+	Known               bool   `json:"known"`
+	Backend             string `json:"backend"`
+	AggregatesPersisted bool   `json:"aggregates_persisted"`
+	RawRetentionDays    int    `json:"raw_retention_days"`
 }
 
 type RecentRecordsQuery struct {
@@ -53,10 +62,11 @@ type StatsItem struct {
 }
 
 type snapshotState struct {
-	Totals     map[string]map[string]StatsItem            `json:"totals"`
-	Windows    map[string]map[string]map[string]StatsItem `json:"windows"`
-	Cursor     snapshotCursor                             `json:"cursor"`
-	CapturedAt string                                     `json:"captured_at"`
+	Totals            map[string]map[string]StatsItem            `json:"totals"`
+	Windows           map[string]map[string]map[string]StatsItem `json:"windows"`
+	Cursor            snapshotCursor                             `json:"cursor"`
+	CapturedAt        string                                     `json:"captured_at"`
+	TrackingStartedAt string                                     `json:"tracking_started_at,omitempty"`
 }
 
 type snapshotCursor struct {

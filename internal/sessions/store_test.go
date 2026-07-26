@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -11,7 +12,7 @@ func TestStoreRegisterListAndFilter(t *testing.T) {
 	startedAt := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return startedAt }
 
-	store.Register(Session{
+	_, _ = store.Register(Session{
 		ID:          "session-a",
 		ClientName:  "alice",
 		InboundName: "claude",
@@ -19,7 +20,7 @@ func TestStoreRegisterListAndFilter(t *testing.T) {
 		CWD:         "/repo/a",
 		Command:     []string{"claude"},
 	})
-	store.Register(Session{
+	_, _ = store.Register(Session{
 		ID:         "session-b",
 		ClientName: "bob",
 		Host:       "worker",
@@ -39,16 +40,44 @@ func TestStoreRegisterListAndFilter(t *testing.T) {
 	}
 }
 
+func TestStoreRegisterRejectsCrossOwnerReplacement(t *testing.T) {
+	store := NewStore()
+	original, err := store.Register(Session{ID: "s1", ClientName: "first-client", InboundName: "first-inbound", Tag: "original"})
+	if err != nil {
+		t.Fatalf("first Register() error = %v", err)
+	}
+
+	if _, err := store.Register(Session{ID: "s1", ClientName: "second-client", InboundName: "first-inbound", Tag: "client-attack"}); !errors.Is(err, ErrSessionOwnerMismatch) {
+		t.Fatalf("cross-client Register() error = %v, want ErrSessionOwnerMismatch", err)
+	}
+	if _, err := store.Register(Session{ID: "s1", ClientName: "first-client", InboundName: "second-inbound", Tag: "inbound-attack"}); !errors.Is(err, ErrSessionOwnerMismatch) {
+		t.Fatalf("cross-inbound Register() error = %v, want ErrSessionOwnerMismatch", err)
+	}
+
+	owned, ok := store.GetOwned("s1", "first-client", "first-inbound")
+	if !ok || owned.Tag != original.Tag {
+		t.Fatalf("original session was replaced: %#v, ok=%v", owned, ok)
+	}
+
+	repeated, err := store.Register(Session{ID: "s1", ClientName: "first-client", InboundName: "first-inbound", Tag: "refreshed"})
+	if err != nil {
+		t.Fatalf("same-owner Register() error = %v", err)
+	}
+	if repeated.Tag != "refreshed" {
+		t.Fatalf("same-owner registration did not update session: %#v", repeated)
+	}
+}
+
 func TestHookEventStatusTransitions(t *testing.T) {
 	store := NewStore()
-	store.Register(Session{ID: "s1", Status: StatusRunning})
+	_, _ = store.Register(Session{ID: "s1", ClientName: "client", InboundName: "inbound", Status: StatusRunning})
 
-	updated, ok := store.ApplyHookEvent(HookEvent{SessionID: "s1", EventName: "PreToolUse"})
+	updated, ok := store.ApplyHookEvent("client", "inbound", HookEvent{SessionID: "s1", EventName: "PreToolUse"})
 	if !ok || updated.Status != StatusToolRunning {
 		t.Fatalf("expected tool_running, got %#v ok=%v", updated, ok)
 	}
 
-	updated, ok = store.ApplyHookEvent(HookEvent{SessionID: "s1", EventName: "Stop"})
+	updated, ok = store.ApplyHookEvent("client", "inbound", HookEvent{SessionID: "s1", EventName: "Stop"})
 	if !ok || updated.Status != StatusIdle {
 		t.Fatalf("expected Stop to mark idle, got %#v ok=%v", updated, ok)
 	}
@@ -56,12 +85,29 @@ func TestHookEventStatusTransitions(t *testing.T) {
 		t.Fatalf("Stop hook must not mark process stopped")
 	}
 
-	updated, ok = store.MarkStopped("s1", 0)
+	updated, ok = store.MarkStopped("client", "inbound", "s1", 0)
 	if !ok || updated.Status != StatusStopped {
 		t.Fatalf("expected MarkStopped to mark stopped, got %#v ok=%v", updated, ok)
 	}
 	if updated.StoppedAt == nil || updated.ExitCode == nil || *updated.ExitCode != 0 {
 		t.Fatalf("expected stopped metadata, got %#v", updated)
+	}
+}
+
+func TestStoreRejectsCrossOwnerUpdates(t *testing.T) {
+	store := NewStore()
+	_, _ = store.Register(Session{ID: "s1", ClientName: "shared", InboundName: "first", Tag: "first-tag", Status: StatusRunning})
+
+	if _, ok := store.ApplyHookEvent("shared", "second", HookEvent{SessionID: "s1", EventName: "Stop"}); ok {
+		t.Fatal("ApplyHookEvent accepted a different inbound owner")
+	}
+	if _, ok := store.MarkStopped("other", "first", "s1", 0); ok {
+		t.Fatal("MarkStopped accepted a different client owner")
+	}
+
+	items := store.List(ListFilter{})
+	if len(items) != 1 || items[0].Status != StatusRunning || items[0].Tag != "first-tag" {
+		t.Fatalf("session changed after rejected updates: %#v", items)
 	}
 }
 
@@ -76,15 +122,15 @@ func TestPermissionNotification(t *testing.T) {
 
 func TestStoreConcurrentUpdates(t *testing.T) {
 	store := NewStore()
-	store.Register(Session{ID: "s1"})
+	_, _ = store.Register(Session{ID: "s1", ClientName: "client", InboundName: "inbound"})
 
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			store.ApplyHookEvent(HookEvent{SessionID: "s1", EventName: "UserPromptSubmit"})
-			store.ApplyHookEvent(HookEvent{SessionID: "s1", EventName: "Stop"})
+			store.ApplyHookEvent("client", "inbound", HookEvent{SessionID: "s1", EventName: "UserPromptSubmit"})
+			store.ApplyHookEvent("client", "inbound", HookEvent{SessionID: "s1", EventName: "Stop"})
 		}()
 	}
 	wg.Wait()
@@ -103,11 +149,11 @@ func TestStoreListPrioritizesActionableSessions(t *testing.T) {
 	now := time.Date(2026, 7, 18, 10, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
 
-	store.Register(Session{ID: "stopped-new", Status: StatusStopped, LastSeenAt: now})
-	store.Register(Session{ID: "running-old", Status: StatusRunning, LastSeenAt: now.Add(-10 * time.Minute)})
-	store.Register(Session{ID: "permission-old", Status: StatusWaitingPermission, LastSeenAt: now.Add(-20 * time.Minute)})
-	store.Register(Session{ID: "idle-new", Status: StatusIdle, LastSeenAt: now.Add(time.Minute)})
-	store.Register(Session{ID: "tool-old", Status: StatusToolRunning, LastSeenAt: now.Add(-30 * time.Minute)})
+	_, _ = store.Register(Session{ID: "stopped-new", Status: StatusStopped, LastSeenAt: now})
+	_, _ = store.Register(Session{ID: "running-old", Status: StatusRunning, LastSeenAt: now.Add(-10 * time.Minute)})
+	_, _ = store.Register(Session{ID: "permission-old", Status: StatusWaitingPermission, LastSeenAt: now.Add(-20 * time.Minute)})
+	_, _ = store.Register(Session{ID: "idle-new", Status: StatusIdle, LastSeenAt: now.Add(time.Minute)})
+	_, _ = store.Register(Session{ID: "tool-old", Status: StatusToolRunning, LastSeenAt: now.Add(-30 * time.Minute)})
 
 	sessions := store.List(ListFilter{})
 	want := []string{"permission-old", "tool-old", "running-old", "idle-new", "stopped-new"}
@@ -126,9 +172,9 @@ func TestStorePruneStoppedOnlyRemovesExpiredStoppedSessions(t *testing.T) {
 	now := time.Date(2026, 7, 18, 10, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
 
-	store.Register(Session{ID: "old-stopped", Status: StatusStopped, LastSeenAt: now.Add(-2 * time.Hour)})
-	store.Register(Session{ID: "new-stopped", Status: StatusStopped, LastSeenAt: now.Add(-30 * time.Minute)})
-	store.Register(Session{ID: "old-running", Status: StatusRunning, LastSeenAt: now.Add(-2 * time.Hour)})
+	_, _ = store.Register(Session{ID: "old-stopped", Status: StatusStopped, LastSeenAt: now.Add(-2 * time.Hour)})
+	_, _ = store.Register(Session{ID: "new-stopped", Status: StatusStopped, LastSeenAt: now.Add(-30 * time.Minute)})
+	_, _ = store.Register(Session{ID: "old-running", Status: StatusRunning, LastSeenAt: now.Add(-2 * time.Hour)})
 
 	if removed := store.PruneStopped(time.Hour); removed != 1 {
 		t.Fatalf("removed = %d, want 1", removed)

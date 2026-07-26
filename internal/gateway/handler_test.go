@@ -52,20 +52,28 @@ func testRoutingConfig() config.RoutingConfig {
 	}}}
 }
 
+func testClients() []config.ClientSpec {
+	return []config.ClientSpec{
+		{Name: "office-key", Token: "client-token"},
+		{Name: "responses-key", Token: "responses-token"},
+		{Name: "anthropic-key", Token: "anthropic-token"},
+	}
+}
+
 func testInbounds() []config.InboundSpec {
 	return []config.InboundSpec{{
 		Name:     "openai-entry",
 		Protocol: "openai_chat",
 		Path:     "/v1/chat/completions",
-		Clients:  []config.ClientSpec{{Name: "office-key", Token: "client-token", Tag: "office"}},
+		Clients:  []config.ClientBindingSpec{{Ref: "office-key", Tag: "office"}},
 	}}
 }
 
 func testDualProtocolInbounds() []config.InboundSpec {
 	return []config.InboundSpec{
-		{Name: "openai-entry", Protocol: "openai_chat", Path: "/v1/chat/completions", Clients: []config.ClientSpec{{Name: "office-key", Token: "client-token", Tag: "office"}}},
-		{Name: "responses-entry", Protocol: "openai_responses", Path: "/v1/responses", Clients: []config.ClientSpec{{Name: "responses-key", Token: "responses-token", Tag: "office"}}},
-		{Name: "anthropic-entry", Protocol: "anthropic_messages", Path: "/v1/messages", Clients: []config.ClientSpec{{Name: "anthropic-key", Token: "anthropic-token", Tag: "office"}}},
+		{Name: "openai-entry", Protocol: "openai_chat", Path: "/v1/chat/completions", Clients: []config.ClientBindingSpec{{Ref: "office-key", Tag: "office"}}},
+		{Name: "responses-entry", Protocol: "openai_responses", Path: "/v1/responses", Clients: []config.ClientBindingSpec{{Ref: "responses-key", Tag: "office"}}},
+		{Name: "anthropic-entry", Protocol: "anthropic_messages", Path: "/v1/messages", Clients: []config.ClientBindingSpec{{Ref: "anthropic-key", Tag: "office"}}},
 	}
 }
 
@@ -81,7 +89,7 @@ func newTestHandler(t *testing.T, providers map[string]provider.Provider, routin
 		t.Fatalf("router.New() error = %v", err)
 	}
 
-	return New(r, execution.NewDispatcher(), inbounds, config.AccountingConfig{}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	return New(r, execution.NewDispatcher(), testClients(), inbounds, config.AccountingConfig{}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 }
 
 func authorizedRequest(method, path, token string, body []byte) *http.Request {
@@ -90,19 +98,43 @@ func authorizedRequest(method, path, token string, body []byte) *http.Request {
 	return req
 }
 
+func TestMatchInboundResolvesTopLevelClientAndBindingTag(t *testing.T) {
+	h := &Handler{}
+	h.ApplyRuntime(RuntimeState{
+		Clients: []config.ClientSpec{
+			{Name: "shared", Token: "shared-token"},
+			{Name: "other", Token: "other-token"},
+		},
+		Inbounds: []config.InboundSpec{
+			{Name: "first", Path: "/first", Clients: []config.ClientBindingSpec{{Ref: "shared", Tag: "first-tag"}}},
+			{Name: "second", Path: "/second", Clients: []config.ClientBindingSpec{{Ref: "shared", Tag: "second-tag"}, {Ref: "other", Tag: "other-tag"}}},
+		},
+	})
+
+	inbound, resolved, ok := h.matchInbound(authorizedRequest(http.MethodPost, "/second", "shared-token", nil))
+	if !ok || inbound.Name != "second" || resolved.Client.Name != "shared" || resolved.Binding.Tag != "second-tag" {
+		t.Fatalf("matchInbound() = (%#v, %#v, %v)", inbound, resolved, ok)
+	}
+	if _, _, ok := h.matchInbound(authorizedRequest(http.MethodPost, "/first", "other-token", nil)); ok {
+		t.Fatal("matchInbound() accepted a client not bound to the inbound")
+	}
+}
+
 func validGatewayConfigYAML() string {
 	return `
 listeners:
   - name: public
     listen: ":8080"
     inbounds: [openai-entry]
+clients:
+  - name: office-key
+    token: client-token
 inbounds:
   - name: openai-entry
     protocol: openai_chat
     path: /v1/chat/completions
     clients:
-      - name: office-key
-        token: client-token
+      - ref: office-key
         tag: office
 outbounds:
   - name: mock
@@ -279,15 +311,29 @@ func TestConfigUpdateRequiresAdminToken(t *testing.T) {
 
 func TestConfigUpdateWritesValidatedConfig(t *testing.T) {
 	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
-	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+	h.admin = config.AdminConfig{Enabled: true, Token: "admin-token"}
 	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(h.configPath, []byte(validGatewayConfigYAML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.SetConfigReloader(fakeConfigReloader{update: func(_ context.Context, revision string, data []byte) (ConfigUpdateResult, error) {
+		if revision != "*" {
+			t.Fatalf("revision = %q, want force", revision)
+		}
+		if err := config.WriteValidatedFile(h.configPath, data); err != nil {
+			return ConfigUpdateResult{}, err
+		}
+		return ConfigUpdateResult{Saved: true, Applied: false, Revision: "sha256:new", Checksum: "new"}, nil
+	}})
 
 	mux := http.NewServeMux()
 	h.Register(mux)
 
 	body := []byte(validGatewayConfigYAML())
 	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/update", "admin-token", body))
+	req := authorizedRequest(http.MethodPost, "/admin/config/update", "admin-token", body)
+	req.Header.Set("If-Match", "*")
+	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
@@ -299,25 +345,33 @@ func TestConfigUpdateWritesValidatedConfig(t *testing.T) {
 	if string(written) != string(body) {
 		t.Fatalf("written config = %q, want request body", written)
 	}
-	if !strings.Contains(w.Body.String(), `"applied":false`) {
-		t.Fatalf("body = %s, want applied false", w.Body.String())
+	if !strings.Contains(w.Body.String(), `"saved":true`) || !strings.Contains(w.Body.String(), `"applied":false`) {
+		t.Fatalf("body = %s, want saved true and applied false", w.Body.String())
 	}
 }
 
 func TestConfigUpdateRejectsInvalidConfigWithoutReplacingFile(t *testing.T) {
 	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
-	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+	h.admin = config.AdminConfig{Enabled: true, Token: "admin-token"}
 	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
 	old := []byte(validGatewayConfigYAML())
 	if err := os.WriteFile(h.configPath, old, 0o600); err != nil {
 		t.Fatalf("os.WriteFile() error = %v", err)
 	}
+	h.SetConfigReloader(fakeConfigReloader{update: func(_ context.Context, _ string, data []byte) (ConfigUpdateResult, error) {
+		if err := config.WriteValidatedFile(h.configPath, data); err != nil {
+			return ConfigUpdateResult{}, err
+		}
+		return ConfigUpdateResult{}, nil
+	}})
 
 	mux := http.NewServeMux()
 	h.Register(mux)
 
 	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/update", "admin-token", []byte("server:\n  listen: ':8080'\n")))
+	req := authorizedRequest(http.MethodPost, "/admin/config/update", "admin-token", []byte("server:\n  listen: ':8080'\n"))
+	req.Header.Set("If-Match", "*")
+	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
@@ -333,13 +387,15 @@ func TestConfigUpdateRejectsInvalidConfigWithoutReplacingFile(t *testing.T) {
 
 func TestConfigUpdateRequiresConfiguredPath(t *testing.T) {
 	h := newTestHandler(t, map[string]provider.Provider{"mock": provider.NewMock("mock")}, testRoutingConfig(), testInbounds(), testOutbounds())
-	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}
+	h.admin = config.AdminConfig{Enabled: true, Token: "admin-token"}
 
 	mux := http.NewServeMux()
 	h.Register(mux)
 
 	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/update", "admin-token", []byte(validGatewayConfigYAML())))
+	req := authorizedRequest(http.MethodPost, "/admin/config/update", "admin-token", []byte(validGatewayConfigYAML()))
+	req.Header.Set("If-Match", "*")
+	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", w.Code)
@@ -482,7 +538,7 @@ func TestLatencyStatsReturnsRecordedRequest(t *testing.T) {
 	}
 	latencyStore := latency.NewStore(10)
 	dispatcher := execution.NewDispatcherWithStoreQuotaHealthEventsAndLatency(accounting.NewMemoryStore(), nil, nil, nil, latencyStore)
-	h := NewWithClientQuotaEventsAndLatency(r, dispatcher, testInbounds(), nil, nil, latencyStore, config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	h := NewWithClientQuotaEventsAndLatency(r, dispatcher, testClients(), testInbounds(), nil, nil, latencyStore, config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -515,7 +571,7 @@ func TestLatencySummaryStatsReturnsAggregates(t *testing.T) {
 	}
 	latencyStore := latency.NewStore(10)
 	dispatcher := execution.NewDispatcherWithStoreQuotaHealthEventsAndLatency(accounting.NewMemoryStore(), nil, nil, nil, latencyStore)
-	h := NewWithClientQuotaEventsAndLatency(r, dispatcher, testInbounds(), nil, nil, latencyStore, config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	h := NewWithClientQuotaEventsAndLatency(r, dispatcher, testClients(), testInbounds(), nil, nil, latencyStore, config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -557,7 +613,7 @@ func TestGovernanceStatsReturnsQuotaAndEvents(t *testing.T) {
 	for range provider.DefaultHealthFailureThreshold {
 		health.RecordFailure("mock", provider.ErrorKindTimeout)
 	}
-	h := NewWithClientQuotaAndEvents(r, execution.NewDispatcherWithStoreQuotaHealthAndEvents(accounting.NewMemoryStore(), nil, health, recorder), testInbounds(), clientQuota, recorder, config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	h := NewWithClientQuotaAndEvents(r, execution.NewDispatcherWithStoreQuotaHealthAndEvents(accounting.NewMemoryStore(), nil, health, recorder), testClients(), testInbounds(), clientQuota, recorder, config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -589,7 +645,7 @@ func TestClientQuotaRejectsBeforeDispatch(t *testing.T) {
 		Windows: []quota.WindowConfig{{Name: "tiny", Duration: time.Hour, MaxRequests: 1}},
 	}}, func() time.Time { return now })
 	recorder := quota.NewTestEventRecorder(10, func() time.Time { return now })
-	h := NewWithClientQuotaAndEvents(r, execution.NewDispatcher(), testInbounds(), clientQuota, recorder, config.AccountingConfig{}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	h := NewWithClientQuotaAndEvents(r, execution.NewDispatcher(), testClients(), testInbounds(), clientQuota, recorder, config.AccountingConfig{}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 	mux := http.NewServeMux()
 	h.Register(mux)
 
@@ -606,18 +662,23 @@ func TestClientQuotaRejectsBeforeDispatch(t *testing.T) {
 		t.Fatalf("second status = %d, want 429", second.Code)
 	}
 	var quotaError struct {
-		Error        string `json:"error"`
-		Type         string `json:"type"`
-		QuotaSubject string `json:"quota_subject"`
-		Inbound      string `json:"inbound"`
-		Reason       string `json:"reason"`
-		RetryAfter   string `json:"retry_after"`
+		Error           string                 `json:"error"`
+		Type            string                 `json:"type"`
+		Code            string                 `json:"code"`
+		QuotaSubject    string                 `json:"quota_subject"`
+		Inbound         string                 `json:"inbound"`
+		Reason          string                 `json:"reason"`
+		RetryAfter      string                 `json:"retry_after"`
+		BlockingWindows []quota.BlockingWindow `json:"blocking_windows"`
 	}
 	if err := json.Unmarshal(second.Body.Bytes(), &quotaError); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if quotaError.Error != "client quota exceeded" || quotaError.Type != quota.EventClientLimited || quotaError.QuotaSubject != "office-key" || quotaError.Inbound != "openai-entry" || quotaError.Reason != quota.StateLimited || quotaError.RetryAfter == "" {
+	if quotaError.Error != "client quota exceeded" || quotaError.Type != quota.EventClientLimited || quotaError.Code != "client_quota_exceeded" || quotaError.QuotaSubject != "office-key" || quotaError.Inbound != "openai-entry" || quotaError.Reason != quota.StateLimited || quotaError.RetryAfter == "" {
 		t.Fatalf("quota error = %#v, want structured client quota error", quotaError)
+	}
+	if len(quotaError.BlockingWindows) != 1 || quotaError.BlockingWindows[0].Type != "requests" || quotaError.BlockingWindows[0].Limit != float64(1) || quotaError.BlockingWindows[0].Used != float64(1) || quotaError.BlockingWindows[0].Unit != "requests" {
+		t.Fatalf("blocking windows = %#v", quotaError.BlockingWindows)
 	}
 	events := recorder.Snapshot()
 	if len(events) != 1 || events[0].Type != quota.EventClientLimited || events[0].Client != "office-key" || events[0].Inbound != "openai-entry" {
@@ -651,7 +712,7 @@ func TestClientQuotaStatsReturnsConfiguredClientState(t *testing.T) {
 		Inbound: "openai-entry",
 		Windows: []quota.WindowConfig{{Name: "hourly", Duration: time.Hour, MaxRequests: 10}},
 	}}, func() time.Time { return time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC) })
-	h := NewWithClientQuota(r, execution.NewDispatcher(), testInbounds(), clientQuota, config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	h := NewWithClientQuota(r, execution.NewDispatcher(), testClients(), testInbounds(), clientQuota, config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "admin-token"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -704,7 +765,7 @@ func TestChatCompletionsLogsDecodeFailure(t *testing.T) {
 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
-	h := New(r, execution.NewDispatcher(), testInbounds(), config.AccountingConfig{}, logger)
+	h := New(r, execution.NewDispatcher(), testClients(), testInbounds(), config.AccountingConfig{}, logger)
 	mux := http.NewServeMux()
 	h.Register(mux)
 
@@ -730,7 +791,7 @@ func TestChatCompletionsLogsDispatchErrorKind(t *testing.T) {
 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
-	h := New(r, execution.NewDispatcher(), testInbounds(), config.AccountingConfig{}, logger)
+	h := New(r, execution.NewDispatcher(), testClients(), testInbounds(), config.AccountingConfig{}, logger)
 	mux := http.NewServeMux()
 	h.Register(mux)
 

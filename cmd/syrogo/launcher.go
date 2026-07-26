@@ -95,7 +95,7 @@ func parseActivateOptions(args []string, opts *launcherOptions) error {
 		return errors.New("activate does not accept agent command arguments")
 	}
 	if opts.BaseURL == "" {
-		baseURL, err := inferLauncherBaseURL(opts.ConfigPath)
+		baseURL, err := inferLauncherBaseURL(opts.ConfigPath, opts.Inbound, opts.Client, agent)
 		if err != nil {
 			return err
 		}
@@ -126,7 +126,7 @@ func parseLauncherOptions(args []string, opts *launcherOptions) error {
 		return err
 	}
 	if opts.BaseURL == "" {
-		baseURL, err := inferLauncherBaseURL(opts.ConfigPath)
+		baseURL, err := inferLauncherBaseURL(opts.ConfigPath, opts.Inbound, opts.Client, agent)
 		if err != nil {
 			return err
 		}
@@ -185,12 +185,58 @@ func defaultLauncherConfigPath() string {
 	return installedConfigPath
 }
 
-func inferLauncherBaseURL(configPath string) (string, error) {
+func inferLauncherBaseURL(configPath, inboundName, clientName, agent string) (string, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return "", err
 	}
-	listen := cfg.ListenAddress()
+	if len(cfg.Listeners) == 0 {
+		return launcherBaseURLFromListen(cfg.Server.Listen)
+	}
+
+	selectedInbound := inboundName
+	if selectedInbound == "" {
+		selected, err := selectLauncherClient(cfg, "", clientName, agent)
+		if err != nil {
+			return "", fmt.Errorf("infer launcher listener: %w", err)
+		}
+		selectedInbound = selected.InboundName
+	} else {
+		found := false
+		for _, inbound := range cfg.Inbounds {
+			if inbound.Name == selectedInbound {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("infer launcher listener: inbound %q not found", selectedInbound)
+		}
+	}
+
+	matches := make([]config.ListenerSpec, 0, 1)
+	for _, listener := range cfg.Listeners {
+		for _, name := range listener.Inbounds {
+			if name == selectedInbound {
+				matches = append(matches, listener)
+				break
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("infer launcher listener: inbound %q is not bound to a listener", selectedInbound)
+	}
+	if len(matches) > 1 {
+		names := make([]string, 0, len(matches))
+		for _, listener := range matches {
+			names = append(names, listener.Name)
+		}
+		return "", fmt.Errorf("infer launcher listener: inbound %q is bound to multiple listeners (%s); pass --base-url", selectedInbound, strings.Join(names, ", "))
+	}
+	return launcherBaseURLFromListen(matches[0].Listen)
+}
+
+func launcherBaseURLFromListen(listen string) (string, error) {
 	if listen == "" {
 		return "http://127.0.0.1:23234", nil
 	}
@@ -243,6 +289,7 @@ func launchClaudeAgent(opts launcherOptions, plan launchPlan) error {
 	env["SYROGO_SESSION_ID"] = sessionID
 	env["SYROGO_BASE_URL"] = opts.BaseURL
 	env["SYROGO_SESSION_AUTH_TOKEN"] = plan.Client.Token
+	env["SYROGO_SESSION_INBOUND_NAME"] = plan.Client.InboundName
 
 	args := append([]string{"--settings", settingsPath}, plan.Args...)
 	cmd := exec.Command(plan.Command, args...)
@@ -263,7 +310,7 @@ func launchClaudeAgent(opts launcherOptions, plan launchPlan) error {
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
 	}
-	if err := postSessionJSON(opts.BaseURL, "/session/stopped", plan.Client.Token, map[string]any{"session_id": sessionID, "exit_code": exitCode}); err != nil {
+	if err := postSessionJSON(opts.BaseURL, "/session/stopped", plan.Client.Token, map[string]any{"session_id": sessionID, "inbound_name": plan.Client.InboundName, "exit_code": exitCode}); err != nil {
 		_, _ = fmt.Fprintf(opts.Stderr, "syrogo session stopped: %v\n", err)
 	}
 	return waitErr
@@ -276,6 +323,7 @@ func registerClaudeSession(opts launcherOptions, plan launchPlan, sessionID stri
 		"session_id":   sessionID,
 		"client_name":  plan.Client.ClientName,
 		"inbound_name": plan.Client.InboundName,
+		"tag":          plan.Client.Tag,
 		"host":         host,
 		"pid":          pid,
 		"cwd":          cwd,
@@ -297,7 +345,7 @@ func buildLaunchPlan(opts launcherOptions) (launchPlan, error) {
 	}
 	agent := opts.Args[0]
 	token := opts.Token
-	client := launcherClient{Token: token}
+	client := launcherClient{InboundName: opts.Inbound, ClientName: opts.Client, Token: token}
 	if token == "" {
 		cfg, err := config.Load(opts.ConfigPath)
 		if err != nil {
@@ -312,6 +360,9 @@ func buildLaunchPlan(opts launcherOptions) (launchPlan, error) {
 	}
 	if token == "" {
 		return launchPlan{}, errors.New("client token is required")
+	}
+	if agent == "claude" && client.InboundName == "" {
+		return launchPlan{}, errors.New("inbound is required for Claude session registration; pass --inbound")
 	}
 
 	env := map[string]string{}
@@ -332,6 +383,7 @@ type launcherClient struct {
 	InboundName string
 	ClientName  string
 	Token       string
+	Tag         string
 }
 
 func selectLauncherClient(cfg config.Config, inboundName string, clientName string, agent string) (launcherClient, error) {
@@ -350,11 +402,20 @@ func selectLauncherClient(cfg config.Config, inboundName string, clientName stri
 		if inboundName == "" && preferredProtocol != "" && inbound.Protocol != preferredProtocol {
 			continue
 		}
-		for _, client := range inbound.Clients {
-			if clientName != "" && client.Name != clientName {
+		for _, binding := range inbound.Clients {
+			resolved, ok := config.ResolveClientBinding(cfg, binding)
+			if !ok {
 				continue
 			}
-			matches = append(matches, launcherClient{InboundName: inbound.Name, ClientName: client.Name, Token: client.Token})
+			if clientName != "" && resolved.Client.Name != clientName {
+				continue
+			}
+			matches = append(matches, launcherClient{
+				InboundName: inbound.Name,
+				ClientName:  resolved.Client.Name,
+				Token:       resolved.Client.Token,
+				Tag:         binding.Tag,
+			})
 		}
 	}
 	if len(matches) == 0 {

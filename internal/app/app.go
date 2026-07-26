@@ -122,12 +122,12 @@ func buildRuntimeWithTrackers(cfg config.Config, store accounting.Store, outboun
 	}
 	if loadSnapshot {
 		outboundQuotaTracker.ReconfigureOutbounds(enabledOutbounds)
-		clientQuotaTracker.ReconfigureInbounds(cfg.Inbounds)
+		clientQuotaTracker.ReconfigureClientSpecs(cfg.Clients)
 	}
 	var quotaSnapshotStore *quota.SnapshotStore
-	if hasQuotaConfig(enabledOutbounds, cfg.Inbounds) && loadSnapshot {
+	if hasQuotaConfig(enabledOutbounds, cfg.Clients) && loadSnapshot {
 		quotaSnapshotStore, err = quota.NewSnapshotStore(cfg.Governance.Quota.Snapshot, outboundQuotaTracker, clientQuotaTracker)
-	} else if hasQuotaConfig(enabledOutbounds, cfg.Inbounds) {
+	} else if hasQuotaConfig(enabledOutbounds, cfg.Clients) {
 		quotaSnapshotStore, err = quota.NewSnapshotStoreWithoutLoad(cfg.Governance.Quota.Snapshot, outboundQuotaTracker, clientQuotaTracker)
 	}
 	if err != nil {
@@ -140,7 +140,7 @@ func buildRuntimeWithTrackers(cfg config.Config, store accounting.Store, outboun
 	healthTracker := provider.NewHealthTracker(outboundNames)
 	eventRecorder := quota.NewEventRecorder(cfg.Governance.Quota.Events)
 	latencyStore := latency.NewStore(200)
-	dispatcher := execution.NewDispatcherWithStoreQuotaHealthEventsLatencyAndPricing(store, outboundQuotaTracker, healthTracker, eventRecorder, latencyStore, accounting.NewPriceCalculator(cfg.Accounting.Pricing))
+	dispatcher := execution.NewDispatcherWithStoreQuotasHealthEventsLatencyAndPricing(store, outboundQuotaTracker, clientQuotaTracker, healthTracker, eventRecorder, latencyStore, accounting.NewPriceCalculator(cfg.Accounting.Pricing))
 	return appRuntime{
 		router:               r,
 		dispatcher:           dispatcher,
@@ -162,17 +162,15 @@ func enabledOutbounds(cfg config.Config) []config.OutboundSpec {
 	return result
 }
 
-func hasQuotaConfig(outbounds []config.OutboundSpec, inbounds []config.InboundSpec) bool {
+func hasQuotaConfig(outbounds []config.OutboundSpec, clients []config.ClientSpec) bool {
 	for _, outbound := range outbounds {
 		if outbound.Quota.Enabled {
 			return true
 		}
 	}
-	for _, inbound := range inbounds {
-		for _, client := range inbound.Clients {
-			if client.Quota.Enabled {
-				return true
-			}
+	for _, client := range clients {
+		if client.Quota.Enabled {
+			return true
 		}
 	}
 	return false
@@ -184,7 +182,7 @@ func buildListeners(runtime appRuntime, cfg config.Config, configPath string, se
 	bindings := make([]listenerBinding, 0, len(listeners))
 	for _, listener := range listeners {
 		mux := http.NewServeMux()
-		handler := gateway.NewWithClientQuotaEventsLatencyConfigAdminAndSessions(runtime.router, runtime.dispatcher, cfg.ListenerInbounds(listener), runtime.clientQuotaTracker, runtime.eventRecorder, runtime.latencyStore, configPath, cfg.Accounting, cfg.Admin, sessionStore, logger)
+		handler := gateway.NewWithClientQuotaEventsLatencyConfigAdminAndSessions(runtime.router, runtime.dispatcher, cfg.Clients, cfg.ListenerInbounds(listener), runtime.clientQuotaTracker, runtime.eventRecorder, runtime.latencyStore, configPath, cfg.Accounting, cfg.Admin, sessionStore, logger)
 		handler.Register(mux)
 		serverListeners = append(serverListeners, server.Listener{
 			Addr:    listener.Listen,

@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +20,7 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/runtime"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -132,9 +135,10 @@ func (h *Handler) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	state := h.runtimeState()
 	if state.ConfigPath == "" {
-		writeError(w, http.StatusServiceUnavailable, "config path is not configured")
+		writeJSON(w, http.StatusOK, map[string]any{"config_ready": false, "redacted_content": "", "revision": "", "checksum": ""})
 		return
 	}
 	content, err := os.ReadFile(state.ConfigPath)
@@ -142,10 +146,19 @@ func (h *Handler) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "read config: "+err.Error())
 		return
 	}
+	redacted, err := redactedConfigYAML(content)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "redact config: "+err.Error())
+		return
+	}
+	checksum := configChecksum(content)
+	revision := "sha256:" + checksum
+	w.Header().Set("ETag", revision)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"path":             state.ConfigPath,
-		"content":          string(content),
-		"redacted_content": redactConfigContent(string(content)),
+		"config_ready":     true,
+		"redacted_content": redacted,
+		"revision":         revision,
+		"checksum":         checksum,
 	})
 }
 
@@ -334,7 +347,7 @@ func (h *Handler) handleRouteDryRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	state := h.runtimeState()
-	inbound, client, ok := findDryRunClient(state.Inbounds, inboundName, clientName)
+	inbound, client, binding, ok := findDryRunClient(state.Clients, state.Inbounds, inboundName, clientName)
 	if !ok {
 		writeError(w, http.StatusNotFound, "inbound or client not found")
 		return
@@ -344,7 +357,7 @@ func (h *Handler) handleRouteDryRun(w http.ResponseWriter, r *http.Request) {
 		ClientName:      client.Name,
 		InboundName:     inbound.Name,
 		InboundProtocol: inbound.Protocol,
-		ActiveTag:       client.Tag,
+		ActiveTag:       binding.Tag,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -517,6 +530,7 @@ func (h *Handler) handleConfigHistoryDiff(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusServiceUnavailable, "config reload is not configured")
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	diff, err := h.configReloader.HistoryDiff(strings.TrimSpace(r.URL.Query().Get("id")))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
@@ -577,19 +591,21 @@ func dryRunResponse(plan runtime.ExecutionPlan) routeDryRunResponse {
 	}
 }
 
-func findDryRunClient(inbounds []config.InboundSpec, inboundName, clientName string) (config.InboundSpec, config.ClientSpec, bool) {
+func findDryRunClient(clients []config.ClientSpec, inbounds []config.InboundSpec, inboundName, clientName string) (config.InboundSpec, config.ClientSpec, config.ClientBindingSpec, bool) {
+	cfg := config.Config{Clients: clients, Inbounds: inbounds}
 	for _, inbound := range inbounds {
 		if inbound.Name != inboundName {
 			continue
 		}
-		for _, client := range inbound.Clients {
-			if client.Name == clientName {
-				return inbound, client, true
+		for _, binding := range inbound.Clients {
+			if binding.Ref == clientName {
+				client, ok := config.FindClient(cfg, binding.Ref)
+				return inbound, client, binding, ok
 			}
 		}
-		return config.InboundSpec{}, config.ClientSpec{}, false
+		return config.InboundSpec{}, config.ClientSpec{}, config.ClientBindingSpec{}, false
 	}
-	return config.InboundSpec{}, config.ClientSpec{}, false
+	return config.InboundSpec{}, config.ClientSpec{}, config.ClientBindingSpec{}, false
 }
 
 func boundedAdminLogBytes(configured int, requested string) int {
@@ -669,14 +685,51 @@ func redactLogContent(content string) string {
 	})
 }
 
-var sensitiveConfigLinePattern = regexp.MustCompile(`(?i)^(\s*(?:token|auth_token|admin_token|api[_-]?key|secret)\s*:\s*).+$`)
-
-func redactConfigContent(content string) string {
-	lines := strings.Split(content, "\n")
-	for i, line := range lines {
-		lines[i] = sensitiveConfigLinePattern.ReplaceAllString(line, "${1}\"<redacted>\"")
+func redactedConfigYAML(data []byte) (string, error) {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return "", err
 	}
-	return strings.Join(lines, "\n")
+	redactYAMLNode(&document)
+	redacted, err := yaml.Marshal(&document)
+	if err != nil {
+		return "", err
+	}
+	return string(redacted), nil
+}
+
+func redactYAMLNode(node *yaml.Node) {
+	if node == nil {
+		return
+	}
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key, value := node.Content[i], node.Content[i+1]
+			if isSensitiveConfigKey(key.Value) {
+				value.Kind = yaml.ScalarNode
+				value.Tag = "!!str"
+				value.Value = config.RedactedValue
+				value.Content = nil
+				continue
+			}
+			redactYAMLNode(value)
+		}
+		return
+	}
+	for _, child := range node.Content {
+		redactYAMLNode(child)
+	}
+}
+
+func isSensitiveConfigKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	return normalized == "token" || normalized == "auth_token" || normalized == "admin_token" || normalized == "api_key" || normalized == "secret" || strings.HasSuffix(normalized, "_secret") || strings.HasSuffix(normalized, "_token")
+}
+
+func configChecksum(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func normalizeAdminConfig(cfg config.AdminConfig) config.AdminConfig {

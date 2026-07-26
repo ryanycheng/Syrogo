@@ -62,7 +62,7 @@ func TestAdminUIReturnsIndexHTMLWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want text/html", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"Admin UI token", "/admin/app.js", "provider-test-model", "provider-models-json", "Strict JSON array of canonical names and aliases", "An empty array means unrestricted", "each fallback provider then resolves", "atomically update the config and hot-apply", "provider-quota-json", "rolling and fixed interval/daily/weekly", "reset_all", "Usage totals are all-time", "Timeline range", "usage-range", "usage-start-date", "usage-end-date", "log-bytes", "logs-meta", "overview-summary", "sessions-table", "sessions-view-cards", "sessions-view-table", "session-status-filter", "live-requests-table", "refresh-live-requests", "config-diff", "Apply current file", "config-history", "Debug", "dry-run-model"} {
+	for _, want := range []string{"Admin UI token", "/admin/app.js", "provider-test-model", "provider-models-json", "Strict JSON array of canonical names and aliases", "An empty array means unrestricted", "each fallback provider then resolves", "atomically update the config and hot-apply", "provider-quota-json", "rolling and fixed interval/daily/weekly", "reset_all", "Usage totals are all-time", "Timeline range", "client-days", "data-client-days=\"7\"", "data-client-days=\"30\"", "data-client-days=\"90\"", "clients-warning", "client-detail", "client-quota-json", "hourly-requests", "type\":\"requests", "max_tokens", "max_cost_usd", "Each window has exactly one type", "unpriced usage counts as $0", "Usage and quota are global", "client-bindings-section", "client-binding-error", "binding-inbound", "binding-tag", "remove every binding first", "usage-range", "usage-start-date", "usage-end-date", "log-bytes", "logs-meta", "overview-summary", "sessions-table", "sessions-view-cards", "sessions-view-table", "session-status-filter", "live-requests-table", "refresh-live-requests", "config-diff", "Apply current file", "config-history", "Debug", "dry-run-model"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
@@ -85,10 +85,13 @@ func TestAdminUIReturnsStaticAssetsWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want javascript", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"/admin/sessions", "startSessionsRefresh", "data-provider-check-protocol", "model: testModel", "#provider-models-json", "item.models || []", "models = JSON.parse", "models, capabilities", "#provider-quota-json", "max_tokens", "used_tokens", "fixed_period", "last_quota_exceeded_at", "usage_estimation_mode", "renderSessionCards", "/admin/usage", "/admin/logs", "/admin/overview", "/admin/latency/active", "refreshLiveRequests", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback", "/admin/debug/traces", "/admin/debug/route-dry-run", "/admin/debug/providers", "/admin/config/history/diff"} {
+	for _, want := range []string{"/admin/sessions", "startSessionsRefresh", "data-provider-check-protocol", "model: testModel", "#provider-models-json", "item.models || []", "models = JSON.parse", "models, capabilities", "#provider-quota-json", "max_tokens", "used_tokens", "fixed_period", "last_quota_exceeded_at", "usage_estimation_mode", "renderSessionCards", "item.tag", "/admin/config/clients", "/admin/config/clients/metrics?days=", "Promise.allSettled", "Metrics unavailable", "clientPayload", "return { name: value(\"#client-name\"), token: value(\"#client-token\"), quota }", "#client-quota-json", "used_cost_usd", "max_cost_usd", "unpriced_count", "quota-warning", "window.type", "error.body = body", "binding_tag_last_source", "route_names", "showClientBindingError", "Add or update another Client binding", "from_tags", "/admin/config/client-binding/upsert", "/admin/config/client-binding/delete", "Remove all ${bindings.length} binding(s)", "renderClientBindings", "response?.saved", "response?.applied", "Client saved and applied.", "Client deleted and applied.", "/admin/config/client/usage?name=", "renderClientHeatmap", "Math.log1p", "tabindex=\"0\"", "role=\"img\"", "partial", "unknown", "Daily aggregates, not a per-request audit log", "/admin/usage", "/admin/logs", "/admin/overview", "/admin/latency/active", "refreshLiveRequests", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback", "/admin/debug/traces", "/admin/debug/route-dry-run", "/admin/debug/providers", "/admin/config/history/diff"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
+	}
+	if strings.Contains(body, "Client saved. Click Apply") || strings.Contains(body, "Client deleted. Click Apply") {
+		t.Fatalf("client CRUD still instructs a separate Apply: %s", body)
 	}
 	payloadStart := strings.Index(body, "function providerPayload()")
 	if payloadStart < 0 {
@@ -101,6 +104,49 @@ func TestAdminUIReturnsStaticAssetsWhenEnabled(t *testing.T) {
 	payloadSource := body[payloadStart : payloadStart+payloadEnd]
 	if strings.Contains(payloadSource, "metrics") {
 		t.Fatalf("providerPayload unexpectedly includes metrics: %s", payloadSource)
+	}
+	clientPayloadStart := strings.Index(body, "function clientPayload()")
+	if clientPayloadStart < 0 {
+		t.Fatal("clientPayload function not found")
+	}
+	clientPayloadEnd := strings.Index(body[clientPayloadStart:], "async function saveClient()")
+	if clientPayloadEnd < 0 {
+		t.Fatal("saveClient function not found")
+	}
+	clientPayloadSource := body[clientPayloadStart : clientPayloadStart+clientPayloadEnd]
+	for _, forbidden := range []string{"inbound:", "tag:", "bindings:"} {
+		if strings.Contains(clientPayloadSource, forbidden) {
+			t.Fatalf("clientPayload includes Binding field %q: %s", forbidden, clientPayloadSource)
+		}
+	}
+	deleteStart := strings.Index(body, "async function deleteClient()")
+	if deleteStart < 0 {
+		t.Fatal("deleteClient function not found")
+	}
+	deleteEnd := strings.Index(body[deleteStart:], "function renderClientBindingEditor()")
+	if deleteEnd < 0 {
+		t.Fatal("renderClientBindingEditor function not found")
+	}
+	if strings.Contains(body[deleteStart:deleteStart+deleteEnd], "{ inbound, name }") {
+		t.Fatalf("client delete still sends legacy inbound field: %s", body[deleteStart:deleteStart+deleteEnd])
+	}
+}
+
+func TestAdminUIClientHeatmapStylesUseNativeGridAndFiveLevels(t *testing.T) {
+	h := newAdminTestHandler(t)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/styles.css", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{".contribution-heatmap", "display: grid", "grid-template-rows: repeat(7", ".heatmap-cell.level-1", ".heatmap-cell.level-2", ".heatmap-cell.level-3", ".heatmap-cell.level-4", ".heatmap-cell.level-5", ".heatmap-cell.unknown", ".heatmap-cell.partial", ".heatmap-cell:hover::after", ".heatmap-cell:focus::after"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("styles missing %q", want)
+		}
 	}
 }
 
@@ -266,24 +312,28 @@ accounting:
 		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
 	}
 	var response struct {
-		Path            string `json:"path"`
-		Content         string `json:"content"`
+		ConfigReady     bool   `json:"config_ready"`
 		RedactedContent string `json:"redacted_content"`
+		Revision        string `json:"revision"`
+		Checksum        string `json:"checksum"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if response.Path != h.configPath || !strings.Contains(response.Content, "openai-entry") {
-		t.Fatalf("response = %#v, want config path and content", response)
+	if !response.ConfigReady || !strings.Contains(response.RedactedContent, "openai-entry") || !strings.HasPrefix(response.Revision, "sha256:") || response.Checksum == "" {
+		t.Fatalf("response = %#v, want ready redacted config with revision", response)
 	}
-	if !strings.Contains(response.Content, "admin-secret") || !strings.Contains(response.Content, "accounting-secret") {
-		t.Fatalf("content = %s, want raw secrets retained for compatibility", response.Content)
+	if strings.Contains(w.Body.String(), h.configPath) || strings.Contains(w.Body.String(), `"content"`) {
+		t.Fatalf("response exposed path or raw content: %s", w.Body.String())
 	}
 	if strings.Contains(response.RedactedContent, "admin-secret") || strings.Contains(response.RedactedContent, "accounting-secret") || strings.Contains(response.RedactedContent, "client-token") {
 		t.Fatalf("redacted_content = %s, want secrets redacted", response.RedactedContent)
 	}
 	if !strings.Contains(response.RedactedContent, "<redacted>") {
 		t.Fatalf("redacted_content = %s, want redaction marker", response.RedactedContent)
+	}
+	if w.Header().Get("ETag") != response.Revision || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("headers = %#v, want ETag revision and no-store", w.Header())
 	}
 }
 
@@ -493,6 +543,7 @@ func TestAdminAuditLogsActionWithoutSecrets(t *testing.T) {
 
 type fakeConfigReloader struct {
 	mutate func(context.Context, string, ConfigMutation) (ReloadResult, error)
+	update func(context.Context, string, []byte) (ConfigUpdateResult, error)
 }
 
 func (fakeConfigReloader) ApplyConfig(context.Context) (ReloadResult, error) {
@@ -506,8 +557,15 @@ func (f fakeConfigReloader) MutateConfig(ctx context.Context, reason string, mut
 	return ReloadResult{OK: true, Saved: true, Applied: true, Reason: reason, HistoryID: "history-mutation"}, nil
 }
 
+func (f fakeConfigReloader) UpdateConfig(ctx context.Context, revision string, data []byte) (ConfigUpdateResult, error) {
+	if f.update != nil {
+		return f.update(ctx, revision, data)
+	}
+	return ConfigUpdateResult{Saved: true, Applied: false, Revision: "sha256:updated", Checksum: "updated"}, nil
+}
+
 func (fakeConfigReloader) History() []HistoryItem {
-	return []HistoryItem{{ID: "history-1", CreatedAt: "2026-07-02T00:00:00Z", Reason: "apply", Path: "/tmp/config.yaml", Checksum: "abc"}}
+	return []HistoryItem{{ID: "history-1", CreatedAt: "2026-07-02T00:00:00Z", Reason: "apply", Checksum: "abc"}}
 }
 
 func (fakeConfigReloader) HistoryDiff(id string) (HistoryDiff, error) {
@@ -516,6 +574,51 @@ func (fakeConfigReloader) HistoryDiff(id string) (HistoryDiff, error) {
 
 func (fakeConfigReloader) Rollback(context.Context, string) (ReloadResult, error) {
 	return ReloadResult{OK: true, Applied: true, HistoryID: "history-2", QuotaStateReset: true}, nil
+}
+
+func TestAdminConfigUpdatePreconditionsAndPermissions(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.accounting = config.AccountingConfig{Enabled: true, ExposeHTTP: true, AdminToken: "accounting-token"}
+	var gotRevision string
+	h.SetConfigReloader(fakeConfigReloader{update: func(_ context.Context, revision string, _ []byte) (ConfigUpdateResult, error) {
+		gotRevision = revision
+		if revision == "sha256:stale" {
+			return ConfigUpdateResult{}, &ConfigRevisionConflictError{CurrentRevision: "sha256:current"}
+		}
+		return ConfigUpdateResult{Saved: true, Applied: false, Revision: "sha256:new", Checksum: "new"}, nil
+	}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	accounting := httptest.NewRecorder()
+	request := authorizedRequest(http.MethodPost, "/admin/config/update", "accounting-token", []byte(validGatewayConfigYAML()))
+	request.Header.Set("If-Match", "*")
+	mux.ServeHTTP(accounting, request)
+	if accounting.Code != http.StatusUnauthorized {
+		t.Fatalf("accounting status = %d, want 401", accounting.Code)
+	}
+
+	missing := httptest.NewRecorder()
+	mux.ServeHTTP(missing, authorizedRequest(http.MethodPost, "/admin/config/update", "admin-ui-token", []byte(validGatewayConfigYAML())))
+	if missing.Code != http.StatusPreconditionRequired {
+		t.Fatalf("missing If-Match status = %d, want 428", missing.Code)
+	}
+
+	stale := httptest.NewRecorder()
+	request = authorizedRequest(http.MethodPost, "/admin/config/update", "admin-ui-token", []byte(validGatewayConfigYAML()))
+	request.Header.Set("If-Match", "sha256:stale")
+	mux.ServeHTTP(stale, request)
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), `"code":"config_revision_conflict"`) || !strings.Contains(stale.Body.String(), `"current_revision":"sha256:current"`) {
+		t.Fatalf("stale status = %d, body=%s", stale.Code, stale.Body.String())
+	}
+
+	force := httptest.NewRecorder()
+	request = authorizedRequest(http.MethodPost, "/admin/config/update", "admin-ui-token", []byte(validGatewayConfigYAML()))
+	request.Header.Set("If-Match", "*")
+	mux.ServeHTTP(force, request)
+	if force.Code != http.StatusOK || gotRevision != "*" || !strings.Contains(force.Body.String(), `"saved":true`) {
+		t.Fatalf("force status = %d, revision=%q, body=%s", force.Code, gotRevision, force.Body.String())
+	}
 }
 
 func TestAdminConfigApplyUsesReloader(t *testing.T) {
@@ -548,6 +651,9 @@ func TestAdminConfigHistoryUsesReloader(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"id":"history-1"`) {
 		t.Fatalf("body = %s, want history item", w.Body.String())
 	}
+	if strings.Contains(w.Body.String(), `"path"`) {
+		t.Fatalf("body exposed path: %s", w.Body.String())
+	}
 }
 
 func TestAdminConfigRollbackUsesReloader(t *testing.T) {
@@ -579,6 +685,9 @@ func TestAdminConfigHistoryDiffUsesReloader(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"id":"history-1"`) || !strings.Contains(w.Body.String(), `redacted`) {
 		t.Fatalf("body = %s, want redacted history diff", w.Body.String())
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", w.Header().Get("Cache-Control"))
 	}
 }
 
@@ -704,6 +813,9 @@ func (f fileMutationReloader) MutateConfig(_ context.Context, reason string, mut
 	return ReloadResult{OK: true, Saved: true, Applied: true, Reason: reason, HistoryID: "history-file"}, nil
 }
 
+func (fileMutationReloader) UpdateConfig(context.Context, string, []byte) (ConfigUpdateResult, error) {
+	return ConfigUpdateResult{}, nil
+}
 func (fileMutationReloader) History() []HistoryItem                  { return nil }
 func (fileMutationReloader) HistoryDiff(string) (HistoryDiff, error) { return HistoryDiff{}, nil }
 func (fileMutationReloader) Rollback(context.Context, string) (ReloadResult, error) {
@@ -824,6 +936,251 @@ routing:
 	}
 	if outbound.Proxy.URL != "https://proxy.example.test" {
 		t.Fatalf("proxy = %#v, want decoded snake_case URL", outbound.Proxy)
+	}
+}
+
+func TestAdminConfigClientUpsertUsesAtomicReloaderAndPreservesTokens(t *testing.T) {
+	tests := []struct {
+		name      string
+		token     string
+		wantToken string
+	}{
+		{name: "empty", token: "", wantToken: "old-client-token"},
+		{name: "redacted", token: config.RedactedValue, wantToken: "old-client-token"},
+		{name: "rotation", token: "rotated-client-token", wantToken: "rotated-client-token"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newAdminTestHandler(t)
+			var gotReason string
+			h.SetConfigReloader(fakeConfigReloader{mutate: func(_ context.Context, reason string, mutate ConfigMutation) (ReloadResult, error) {
+				gotReason = reason
+				next, err := mutate(clientMutationConfig())
+				if err != nil {
+					return ReloadResult{}, err
+				}
+				client := next.Clients[0]
+				if client.Token != tc.wantToken {
+					t.Fatalf("client = %#v", client)
+				}
+				return ReloadResult{OK: true, Saved: true, Applied: true, Reason: reason, HistoryID: "history-client", QuotaStateReset: true}, nil
+			}})
+			mux := http.NewServeMux()
+			h.Register(mux)
+
+			body, err := json.Marshal(clientResourceRequest{Name: "office-key", Token: tc.token})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/client/upsert", "admin-ui-token", body))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+			}
+			for _, want := range []string{`"saved":true`, `"applied":true`, `"quota_state_reset":true`} {
+				if !strings.Contains(w.Body.String(), want) {
+					t.Fatalf("body = %s, want %s", w.Body.String(), want)
+				}
+			}
+			if gotReason != "client_upsert_office-key" {
+				t.Fatalf("reason = %q", gotReason)
+			}
+		})
+	}
+}
+
+func TestAdminConfigClientUpsertRejectsMissingTokenForNewClient(t *testing.T) {
+	for _, token := range []string{"", config.RedactedValue} {
+		t.Run(token, func(t *testing.T) {
+			h := newAdminTestHandler(t)
+			h.SetConfigReloader(fakeConfigReloader{mutate: func(_ context.Context, _ string, mutate ConfigMutation) (ReloadResult, error) {
+				_, err := mutate(clientMutationConfig())
+				return ReloadResult{}, err
+			}})
+			mux := http.NewServeMux()
+			h.Register(mux)
+			body, err := json.Marshal(clientResourceRequest{Name: "mobile-key", Token: token})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/client/upsert", "admin-ui-token", body))
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "token is required") || !strings.Contains(w.Body.String(), "mobile-key") {
+				t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestAdminConfigClientTagRemovalProtectsReferencedLastSource(t *testing.T) {
+	tests := []struct {
+		name   string
+		shared bool
+		path   string
+		body   string
+	}{
+		{name: "delete last source", path: "/admin/config/client-binding/delete", body: `{"inbound":"openai-entry","ref":"office-key"}`},
+		{name: "change last source", path: "/admin/config/client-binding/upsert", body: `{"inbound":"openai-entry","ref":"office-key","tag":"mobile"}`},
+		{name: "delete shared source", shared: true, path: "/admin/config/client-binding/delete", body: `{"inbound":"openai-entry","ref":"office-key"}`},
+		{name: "change shared source", shared: true, path: "/admin/config/client-binding/upsert", body: `{"inbound":"openai-entry","ref":"office-key","tag":"mobile"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newAdminTestHandler(t)
+			h.SetConfigReloader(fakeConfigReloader{mutate: func(_ context.Context, reason string, mutate ConfigMutation) (ReloadResult, error) {
+				cfg := clientMutationConfig()
+				cfg.Routing.Rules = append(cfg.Routing.Rules, config.RoutingRule{Name: "office-route-2", FromTags: []string{"office"}, ToTags: []string{"mock-tag"}, Strategy: "failover"})
+				if tc.shared {
+					cfg.Inbounds[0].Clients = append(cfg.Inbounds[0].Clients, config.ClientBindingSpec{Ref: "shared-key", Tag: "office"})
+				}
+				_, err := mutate(cfg)
+				if err != nil {
+					return ReloadResult{}, err
+				}
+				return ReloadResult{OK: true, Saved: true, Applied: true, Reason: reason, HistoryID: "history-client"}, nil
+			}})
+			mux := http.NewServeMux()
+			h.Register(mux)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, authorizedRequest(http.MethodPost, tc.path, "admin-ui-token", []byte(tc.body)))
+			if tc.shared {
+				if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"applied":true`) {
+					t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+				}
+				return
+			}
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+			}
+			for _, want := range []string{"office-key", "office", "office-route", "office-route-2", `"error_code":"binding_tag_last_source"`, `"route_names"`} {
+				if !strings.Contains(w.Body.String(), want) {
+					t.Fatalf("body = %s, want %q", w.Body.String(), want)
+				}
+			}
+			operation := "delete"
+			if strings.Contains(tc.name, "change") {
+				operation = "update"
+			}
+			if !strings.Contains(w.Body.String(), `"operation":"`+operation+`"`) {
+				t.Fatalf("body = %s, want operation %q", w.Body.String(), operation)
+			}
+
+		})
+	}
+}
+
+func TestAdminConfigClientDeleteRejectsMissingClient(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.SetConfigReloader(fakeConfigReloader{mutate: func(_ context.Context, _ string, mutate ConfigMutation) (ReloadResult, error) {
+		_, err := mutate(clientMutationConfig())
+		return ReloadResult{}, err
+	}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/client/delete", "admin-ui-token", []byte(`{"name":"missing-key"}`)))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `client \"missing-key\" not found`) {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+}
+
+func clientMutationConfig() config.Config {
+	return config.Config{
+		Clients: []config.ClientSpec{{Name: "office-key", Token: "old-client-token"}},
+		Inbounds: []config.InboundSpec{{
+			Name:     "openai-entry",
+			Protocol: "openai_chat",
+			Path:     "/v1/chat/completions",
+			Clients:  []config.ClientBindingSpec{{Ref: "office-key", Tag: "office"}},
+		}},
+		Routing:   config.RoutingConfig{Rules: []config.RoutingRule{{Name: "office-route", FromTags: []string{"office"}, ToTags: []string{"mock-tag"}, Strategy: "failover"}}},
+		Outbounds: []config.OutboundSpec{{Name: "mock", Protocol: "mock", Tag: "mock-tag"}},
+	}
+}
+
+func TestAdminConfigClientsReturnsTopLevelClientsWithAllBindings(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	content := strings.Replace(validGatewayConfigYAML(), "outbounds:", `  - name: anthropic-entry
+    protocol: anthropic_messages
+    path: /v1/messages
+    clients:
+      - ref: office-key
+        tag: shared
+outbounds:`, 1)
+	if err := os.WriteFile(h.configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodGet, "/admin/config/clients", "admin-ui-token", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Items []clientResourceResponse `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Items) != 1 || response.Items[0].Name != "office-key" || response.Items[0].Token != config.RedactedValue {
+		t.Fatalf("items = %#v", response.Items)
+	}
+	bindings := response.Items[0].Bindings
+	if len(bindings) != 2 || bindings[0].Inbound != "openai-entry" || bindings[0].InboundProtocol != "openai_chat" || bindings[0].InboundPath != "/v1/chat/completions" || bindings[0].Ref != "office-key" || bindings[0].Tag != "office" || bindings[1].Inbound != "anthropic-entry" || bindings[1].Tag != "shared" {
+		t.Fatalf("bindings = %#v", bindings)
+	}
+	if strings.Contains(w.Body.String(), "client-token") {
+		t.Fatalf("response leaked client token: %s", w.Body.String())
+	}
+}
+
+func TestAdminConfigClientDeleteRejectsBoundClient(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.SetConfigReloader(fakeConfigReloader{mutate: func(_ context.Context, _ string, mutate ConfigMutation) (ReloadResult, error) {
+		_, err := mutate(clientMutationConfig())
+		return ReloadResult{}, err
+	}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/client/delete", "admin-ui-token", []byte(`{"name":"office-key"}`)))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "binding(s) still reference it") {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminConfigRouteMutationsUseAtomicReloader(t *testing.T) {
+	tests := []struct {
+		path       string
+		body       string
+		wantReason string
+	}{
+		{path: "/admin/config/route/upsert", body: `{"name":"new-route","from_tags":["office"],"to_tags":["mock-tag"],"strategy":"failover"}`, wantReason: "route_upsert_new-route"},
+		{path: "/admin/config/route/delete", body: `{"name":"office-route"}`, wantReason: "route_delete_office-route"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.wantReason, func(t *testing.T) {
+			h := newAdminTestHandler(t)
+			var gotReason string
+			h.SetConfigReloader(fakeConfigReloader{mutate: func(_ context.Context, reason string, mutate ConfigMutation) (ReloadResult, error) {
+				gotReason = reason
+				if _, err := mutate(clientMutationConfig()); err != nil {
+					return ReloadResult{}, err
+				}
+				return ReloadResult{OK: true, Saved: true, Applied: true, Reason: reason}, nil
+			}})
+			mux := http.NewServeMux()
+			h.Register(mux)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, authorizedRequest(http.MethodPost, tc.path, "admin-ui-token", []byte(tc.body)))
+			if w.Code != http.StatusOK || gotReason != tc.wantReason || !strings.Contains(w.Body.String(), `"applied":true`) {
+				t.Fatalf("status = %d, reason = %q, body=%s", w.Code, gotReason, w.Body.String())
+			}
+		})
 	}
 }
 
@@ -967,10 +1324,11 @@ func TestAdminConfigClientUpsertAndRouteDeleteWriteConfig(t *testing.T) {
 	if err := os.WriteFile(h.configPath, []byte(validGatewayConfigYAML()), 0o600); err != nil {
 		t.Fatalf("os.WriteFile() error = %v", err)
 	}
+	h.SetConfigReloader(fileMutationReloader{path: h.configPath})
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	clientBody := []byte(`{"inbound":"openai-entry","name":"mobile-key","token":"mobile-token","tag":"mobile"}`)
+	clientBody := []byte(`{"name":"mobile-key","token":"mobile-token"}`)
 	clientResp := httptest.NewRecorder()
 	mux.ServeHTTP(clientResp, authorizedRequest(http.MethodPost, "/admin/config/client/upsert", "admin-ui-token", clientBody))
 	if clientResp.Code != http.StatusOK {
@@ -991,8 +1349,8 @@ func TestAdminConfigClientUpsertAndRouteDeleteWriteConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load() error = %v", err)
 	}
-	if len(cfg.Inbounds[0].Clients) != 2 || cfg.Inbounds[0].Clients[1].Name != "mobile-key" {
-		t.Fatalf("clients = %#v, want inserted client", cfg.Inbounds[0].Clients)
+	if len(cfg.Clients) != 2 || cfg.Clients[1].Name != "mobile-key" {
+		t.Fatalf("clients = %#v, want inserted client", cfg.Clients)
 	}
 	if len(cfg.Routing.Rules) != 1 {
 		t.Fatalf("rules = %#v, want failed delete to preserve config", cfg.Routing.Rules)

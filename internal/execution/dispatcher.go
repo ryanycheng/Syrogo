@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/accounting"
@@ -14,12 +15,13 @@ import (
 )
 
 type Dispatcher struct {
-	store           accounting.Store
-	quotaTracker    *quota.Tracker
-	healthTracker   *provider.HealthTracker
-	eventRecorder   *quota.EventRecorder
-	latencyStore    *latency.Store
-	priceCalculator accounting.PriceCalculator
+	store              accounting.Store
+	quotaTracker       *quota.Tracker
+	clientQuotaTracker *quota.Tracker
+	healthTracker      *provider.HealthTracker
+	eventRecorder      *quota.EventRecorder
+	latencyStore       *latency.Store
+	priceCalculator    accounting.PriceCalculator
 }
 
 func NewDispatcher() *Dispatcher {
@@ -47,10 +49,14 @@ func NewDispatcherWithStoreQuotaHealthEventsAndLatency(store accounting.Store, q
 }
 
 func NewDispatcherWithStoreQuotaHealthEventsLatencyAndPricing(store accounting.Store, quotaTracker *quota.Tracker, healthTracker *provider.HealthTracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, priceCalculator accounting.PriceCalculator) *Dispatcher {
+	return NewDispatcherWithStoreQuotasHealthEventsLatencyAndPricing(store, quotaTracker, nil, healthTracker, eventRecorder, latencyStore, priceCalculator)
+}
+
+func NewDispatcherWithStoreQuotasHealthEventsLatencyAndPricing(store accounting.Store, quotaTracker, clientQuotaTracker *quota.Tracker, healthTracker *provider.HealthTracker, eventRecorder *quota.EventRecorder, latencyStore *latency.Store, priceCalculator accounting.PriceCalculator) *Dispatcher {
 	if store == nil {
 		store = accounting.NewMemoryStore()
 	}
-	return &Dispatcher{store: store, quotaTracker: quotaTracker, healthTracker: healthTracker, eventRecorder: eventRecorder, latencyStore: latencyStore, priceCalculator: priceCalculator}
+	return &Dispatcher{store: store, quotaTracker: quotaTracker, clientQuotaTracker: clientQuotaTracker, healthTracker: healthTracker, eventRecorder: eventRecorder, latencyStore: latencyStore, priceCalculator: priceCalculator}
 }
 
 func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan runtime.ExecutionPlan) (runtime.Response, error) {
@@ -99,7 +105,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req runtime.Request, plan run
 		if err == nil {
 			latency.FromContext(ctx).SetFallbackCount(i)
 			d.recordSuccess(step.OutboundName, normalizedUsageTokens(resp.Usage), decision.Probe, healthDecision.Probe)
-			d.record(d.finalizeUsageRecord(ctx, plan, step, stepReq.Model, resp.Model, resp.Usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), i))
+			record := d.finalizeUsageRecord(ctx, plan, step, stepReq.Model, resp.Model, resp.Usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), i)
+			d.record(record)
+			d.recordClientTerminalSuccess(record)
 			return resp, nil
 		}
 
@@ -248,6 +256,10 @@ func (d *Dispatcher) QueryRecentUsage(query accounting.RecentRecordsQuery) ([]ru
 	return d.store.RecentRecords(query)
 }
 
+func (d *Dispatcher) QueryUsageCoverage() accounting.Coverage {
+	return d.store.Coverage()
+}
+
 func (d *Dispatcher) QueryQuota() []quota.SnapshotItem {
 	if d.quotaTracker == nil {
 		return nil
@@ -316,7 +328,9 @@ func (d *Dispatcher) wrapStream(ctx context.Context, plan runtime.ExecutionPlan,
 					if !recorded {
 						recorder.SetStreamState(latency.StreamStateCompleted)
 						d.recordSuccess(step.OutboundName, normalizedUsageTokens(usage), quotaProbe, healthProbe)
-						d.record(d.finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), fallbackCount))
+						record := d.finalizeUsageRecord(ctx, plan, step, requestedModel, executedModel, usage, runtime.UsageStatusSuccess, "", startedAt, time.Now(), fallbackCount)
+						d.record(record)
+						d.recordClientTerminalSuccess(record)
 					}
 					return
 				}
@@ -418,6 +432,14 @@ func (d *Dispatcher) record(record runtime.UsageRecord) {
 	d.store.Record(record)
 }
 
+func (d *Dispatcher) recordClientTerminalSuccess(record runtime.UsageRecord) {
+	if d.clientQuotaTracker == nil || record.Status != runtime.UsageStatusSuccess {
+		return
+	}
+	costMicroUSD := int64(math.Round(record.CostUSD * 1_000_000))
+	d.clientQuotaTracker.RecordClientTerminalUsage(record.ClientName, record.Breakdown.TotalTokens, costMicroUSD, record.Priced)
+}
+
 func normalizedUsageTokens(usage *runtime.Usage) int {
 	if usage == nil {
 		return 0
@@ -446,7 +468,7 @@ func (d *Dispatcher) finalizeUsageRecord(ctx context.Context, plan runtime.Execu
 	sessionID, _ := ctx.Value(runtime.ContextKeySessionID).(string)
 	agent, _ := ctx.Value(runtime.ContextKeyAgent).(string)
 	providerName := providerName(step)
-	costUSD := d.priceCalculator.CostUSD(providerName, executedModel, breakdown)
+	costUSD, priced := d.priceCalculator.CostUSDWithMatch(providerName, executedModel, breakdown)
 	return runtime.UsageRecord{
 		RequestID:        requestID,
 		ClientName:       plan.ClientName,
@@ -466,6 +488,7 @@ func (d *Dispatcher) finalizeUsageRecord(ctx context.Context, plan runtime.Execu
 		SessionID:        sessionID,
 		Agent:            agent,
 		CostUSD:          costUSD,
+		Priced:           priced,
 		Breakdown:        breakdown,
 		StartedAt:        startedAt.UTC().Format(time.RFC3339Nano),
 		FinishedAt:       finishedAt.UTC().Format(time.RFC3339Nano),

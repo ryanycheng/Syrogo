@@ -18,10 +18,11 @@ type sessionHookCLIOptions struct {
 }
 
 type sessionHookForwardRequest struct {
-	SessionID  string         `json:"session_id"`
-	EventName  string         `json:"event_name"`
-	Payload    map[string]any `json:"payload"`
-	ReceivedAt time.Time      `json:"received_at"`
+	SessionID   string         `json:"session_id"`
+	InboundName string         `json:"inbound_name"`
+	EventName   string         `json:"event_name"`
+	Payload     map[string]any `json:"payload"`
+	ReceivedAt  time.Time      `json:"received_at"`
 }
 
 func runSession(args []string) int {
@@ -65,7 +66,8 @@ func runSessionHookEvent(opts sessionHookCLIOptions) int {
 	sessionID := os.Getenv("SYROGO_SESSION_ID")
 	baseURL := os.Getenv("SYROGO_BASE_URL")
 	token := os.Getenv("SYROGO_SESSION_AUTH_TOKEN")
-	if sessionID == "" || baseURL == "" || token == "" {
+	inboundName := os.Getenv("SYROGO_SESSION_INBOUND_NAME")
+	if sessionID == "" || baseURL == "" || token == "" || inboundName == "" {
 		_, _ = fmt.Fprintln(opts.Stderr, "syrogo session hook-event: missing session environment")
 		return 0
 	}
@@ -76,7 +78,7 @@ func runSessionHookEvent(opts sessionHookCLIOptions) int {
 			payload = map[string]any{"parse_error": err.Error()}
 		}
 	}
-	req := sessionHookForwardRequest{SessionID: sessionID, EventName: opts.Event, Payload: payload, ReceivedAt: time.Now()}
+	req := sessionHookForwardRequest{SessionID: sessionID, InboundName: inboundName, EventName: opts.Event, Payload: payload, ReceivedAt: time.Now()}
 	if err := postSessionJSON(baseURL, "/session/hook-event", token, req); err != nil {
 		_, _ = fmt.Fprintf(opts.Stderr, "syrogo session hook-event: %v\n", err)
 	}

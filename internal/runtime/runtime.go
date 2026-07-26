@@ -153,6 +153,7 @@ type UsageRecord struct {
 	SessionID        string
 	Agent            string
 	CostUSD          float64
+	Priced           bool `json:"-"`
 	Breakdown        UsageBreakdown
 	StartedAt        string
 	FinishedAt       string

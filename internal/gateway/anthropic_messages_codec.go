@@ -20,7 +20,7 @@ type anthropicSSEFrame struct {
 	payload any
 }
 
-func (anthropicMessagesCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ClientSpec, logger *slog.Logger) {
+func (anthropicMessagesCodec) Handle(h *Handler, w http.ResponseWriter, r *http.Request, inbound config.InboundSpec, client config.ResolvedClientBinding, logger *slog.Logger) {
 	requestID, _ := r.Context().Value(runtime.ContextKeyRequestID).(string)
 	if r.Method != http.MethodPost {
 		logger.Warn("request rejected", slog.String("reason", "method not allowed"))
@@ -62,7 +62,7 @@ func (anthropicMessagesCodec) Handle(h *Handler, w http.ResponseWriter, r *http.
 		RequestID:  requestID,
 		Path:       r.URL.Path,
 		Inbound:    inbound.Name,
-		ClientTag:  client.Tag,
+		ClientTag:  client.Binding.Tag,
 		ReceivedAt: time.Now().Format(time.RFC3339Nano),
 		RawBody:    append(json.RawMessage(nil), body...),
 		Parsed:     debugInboundRequest(req),

@@ -11,9 +11,9 @@ const els = {
 const TOKEN_KEY = "syrogo_admin_token";
 const SESSION_TOKEN_KEY = "syrogo_admin_session_token";
 const LOCALE_KEY = "syrogo_admin_locale";
-let loadedConfigPath = "";
-let loadedConfigRaw = "";
+let loadedConfigRevision = "";
 let loadedConfigRedacted = "";
+let configDraftDirty = false;
 let resourceOptions = { inbounds: [], outbounds: [], client_tags: [], outbound_tags: [] };
 let providerMetrics = [];
 let providerLiveChecks = {};
@@ -23,6 +23,12 @@ let sessionsTimer = 0;
 let sessionViewMode = localStorage.getItem("syrogo_sessions_view") || "cards";
 let sessionItems = [];
 let activeProvider = null;
+let clientItems = [];
+let clientMetrics = [];
+let clientMetricsDays = 7;
+let activeClient = null;
+let activeClientDetail = null;
+let clientHeatmapMetric = "requests";
 
 const i18n = {
   en: {
@@ -76,7 +82,10 @@ async function fetchJSON(path, options = {}) {
   try { body = text ? JSON.parse(text) : null; } catch (_) { body = text; }
   if (!response.ok) {
     const detail = typeof body === "string" ? body : JSON.stringify(body);
-    throw new Error(`${response.status} ${response.statusText}: ${detail}`);
+    const error = new Error(`${response.status} ${response.statusText}: ${detail}`);
+    error.status = response.status;
+    error.body = body;
+    throw error;
   }
   return body;
 }
@@ -137,7 +146,16 @@ function renderSessions() {
 }
 
 function renderSessionsTable(items) {
-  return `<table><thead><tr><th>Status</th><th>Client</th><th>Location</th><th>Workspace</th><th>Last seen</th><th>Commands</th></tr></thead><tbody>${items.map(renderSessionRow).join("")}</tbody></table>`;
+  return `<table><thead><tr><th>Status</th><th>Client</th><th>Tag</th><th>Location</th><th>Workspace</th><th>Last seen</th><th>Commands</th></tr></thead><tbody>${items.map(renderSessionRow).join("")}</tbody></table>`;
+}
+
+function renderSessionRow(item) {
+  const tmux = item.tmux || {};
+  const commands = item.commands || {};
+  const status = item.status || "unknown";
+  const location = tmux.present ? `${escapeHTML(tmux.session || "-")} / w${escapeHTML(tmux.window_index || "-")} / p${escapeHTML(tmux.pane_id || tmux.pane_index || "-")}` : "not in tmux";
+  const command = commands.attach || commands.select_window || commands.select_pane;
+  return `<tr><td>${badge(status, sessionStatusKind(status))}</td><td><strong>${escapeHTML(item.client_name || "-")}</strong><div class="muted">${escapeHTML(item.inbound_name || "-")}</div></td><td>${badge(item.tag || "-", item.tag ? "" : "muted")}</td><td>${location}</td><td><strong>${escapeHTML(item.cwd || "-")}</strong><div class="muted">${escapeHTML(item.host || "-")}</div></td><td>${escapeHTML(formatDateTime(item.last_seen_at || item.started_at))}</td><td class="session-commands">${command ? `<code>${escapeHTML(command)}</code>` : `<span class="muted">No tmux command</span>`}</td></tr>`;
 }
 
 function renderSessionCards(items) {
@@ -152,7 +170,7 @@ function renderSessionCard(item) {
   const location = tmux.present ? [`${escapeHTML(tmux.session || "-")}`, `w${escapeHTML(tmux.window_index || "-")}${tmux.window_name ? ` · ${escapeHTML(tmux.window_name)}` : ""}`, `p${escapeHTML(tmux.pane_id || tmux.pane_index || "-")}`].join(" / ") : "not in tmux";
   const command = commands.attach || commands.select_window || commands.select_pane;
   const commandHTML = command ? `<code>${escapeHTML(command)}</code>` : `<span class="muted">No tmux command</span>`;
-  return `<article class="session-card ${escapeHTML(statusKind)}"><div class="session-card-head"><div>${badge(status, statusKind)}<span>${escapeHTML(item.last_event || "no hook")}</span></div><strong>${escapeHTML(formatDateTime(item.last_seen_at || item.started_at))}</strong></div><div class="session-card-main"><h3>${escapeHTML(item.client_name || "-")}</h3><p>${escapeHTML(item.inbound_name || "-")}</p></div><div class="session-card-meta"><span>tmux</span><strong>${location}</strong><span>cwd</span><strong>${escapeHTML(item.cwd || "-")}</strong><span>host</span><strong>${escapeHTML(item.host || "-")}</strong></div><div class="session-card-commands">${commandHTML}</div></article>`;
+  return `<article class="session-card ${escapeHTML(statusKind)}"><div class="session-card-head"><div>${badge(status, statusKind)}<span>${escapeHTML(item.last_event || "no hook")}</span></div><strong>${escapeHTML(formatDateTime(item.last_seen_at || item.started_at))}</strong></div><div class="session-card-main"><h3>${escapeHTML(item.client_name || "-")}</h3><p>${escapeHTML(item.inbound_name || "-")} · tag ${escapeHTML(item.tag || "-")}</p></div><div class="session-card-meta"><span>tmux</span><strong>${location}</strong><span>cwd</span><strong>${escapeHTML(item.cwd || "-")}</strong><span>host</span><strong>${escapeHTML(item.host || "-")}</strong></div><div class="session-card-commands">${commandHTML}</div></article>`;
 }
 
 function setSessionsViewMode(mode) {
@@ -183,8 +201,8 @@ function sessionStatusKind(status) {
 
 async function refreshResourceOptions() {
   resourceOptions = await fetchJSON("/admin/config/options");
-  const clientInbound = document.querySelector("#client-inbound");
-  clientInbound.innerHTML = (resourceOptions.inbounds || []).map((inbound) => `<option value="${escapeHTML(inbound.name)}">${escapeHTML(inbound.name)} (${escapeHTML(inbound.protocol)})</option>`).join("");
+  const bindingInbound = document.querySelector("#binding-inbound");
+  bindingInbound.innerHTML = (resourceOptions.inbounds || []).map((inbound) => `<option value="${escapeHTML(inbound.name)}">${escapeHTML(inbound.name)} (${escapeHTML(inbound.protocol)})</option>`).join("");
 }
 
 async function refreshProviderMetricsOnly() {
@@ -461,32 +479,104 @@ async function deleteProvider() {
 
 async function refreshClients() {
   await refreshResourceOptions();
-  const response = await fetchJSON("/admin/config/clients");
-  const items = response.items || [];
-  document.querySelector("#clients-table").innerHTML = items.length === 0 ? emptyState("No clients.") : renderClientTable(items);
+  const warning = document.querySelector("#clients-warning");
+  warning.classList.add("hidden");
+  const [configResult, metricsResult] = await Promise.allSettled([
+    fetchJSON("/admin/config/clients"),
+    fetchJSON(`/admin/config/clients/metrics?days=${encodeURIComponent(clientMetricsDays)}`),
+  ]);
+  if (configResult.status === "rejected") {
+    document.querySelector("#clients-table").innerHTML = errorBlock(configResult.reason.message);
+    throw configResult.reason;
+  }
+  clientItems = configResult.value.items || [];
+  clientMetrics = metricsResult.status === "fulfilled" ? metricsResult.value.items || [] : [];
+  if (metricsResult.status === "rejected") {
+    warning.textContent = `Metrics unavailable: ${metricsResult.reason.message}. Client editing remains available.`;
+    warning.classList.remove("hidden");
+  }
+  renderClients();
 }
 
-function renderClientTable(items) {
-  return `<table><thead><tr><th>Inbound</th><th>Name</th><th>Tag</th><th>Token</th><th>Protocol</th><th>Actions</th></tr></thead><tbody>${items.map((item) => `<tr data-client='${escapeAttr(JSON.stringify(item))}' data-row><td>${escapeHTML(item.inbound || "")}</td><td><strong>${escapeHTML(item.name || "")}</strong></td><td>${escapeHTML(item.tag || "")}</td><td>${escapeHTML(item.token || "")}</td><td>${badge(item.inbound_protocol || "unknown", "")}</td><td><button class="small" data-client-edit='${escapeAttr(JSON.stringify(item))}'>Edit</button></td></tr>`).join("")}</tbody></table>`;
+function renderClients() {
+  const metricsByClient = new Map(clientMetrics.map((item) => [item.client?.name, item]));
+  document.querySelector("#clients-table").innerHTML = clientItems.length === 0 ? emptyState("No clients.") : renderClientTable(clientItems, metricsByClient);
+  document.querySelectorAll("[data-client-days]").forEach((button) => button.classList.toggle("active", Number(button.dataset.clientDays) === clientMetricsDays));
+  if (activeClientDetail) {
+    const current = clientItems.find((item) => item.name === activeClientDetail.client?.name);
+    if (current) renderClientDetail(activeClientDetail);
+    else closeClientDetail();
+  }
+}
+
+function renderClientTable(items, metricsByClient) {
+  return `<table class="client-table"><thead><tr><th>Client</th><th>Bindings</th><th>Usage (all-time)</th><th>Frequency (${clientMetricsDays}d)</th><th>Quota</th><th>Actions</th></tr></thead><tbody>${items.map((item) => renderClientRow(item, metricsByClient.get(item.name))).join("")}</tbody></table>`;
+}
+
+function renderClientBindings(bindings) {
+  if (!bindings?.length) return `<span class="muted">Not bound to an inbound</span>`;
+  return `<div class="binding-chips">${bindings.map((binding) => `<span class="binding-chip"><strong>${escapeHTML(binding.inbound || "-")}</strong><span>${escapeHTML(binding.inbound_protocol || "unknown")} · tag ${escapeHTML(binding.tag || "-")}</span></span>`).join("")}</div>`;
+}
+
+function renderClientRow(item, metrics) {
+  const usage = metrics?.all_time;
+  const frequency = metrics?.frequency;
+  const quota = metrics?.quota;
+  return `<tr data-client-detail-name="${escapeAttr(item.name || "")}" data-row><td><strong>${escapeHTML(item.name || "")}</strong></td><td>${renderClientBindings(item.bindings || [])}</td><td>${usage ? `<div class="compact-metrics"><span>${formatNumber(usage.request_count)} req</span><span>${formatNumber(usage.total_tokens)} tok</span><span>${formatCost(usage.cost_usd)}</span></div>` : badge("unavailable", "warn")}</td><td>${frequency ? `<div class="compact-metrics"><span>${formatNumber(frequency.requests)} req</span><span>${formatNumber(frequency.active_days)}/${formatNumber(frequency.calendar_days)} active days</span><span>${formatDecimal(frequency.requests_per_day)} / day</span></div>` : badge("unavailable", "warn")}</td><td>${clientQuotaCell(quota, item.quota)}</td><td><button class="small" data-client-edit='${escapeAttr(JSON.stringify(item))}'>Edit</button></td></tr>`;
+}
+
+function clientQuotaCell(quota, quotaConfig) {
+  if (!quota && !quotaConfig?.enabled) return badge("off", "muted");
+  if (!quota) return badge("configured");
+  const windows = (quota.windows || []).map((window) => {
+    const type = window.type || (window.max_requests > 0 ? "requests" : "requests");
+    let usage;
+    if (type === "tokens") usage = `${formatNumber(window.used_tokens)}/${formatNumber(window.max_tokens)} tokens`;
+    else if (type === "cost") usage = `${formatCost(window.used_cost_usd)}/${formatCost(window.max_cost_usd)} cost`;
+    else usage = `${formatNumber(window.used_requests)}/${formatNumber(window.max_requests)} requests`;
+    const warning = window.warning || (Number(window.unpriced_count || 0) > 0 ? `unpriced usage: ${formatNumber(window.unpriced_count)} terminal result(s) counted as $0` : "");
+    return `<div class="quota-window"><strong>${escapeHTML(window.name || type)}</strong> ${badge(type, "muted")}<span>${escapeHTML(usage)}</span>${warning ? `<span class="quota-warning">Warning: ${escapeHTML(warning)}</span>` : ""}</div>`;
+  }).join("");
+  const limited = quota.state && quota.state !== "available";
+  return `${badge(quota.state || "available", limited ? "danger" : "")}<div class="client-quota-windows">${windows || `<span class="muted">no windows</span>`}</div>`;
 }
 
 function fillClientForm(item = {}) {
-  document.querySelector("#client-modal-title").textContent = item.name ? "编辑 Client" : "新增 Client";
-  document.querySelector("#client-inbound").value = item.inbound || document.querySelector("#client-inbound").value;
+  activeClient = item.name ? item : null;
+  document.querySelector("#client-modal-title").textContent = item.name ? "Edit Client" : "New Client";
   document.querySelector("#client-name").value = item.name || "";
-  document.querySelector("#client-token").value = item.token || "";
-  document.querySelector("#client-tag").value = item.tag || "";
+  document.querySelector("#client-name").disabled = Boolean(item.name);
+  document.querySelector("#client-token").value = item.name ? "" : (item.token || "");
+  document.querySelector("#client-quota-json").value = pretty(item.quota || { enabled: false, windows: [] });
   document.querySelector("#client-delete-confirm").classList.add("hidden");
   document.querySelector("#client-delete-name").value = "";
   document.querySelector("#delete-client").textContent = "Delete client";
+  document.querySelector("#delete-client").classList.toggle("hidden", !item.name);
+  document.querySelector("#client-bindings-section").classList.toggle("hidden", !item.name);
+  clearClientBindingError();
+  document.querySelector("#binding-tag").value = "";
+  renderClientBindingEditor();
   document.querySelector("#client-modal").classList.remove("hidden");
 }
-function closeClientModal() { document.querySelector("#client-modal").classList.add("hidden"); }
-async function saveClient() { await mutateResource("/admin/config/client/upsert", { inbound: value("#client-inbound"), name: value("#client-name"), token: value("#client-token"), tag: value("#client-tag") }, async () => { closeClientModal(); await refreshClients(); }, "Client saved. Click Apply current file when ready."); }
+function closeClientModal() { document.querySelector("#client-modal").classList.add("hidden"); activeClient = null; }
+function clientPayload() {
+  const quotaText = value("#client-quota-json");
+  if (!quotaText) throw new Error("Quota JSON is required to preserve the complete quota configuration.");
+  let quota;
+  try { quota = JSON.parse(quotaText); } catch (_) { throw new Error("Quota must be a valid JSON object."); }
+  if (!quota || typeof quota !== "object" || Array.isArray(quota)) throw new Error("Quota must be a valid JSON object.");
+  return { name: value("#client-name"), token: value("#client-token"), quota };
+}
+async function saveClient() {
+  let payload;
+  try { payload = clientPayload(); setInvalid("#client-quota-json", false); } catch (error) { setInvalid("#client-quota-json", true); showToast(error.message); return; }
+  await mutateAppliedClient("/admin/config/client/upsert", payload, async () => { closeClientModal(); await refreshClients(); }, "Client saved and applied.");
+}
 async function deleteClient() {
-  const inbound = value("#client-inbound");
   const name = value("#client-name");
   if (!name) return;
+  const bindings = activeClient?.bindings || [];
+  if (bindings.length) { showToast(`Remove all ${bindings.length} binding(s) before deleting this Client.`); return; }
   const confirmBox = document.querySelector("#client-delete-confirm");
   if (confirmBox.classList.contains("hidden")) {
     confirmBox.classList.remove("hidden");
@@ -499,8 +589,124 @@ async function deleteClient() {
   const invalid = typedName !== name;
   input.classList.toggle("invalid", invalid);
   if (invalid) { showToast("Type the client name to confirm deletion."); return; }
-  await mutateResource("/admin/config/client/delete", { inbound, name }, async () => { closeClientModal(); await refreshClients(); }, "Client deleted. Click Apply current file when ready.");
+  await mutateAppliedClient("/admin/config/client/delete", { name }, async () => { closeClientModal(); closeClientDetail(); await refreshClients(); }, "Client deleted and applied.");
 }
+
+function renderClientBindingEditor() {
+  const target = document.querySelector("#client-bindings-list");
+  if (!target) return;
+  const bindings = activeClient?.bindings || [];
+  target.innerHTML = bindings.length ? bindings.map((binding) => `<div class="client-binding-row"><div><strong>${escapeHTML(binding.inbound || "-")}</strong><span>${escapeHTML(binding.inbound_protocol || "unknown")} · ${escapeHTML(binding.inbound_path || "-")} · tag ${escapeHTML(binding.tag || "-")}</span></div><div class="row-actions"><button class="small ghost" type="button" data-binding-edit='${escapeAttr(JSON.stringify(binding))}'>Edit</button><button class="small danger" type="button" data-binding-delete-inbound="${escapeAttr(binding.inbound || "")}" data-binding-delete-ref="${escapeAttr(binding.ref || activeClient?.name || "")}">Unbind</button></div></div>`).join("") : `<p class="muted">No bindings. This Client cannot authenticate on any Inbound yet.</p>`;
+}
+
+function clearClientBindingError() {
+  const target = document.querySelector("#client-binding-error");
+  if (!target) return;
+  target.classList.add("hidden");
+  target.innerHTML = "";
+}
+
+function showClientBindingError(error) {
+  const target = document.querySelector("#client-binding-error");
+  const body = error?.body;
+  if (!target || !body || typeof body !== "object" || body.error_code !== "binding_tag_last_source") return false;
+  const details = body.details || {};
+  const routes = Array.isArray(details.route_names) ? details.route_names : [];
+  target.innerHTML = `<strong>Binding change blocked: tag ${escapeHTML(details.tag || "-")} is the last source for route${routes.length === 1 ? "" : "s"} ${escapeHTML(routes.join(", ") || "-")}.</strong><span>Client ${escapeHTML(details.client || activeClient?.name || "-")} on Inbound ${escapeHTML(details.inbound || "-")} cannot be ${escapeHTML(details.operation === "delete" ? "unbound" : "retagged")} yet.</span><ol><li>Add or update another Client binding to provide tag <code>${escapeHTML(details.tag || "-")}</code>, then retry this binding change.</li><li>Remove tag <code>${escapeHTML(details.tag || "-")}</code> from the listed route <code>from_tags</code> (or delete/change those routes), then retry.</li></ol>`;
+  target.classList.remove("hidden");
+  target.scrollIntoView({ block: "nearest" });
+  return true;
+}
+
+async function mutateClientBinding(path, payload, refresh, successMessage) {
+  clearClientBindingError();
+  try {
+    const response = await fetchJSON(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!response?.saved || !response?.applied) throw new Error(response?.reason || "Binding config was not both saved and applied.");
+    showToast(successMessage);
+    await refresh();
+  } catch (error) {
+    if (!showClientBindingError(error)) showToast(error.message);
+  }
+}
+
+async function saveClientBinding() {
+  if (!activeClient?.name) return;
+  const payload = { inbound: value("#binding-inbound"), ref: activeClient.name, tag: value("#binding-tag") };
+  if (!payload.inbound || !payload.tag) { showToast("Inbound and tag are required for a binding."); return; }
+  await mutateClientBinding("/admin/config/client-binding/upsert", payload, async () => { await refreshClients(); activeClient = clientItems.find((item) => item.name === payload.ref) || activeClient; renderClientBindingEditor(); }, "Binding saved and applied.");
+}
+
+async function deleteClientBinding(inbound, ref) {
+  await mutateClientBinding("/admin/config/client-binding/delete", { inbound, ref }, async () => { await refreshClients(); activeClient = clientItems.find((item) => item.name === ref) || activeClient; renderClientBindingEditor(); }, "Binding removed and applied.");
+}
+
+async function mutateAppliedClient(path, payload, refresh, successMessage) {
+  try {
+    const response = await fetchJSON(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!response?.saved || !response?.applied) throw new Error(response?.reason || "Client config was not both saved and applied.");
+    showToast(successMessage);
+    await refresh();
+  } catch (error) { showToast(error.message); }
+}
+
+async function openClientDetail(name) {
+  if (!name) return;
+  const target = document.querySelector("#client-detail");
+  target.classList.remove("hidden");
+  target.innerHTML = inlineStatus("Loading client usage...", "loading");
+  try {
+    activeClientDetail = await fetchJSON(`/admin/config/client/usage?name=${encodeURIComponent(name)}`);
+    renderClientDetail(activeClientDetail);
+  } catch (error) {
+    activeClientDetail = null;
+    target.innerHTML = errorBlock(error.message);
+  }
+}
+
+function closeClientDetail() {
+  activeClientDetail = null;
+  const target = document.querySelector("#client-detail");
+  target.classList.add("hidden");
+  target.innerHTML = "";
+}
+
+function renderClientDetail(detail) {
+  const client = detail.client || {};
+  const summary = detail.range_summary || {};
+  const coverage = detail.coverage || {};
+  const daily = detail.daily || [];
+  const coverageText = coverage.known ? `Tracked since ${coverage.tracking_started_at || "unknown"}; raw retention ${coverage.raw_retention_days || 0} days; daily aggregates ${coverage.aggregates_persisted ? "persisted" : "memory-only"}.` : "Legacy coverage is unknown; zero-value historical days are not asserted as complete.";
+  document.querySelector("#client-detail").innerHTML = `<article class="card full client-detail-card"><div class="section-title"><div><p class="eyebrow">Client detail</p><h2>${escapeHTML(client.name || "")}</h2><p class="hint">UTC ${escapeHTML(detail.start_date || "")} to ${escapeHTML(detail.end_date || "")} (end exclusive). The current day is partial. Usage and quota are global across all bindings.</p></div><button class="ghost small" data-client-detail-close>Close</button></div><div class="client-detail-bindings"><strong>Bindings</strong>${renderClientBindings(client.bindings || [])}</div><div class="summary-grid">${metric("Requests", summary.request_count)}${metric("Tokens", summary.total_tokens)}${metric("Cost", formatCost(summary.cost_usd))}${metric("Errors", summary.error_count)}</div><div class="heatmap-toolbar"><div class="segmented-control" aria-label="Heatmap metric">${["requests", "tokens", "cost", "errors"].map((name) => `<button type="button" class="small ${clientHeatmapMetric === name ? "active" : ""}" data-client-heatmap-metric="${name}">${name[0].toUpperCase() + name.slice(1)}</button>`).join("")}</div><span class="muted">${escapeHTML(coverageText)}</span></div>${renderClientHeatmap(daily, clientHeatmapMetric)}<div class="section-subtitle"><h3>Daily records</h3><span class="hint">Daily aggregates, not a per-request audit log.</span></div>${daily.length ? renderClientDailyTable(daily) : emptyState("No daily usage records.")}</article>`;
+}
+
+function renderClientHeatmap(daily, selectedMetric) {
+  const values = daily.map((day) => clientDailyMetric(day, selectedMetric));
+  const maxLog = Math.max(0, ...values.map((number) => Math.log1p(Math.max(0, number))));
+  const cells = daily.map((day, index) => {
+    const number = values[index];
+    const level = maxLog > 0 && number > 0 ? Math.max(1, Math.min(5, Math.ceil((Math.log1p(number) / maxLog) * 5))) : 0;
+    const status = day.status || "unknown";
+    const tooltip = `${day.value || day.date} UTC · ${status} · ${formatNumber(day.request_count)} requests · ${formatNumber(day.total_tokens)} tokens · ${formatCost(day.cost_usd)} · ${formatNumber(day.error_count)} errors`;
+    return `<span class="heatmap-cell level-${level} ${escapeAttr(status)}" tabindex="0" role="img" aria-label="${escapeAttr(tooltip)}" data-tooltip="${escapeAttr(tooltip)}"></span>`;
+  }).join("");
+  return `<div class="contribution-heatmap" aria-label="${escapeAttr(selectedMetric)} contribution heatmap">${cells}</div>`;
+}
+
+function clientDailyMetric(day, metricName) {
+  if (metricName === "tokens") return Number(day.total_tokens || 0);
+  if (metricName === "cost") return Number(day.cost_usd || 0);
+  if (metricName === "errors") return Number(day.error_count || 0);
+  return Number(day.request_count || 0);
+}
+
+function renderClientDailyTable(daily) {
+  return `<div class="table-wrap daily-records"><table><thead><tr><th>Date (UTC)</th><th>Status</th><th>Requests</th><th>Tokens</th><th>Cost</th><th>Errors</th></tr></thead><tbody>${daily.slice().reverse().map((day) => `<tr><td>${escapeHTML(day.value || day.date || "")}</td><td>${badge(day.status || "unknown", day.status === "partial" ? "warn" : day.status === "unknown" ? "muted" : "")}</td><td>${formatNumber(day.request_count)}</td><td>${formatNumber(day.total_tokens)}</td><td>${formatCost(day.cost_usd)}</td><td>${formatNumber(day.error_count)}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+function formatNumber(number) { return new Intl.NumberFormat().format(Number(number || 0)); }
+function formatDecimal(number) { return Number(number || 0).toFixed(2); }
+function formatCost(number) { return `$${Number(number || 0).toFixed(6)}`; }
 
 async function refreshRoutes() {
   await refreshResourceOptions();
@@ -585,9 +791,9 @@ function renderLogsMeta(response) { const truncated = Boolean(response.truncated
 function inlineStatus(message, kind) { return `<div class="inline-status ${escapeHTML(kind)}">${escapeHTML(message)}</div>`; }
 function formatBytes(value) { const bytes = Number(value) || 0; if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`; return `${(bytes / 1024 / 1024).toFixed(1)} MiB`; }
 
-async function loadConfig() { const result = document.querySelector("#config-result"); try { const response = await fetchJSON("/admin/config"); loadedConfigPath = response.path || ""; loadedConfigRaw = response.content || ""; loadedConfigRedacted = response.redacted_content || loadedConfigRaw; document.querySelector("#config-yaml").value = loadedConfigRedacted; document.querySelector("#config-diff").textContent = "Loaded redacted current config. Paste a complete config before updating."; result.textContent = pretty({ ok: true, path: response.path, redacted: loadedConfigRedacted !== loadedConfigRaw }); showToast("Loaded redacted current config."); } catch (error) { result.textContent = error.message; showToast("Load config failed."); } }
-async function submitConfig(path) { const body = document.querySelector("#config-yaml").value; const result = document.querySelector("#config-result"); try { const response = await fetchJSON(path, { method: "POST", headers: { "Content-Type": "application/x-yaml" }, body }); result.textContent = pretty(response); showToast(path.endsWith("update") ? "Config file updated. Click Apply current file to hot-reload safe changes." : "Config is valid."); } catch (error) { result.textContent = error.message; showToast("Config request failed."); } }
-function updateConfigWithConfirm() { const editor = document.querySelector("#config-yaml"); const result = document.querySelector("#config-result"); const nextConfig = editor.value; if (!nextConfig.trim()) { result.textContent = "Config body is empty."; showToast("Config body is empty."); return; } if (nextConfig.includes("<redacted>")) { result.textContent = "Config contains <redacted>. Paste a complete config before updating."; showToast("Cannot update redacted config."); return; } if (!loadedConfigRaw) { document.querySelector("#config-diff").textContent = "No loaded baseline. Click Load current first for a meaningful diff preview."; } else { const diff = renderConfigDiff(loadedConfigRaw, nextConfig); document.querySelector("#config-diff").innerHTML = diff || "No changes from loaded config."; } const target = loadedConfigPath || "the startup config path"; if (!window.confirm(`Update ${target}?\n\nThis overwrites the startup config file after validation.`)) { result.textContent = "Config update cancelled."; return; } submitConfig("/admin/config/update"); }
+async function loadConfig() { const result = document.querySelector("#config-result"); try { const response = await fetchJSON("/admin/config"); loadedConfigRevision = response.revision || ""; loadedConfigRedacted = response.redacted_content || ""; document.querySelector("#config-inspect").textContent = response.config_ready ? loadedConfigRedacted : "Config path is not configured."; result.textContent = pretty({ config_ready: response.config_ready, revision: response.revision, checksum: response.checksum }); showToast(response.config_ready ? "Loaded redacted current config." : "Config path is not configured."); } catch (error) { result.textContent = error.message; showToast("Load config failed."); } }
+async function submitConfig(path) { const editor = document.querySelector("#config-yaml"); const body = editor.value; const result = document.querySelector("#config-result"); const headers = { "Content-Type": "application/x-yaml" }; if (path.endsWith("update")) headers["If-Match"] = loadedConfigRevision; try { const response = await fetchJSON(path, { method: "POST", headers, body }); result.textContent = pretty(response); if (path.endsWith("update")) { loadedConfigRevision = response.revision || loadedConfigRevision; configDraftDirty = false; editor.value = ""; showToast("Config file updated. Click Apply current file to hot-reload safe changes."); loadConfig(); } else showToast("Config is valid."); } catch (error) { result.textContent = error.message; if (error.status === 409) showToast("Config changed on disk. Draft preserved; inspect current config and retry or force explicitly."); else showToast("Config request failed."); } }
+function updateConfigWithConfirm(force = false) { const editor = document.querySelector("#config-yaml"); const result = document.querySelector("#config-result"); const nextConfig = editor.value; if (!nextConfig.trim()) { result.textContent = "Config body is empty."; showToast("Config body is empty."); return; } if (nextConfig.includes("<redacted>")) { result.textContent = "Config contains <redacted>. Paste a complete config before updating."; showToast("Cannot update redacted config."); return; } document.querySelector("#config-diff").innerHTML = renderConfigDiff(loadedConfigRedacted, nextConfig) || "No visible changes from the redacted current config."; if (!window.confirm("Update the startup config file?\n\nThis overwrites it after validation and does not apply it.")) { result.textContent = "Config update cancelled."; return; } if (force) loadedConfigRevision = "*"; submitConfig("/admin/config/update"); }
 async function applyConfigWithConfirm() { const result = document.querySelector("#config-result"); if (!window.confirm("Apply the current startup config file now?")) { if (result) result.textContent = "Config apply cancelled."; return; } try { const response = await fetchJSON("/admin/config/apply", { method: "POST" }); if (result) result.textContent = pretty(response); showToast(response.restart_required ? `Restart required: ${response.reason || "listener changed"}` : "Config applied."); loadConfigHistory(); } catch (error) { if (result) result.textContent = error.message; showToast("Apply config failed."); } }
 async function loadConfigHistory() { const target = document.querySelector("#config-history"); try { const response = await fetchJSON("/admin/config/history"); const items = response.items || []; target.innerHTML = items.length === 0 ? emptyState("No config history yet.") : renderHistoryTable(items); showToast("Config history loaded."); } catch (error) { target.innerHTML = errorBlock(error.message); showToast("Load config history failed."); } }
 function renderHistoryTable(items) { return `<table><thead><tr><th>ID</th><th>Created</th><th>Reason</th><th>Checksum</th><th>Action</th></tr></thead><tbody>${items.map((item) => `<tr><td><code>${escapeHTML(item.id || "")}</code></td><td>${escapeHTML(item.created_at || "")}</td><td>${escapeHTML(item.reason || "")}</td><td><code>${escapeHTML((item.checksum || "").slice(0, 12))}</code></td><td><button class="small" data-history-diff-id="${escapeHTML(item.id || "")}">Diff</button> <button class="small" data-history-id="${escapeHTML(item.id || "")}">Rollback</button></td></tr>`).join("")}</tbody></table>`; }
@@ -737,11 +943,25 @@ function bindEvents() {
     if (checkButton) { testProviderFromList(checkButton.dataset.providerCheck, checkButton.dataset.providerCheckProtocol); }
   });
   document.querySelector("#refresh-clients").addEventListener("click", refreshClients);
+  document.querySelector("#client-days").addEventListener("click", (event) => { const button = event.target.closest("button[data-client-days]"); if (!button) return; clientMetricsDays = Number(button.dataset.clientDays); refreshClients(); });
   document.querySelector("#new-client").addEventListener("click", () => fillClientForm());
   document.querySelector("#close-client-modal").addEventListener("click", closeClientModal);
   document.querySelector("#save-client").addEventListener("click", saveClient);
   document.querySelector("#delete-client").addEventListener("click", deleteClient);
-  document.querySelector("#clients-table").addEventListener("click", (event) => { const button = event.target.closest("button[data-client-edit]"); if (button) { fillClientForm(JSON.parse(button.dataset.clientEdit)); return; } const row = event.target.closest("tr[data-client]"); if (row) fillClientForm(JSON.parse(row.dataset.client)); });
+  document.querySelector("#save-client-binding").addEventListener("click", saveClientBinding);
+  document.querySelector("#client-bindings-list").addEventListener("click", (event) => {
+    const edit = event.target.closest("button[data-binding-edit]");
+    if (edit) {
+      const binding = JSON.parse(edit.dataset.bindingEdit);
+      document.querySelector("#binding-inbound").value = binding.inbound || "";
+      document.querySelector("#binding-tag").value = binding.tag || "";
+      return;
+    }
+    const remove = event.target.closest("button[data-binding-delete-inbound]");
+    if (remove) deleteClientBinding(remove.dataset.bindingDeleteInbound, remove.dataset.bindingDeleteRef);
+  });
+  document.querySelector("#clients-table").addEventListener("click", (event) => { const button = event.target.closest("button[data-client-edit]"); if (button) { event.stopPropagation(); fillClientForm(JSON.parse(button.dataset.clientEdit)); return; } const row = event.target.closest("tr[data-client-detail-name]"); if (row) openClientDetail(row.dataset.clientDetailName); });
+  document.querySelector("#client-detail").addEventListener("click", (event) => { if (event.target.closest("[data-client-detail-close]")) { closeClientDetail(); return; } const button = event.target.closest("button[data-client-heatmap-metric]"); if (button && activeClientDetail) { clientHeatmapMetric = button.dataset.clientHeatmapMetric; renderClientDetail(activeClientDetail); } });
   document.querySelector("#refresh-routes").addEventListener("click", refreshRoutes);
   document.querySelector("#new-route").addEventListener("click", () => fillRouteForm());
   document.querySelector("#close-route-modal").addEventListener("click", closeRouteModal);
@@ -754,6 +974,8 @@ function bindEvents() {
   document.querySelector("#refresh-quota").addEventListener("click", refreshQuota);
   document.querySelector("#refresh-latency").addEventListener("click", refreshLatency);
   document.querySelector("#refresh-logs").addEventListener("click", refreshLogs);
+  document.querySelector("#config-yaml").addEventListener("input", () => { configDraftDirty = Boolean(document.querySelector("#config-yaml").value); });
+  window.addEventListener("beforeunload", (event) => { if (!configDraftDirty) return; event.preventDefault(); event.returnValue = ""; });
   document.querySelector("#load-config").addEventListener("click", loadConfig);
   document.querySelector("#validate-config").addEventListener("click", () => submitConfig("/admin/config/validate"));
   document.querySelector("#update-config").addEventListener("click", updateConfigWithConfirm);

@@ -1,10 +1,12 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 type Config struct {
 	Server     ServerConfig     `yaml:"server"`
 	Listeners  []ListenerSpec   `yaml:"listeners"`
+	Clients    []ClientSpec     `yaml:"clients"`
 	Inbounds   []InboundSpec    `yaml:"inbounds"`
 	Routing    RoutingConfig    `yaml:"routing"`
 	Outbounds  []OutboundSpec   `yaml:"outbounds"`
@@ -62,8 +65,12 @@ type ListenerSpec struct {
 type ClientSpec struct {
 	Name  string            `yaml:"name"`
 	Token string            `yaml:"token"`
-	Tag   string            `yaml:"tag"`
 	Quota ClientQuotaConfig `yaml:"quota" json:"quota"`
+}
+
+type ClientBindingSpec struct {
+	Ref string `yaml:"ref" json:"ref"`
+	Tag string `yaml:"tag" json:"tag"`
 }
 
 type ClientQuotaConfig struct {
@@ -73,8 +80,31 @@ type ClientQuotaConfig struct {
 
 type QuotaWindowConfig struct {
 	Name        string        `yaml:"name" json:"name"`
+	Type        string        `yaml:"type" json:"type"`
 	Duration    DurationValue `yaml:"duration" json:"duration"`
-	MaxRequests int           `yaml:"max_requests" json:"max_requests"`
+	MaxRequests int           `yaml:"max_requests,omitempty" json:"max_requests,omitempty"`
+	MaxTokens   int           `yaml:"max_tokens,omitempty" json:"max_tokens,omitempty"`
+	MaxCostUSD  json.Number   `yaml:"max_cost_usd,omitempty" json:"max_cost_usd,omitempty"`
+}
+
+func (w *QuotaWindowConfig) UnmarshalYAML(node *yaml.Node) error {
+	type rawWindow QuotaWindowConfig
+	var raw struct {
+		Name        string        `yaml:"name"`
+		Type        string        `yaml:"type"`
+		Duration    DurationValue `yaml:"duration"`
+		MaxRequests int           `yaml:"max_requests"`
+		MaxTokens   int           `yaml:"max_tokens"`
+		MaxCostUSD  interface{}   `yaml:"max_cost_usd"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	*w = QuotaWindowConfig{Name: raw.Name, Type: raw.Type, Duration: raw.Duration, MaxRequests: raw.MaxRequests, MaxTokens: raw.MaxTokens}
+	if raw.MaxCostUSD != nil {
+		w.MaxCostUSD = json.Number(fmt.Sprint(raw.MaxCostUSD))
+	}
+	return nil
 }
 
 type OutboundQuotaWindowConfig struct {
@@ -109,10 +139,10 @@ type QuotaResetScheduleConfig struct {
 }
 
 type InboundSpec struct {
-	Name     string       `yaml:"name"`
-	Protocol string       `yaml:"protocol"`
-	Path     string       `yaml:"path"`
-	Clients  []ClientSpec `yaml:"clients"`
+	Name     string              `yaml:"name"`
+	Protocol string              `yaml:"protocol"`
+	Path     string              `yaml:"path"`
+	Clients  []ClientBindingSpec `yaml:"clients"`
 }
 
 type RoutingRule struct {
@@ -275,9 +305,33 @@ func WriteValidatedFile(path string, data []byte) error {
 }
 
 func ParseBytes(data []byte) (Config, error) {
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
 		return Config{}, fmt.Errorf("unmarshal config: %w", err)
+	}
+
+	format, err := detectClientConfigFormat(&document)
+	if err != nil {
+		return Config{}, err
+	}
+
+	var cfg Config
+	if err := document.Decode(&cfg); err != nil {
+		return Config{}, fmt.Errorf("unmarshal config: %w", err)
+	}
+	if format == clientConfigLegacy {
+		var legacy legacyConfig
+		if err := document.Decode(&legacy); err != nil {
+			return Config{}, fmt.Errorf("unmarshal config: %w", err)
+		}
+		for inboundIndex := range cfg.Inbounds {
+			legacyClients := legacy.Inbounds[inboundIndex].Clients
+			cfg.Inbounds[inboundIndex].Clients = make([]ClientBindingSpec, 0, len(legacyClients))
+			for _, client := range legacyClients {
+				cfg.Clients = append(cfg.Clients, ClientSpec{Name: client.Name, Token: client.Token, Quota: client.Quota})
+				cfg.Inbounds[inboundIndex].Clients = append(cfg.Inbounds[inboundIndex].Clients, ClientBindingSpec{Ref: client.Name, Tag: client.Tag})
+			}
+		}
 	}
 	cfg.applyDefaults()
 
@@ -286,6 +340,82 @@ func ParseBytes(data []byte) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+type clientConfigFormat int
+
+const (
+	clientConfigCanonical clientConfigFormat = iota
+	clientConfigLegacy
+)
+
+type legacyConfig struct {
+	Inbounds []legacyInboundSpec `yaml:"inbounds"`
+}
+
+type legacyInboundSpec struct {
+	Name     string             `yaml:"name"`
+	Protocol string             `yaml:"protocol"`
+	Path     string             `yaml:"path"`
+	Clients  []legacyClientSpec `yaml:"clients"`
+}
+
+type legacyClientSpec struct {
+	Name  string            `yaml:"name"`
+	Token string            `yaml:"token"`
+	Tag   string            `yaml:"tag"`
+	Quota ClientQuotaConfig `yaml:"quota"`
+}
+
+func detectClientConfigFormat(document *yaml.Node) (clientConfigFormat, error) {
+	root := document
+	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return clientConfigCanonical, nil
+	}
+
+	hasTopLevelClients := mappingValue(root, "clients") != nil
+	hasLegacyBindings := false
+	hasCanonicalBindings := false
+	inbounds := mappingValue(root, "inbounds")
+	if inbounds != nil && inbounds.Kind == yaml.SequenceNode {
+		for _, inbound := range inbounds.Content {
+			bindings := mappingValue(inbound, "clients")
+			if bindings == nil || bindings.Kind != yaml.SequenceNode {
+				continue
+			}
+			for _, binding := range bindings.Content {
+				if mappingValue(binding, "ref") != nil {
+					hasCanonicalBindings = true
+				}
+				if mappingValue(binding, "name") != nil || mappingValue(binding, "token") != nil || mappingValue(binding, "quota") != nil {
+					hasLegacyBindings = true
+				}
+			}
+		}
+	}
+
+	if hasLegacyBindings && (hasTopLevelClients || hasCanonicalBindings) {
+		return clientConfigCanonical, fmt.Errorf("mixed canonical and legacy client configuration is not supported")
+	}
+	if hasLegacyBindings {
+		return clientConfigLegacy, nil
+	}
+	return clientConfigCanonical, nil
+}
+
+func mappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		if node.Content[index].Value == key {
+			return node.Content[index+1]
+		}
+	}
+	return nil
 }
 
 func (c *Config) applyDefaults() {
@@ -307,6 +437,14 @@ func (c *Config) applyDefaults() {
 	}
 	if rotation.MaxTotalSizeMB == 0 {
 		rotation.MaxTotalSizeMB = 1024
+	}
+	for i := range c.Clients {
+		for j := range c.Clients[i].Quota.Windows {
+			window := &c.Clients[i].Quota.Windows[j]
+			if window.Type == "" {
+				window.Type = "requests"
+			}
+		}
 	}
 	for i := range c.Outbounds {
 		for j := range c.Outbounds[i].Quota.Windows {
@@ -331,8 +469,28 @@ func (c Config) Validate() error {
 	}
 
 	inputNames := make(map[string]struct{}, len(c.Inbounds))
-	tokens := make(map[string]string)
-	clientNames := make(map[string]string)
+	tokens := make(map[string]string, len(c.Clients))
+	clientNames := make(map[string]struct{}, len(c.Clients))
+	for index, client := range c.Clients {
+		if client.Name == "" {
+			return fmt.Errorf("clients[%d].name is required", index)
+		}
+		if client.Token == "" {
+			return fmt.Errorf("clients[%d].token is required", index)
+		}
+		if _, ok := clientNames[client.Name]; ok {
+			return fmt.Errorf("clients[%d].name duplicates %q", index, client.Name)
+		}
+		if owner, ok := tokens[client.Token]; ok {
+			return fmt.Errorf("clients[%d].token duplicates token used by %s", index, owner)
+		}
+		if err := validateClientQuota(index, client); err != nil {
+			return err
+		}
+		clientNames[client.Name] = struct{}{}
+		tokens[client.Token] = client.Name
+	}
+
 	for _, inbound := range c.Inbounds {
 		if inbound.Name == "" {
 			return fmt.Errorf("inbounds.name is required")
@@ -346,30 +504,21 @@ func (c Config) Validate() error {
 		if inbound.Path == "" {
 			return fmt.Errorf("inbounds.%s.path is required", inbound.Name)
 		}
-		if len(inbound.Clients) == 0 {
-			return fmt.Errorf("inbounds.%s.clients is required", inbound.Name)
-		}
-		for i, client := range inbound.Clients {
-			if client.Name == "" {
-				return fmt.Errorf("inbounds.%s.clients[%d].name is required", inbound.Name, i)
+		bindingRefs := make(map[string]struct{}, len(inbound.Clients))
+		for index, binding := range inbound.Clients {
+			if binding.Ref == "" {
+				return fmt.Errorf("inbounds.%s.clients[%d].ref is required", inbound.Name, index)
 			}
-			if client.Token == "" {
-				return fmt.Errorf("inbounds.%s.clients[%d].token is required", inbound.Name, i)
+			if binding.Tag == "" {
+				return fmt.Errorf("inbounds.%s.clients[%d].tag is required", inbound.Name, index)
 			}
-			if client.Tag == "" {
-				return fmt.Errorf("inbounds.%s.clients[%d].tag is required", inbound.Name, i)
+			if _, ok := clientNames[binding.Ref]; !ok {
+				return fmt.Errorf("inbounds.%s.clients[%d].ref %q not found in clients", inbound.Name, index, binding.Ref)
 			}
-			if owner, ok := tokens[client.Token]; ok {
-				return fmt.Errorf("inbounds.%s.clients[%d].token duplicates token used by %s", inbound.Name, i, owner)
+			if _, ok := bindingRefs[binding.Ref]; ok {
+				return fmt.Errorf("inbounds.%s.clients[%d].ref duplicates %q", inbound.Name, index, binding.Ref)
 			}
-			if owner, ok := clientNames[client.Name]; ok {
-				return fmt.Errorf("inbounds.%s.clients[%d].name duplicates client name used by %s", inbound.Name, i, owner)
-			}
-			if err := validateClientQuota(inbound.Name, i, client); err != nil {
-				return err
-			}
-			tokens[client.Token] = inbound.Name
-			clientNames[client.Name] = inbound.Name
+			bindingRefs[binding.Ref] = struct{}{}
 		}
 		inputNames[inbound.Name] = struct{}{}
 	}
@@ -572,7 +721,7 @@ func validateAdmin(cfg AdminConfig, clientTokens map[string]string, accounting A
 		return fmt.Errorf("admin.token is required when admin.enabled=true")
 	}
 	if owner, ok := clientTokens[cfg.Token]; ok {
-		return fmt.Errorf("admin.token duplicates inbound client token used by %s", owner)
+		return fmt.Errorf("admin.token duplicates client token used by %s", owner)
 	}
 	if accounting.AdminToken != "" && cfg.Token == accounting.AdminToken {
 		return fmt.Errorf("admin.token must be different from accounting.admin_token")
@@ -595,12 +744,12 @@ func validateGovernance(cfg GovernanceConfig) error {
 	return nil
 }
 
-func validateClientQuota(inboundName string, index int, client ClientSpec) error {
+func validateClientQuota(index int, client ClientSpec) error {
 	quota := client.Quota
 	if !quota.Enabled {
 		return nil
 	}
-	return validateQuotaWindows(fmt.Sprintf("inbounds.%s.clients[%d].quota", inboundName, index), quota.Windows)
+	return validateQuotaWindows(fmt.Sprintf("clients[%d].quota", index), quota.Windows)
 }
 
 func validateOutboundModels(outbound OutboundSpec) error {
@@ -829,21 +978,95 @@ func validateQuotaWindows(prefix string, windows []QuotaWindowConfig) error {
 	}
 	seen := make(map[string]struct{}, len(windows))
 	for i, window := range windows {
+		windowPrefix := fmt.Sprintf("%s.windows[%d]", prefix, i)
 		if window.Name == "" {
-			return fmt.Errorf("%s.windows[%d].name is required", prefix, i)
+			return fmt.Errorf("%s.name is required", windowPrefix)
 		}
 		if _, ok := seen[window.Name]; ok {
-			return fmt.Errorf("%s.windows[%d].name duplicates %q", prefix, i, window.Name)
+			return fmt.Errorf("%s.name duplicates %q", windowPrefix, window.Name)
 		}
 		seen[window.Name] = struct{}{}
 		if window.Duration.Duration() <= 0 {
-			return fmt.Errorf("%s.windows[%d].duration must be a positive duration", prefix, i)
+			return fmt.Errorf("%s.duration must be a positive duration", windowPrefix)
 		}
-		if window.MaxRequests <= 0 {
-			return fmt.Errorf("%s.windows[%d].max_requests must be greater than 0", prefix, i)
+		switch window.Type {
+		case "requests":
+			if window.MaxRequests <= 0 {
+				return fmt.Errorf("%s.max_requests must be greater than 0", windowPrefix)
+			}
+			if window.MaxTokens != 0 || window.MaxCostUSD != "" {
+				return fmt.Errorf("%s type=requests only supports max_requests", windowPrefix)
+			}
+		case "tokens":
+			if window.MaxTokens <= 0 {
+				return fmt.Errorf("%s.max_tokens must be greater than 0", windowPrefix)
+			}
+			if window.MaxRequests != 0 || window.MaxCostUSD != "" {
+				return fmt.Errorf("%s type=tokens only supports max_tokens", windowPrefix)
+			}
+		case "cost":
+			if window.MaxRequests != 0 || window.MaxTokens != 0 {
+				return fmt.Errorf("%s type=cost only supports max_cost_usd", windowPrefix)
+			}
+			if _, err := costUSDMicro(window.MaxCostUSD); err != nil {
+				return fmt.Errorf("%s.max_cost_usd %v", windowPrefix, err)
+			}
+		default:
+			return fmt.Errorf("%s.type %q is unsupported", windowPrefix, window.Type)
 		}
 	}
 	return nil
+}
+
+func (w QuotaWindowConfig) MaxCostMicroUSD() int64 {
+	value, _ := costUSDMicro(w.MaxCostUSD)
+	return value
+}
+
+func costUSDMicro(value json.Number) (int64, error) {
+	text := string(value)
+	if text == "" {
+		return 0, fmt.Errorf("must be greater than 0")
+	}
+	if strings.HasPrefix(text, "+") || strings.ContainsAny(text, "eE") {
+		return 0, fmt.Errorf("must be a positive decimal with at most 6 fractional digits")
+	}
+	parts := strings.Split(text, ".")
+	if len(parts) > 2 || parts[0] == "" || strings.HasPrefix(parts[0], "-") {
+		return 0, fmt.Errorf("must be a positive decimal with at most 6 fractional digits")
+	}
+	if len(parts) == 2 && len(parts[1]) > 6 {
+		return 0, fmt.Errorf("must have at most 6 fractional digits")
+	}
+	whole, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("must be a positive decimal with at most 6 fractional digits")
+	}
+	fraction := ""
+	if len(parts) == 2 {
+		fraction = parts[1]
+		if fraction == "" {
+			return 0, fmt.Errorf("must be a positive decimal with at most 6 fractional digits")
+		}
+	}
+	for len(fraction) < 6 {
+		fraction += "0"
+	}
+	fractionMicro := int64(0)
+	if fraction != "" {
+		fractionMicro, err = strconv.ParseInt(fraction, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("must be a positive decimal with at most 6 fractional digits")
+		}
+	}
+	if whole > (int64(^uint64(0)>>1)-fractionMicro)/1_000_000 {
+		return 0, fmt.Errorf("is too large")
+	}
+	micro := whole*1_000_000 + fractionMicro
+	if micro <= 0 {
+		return 0, fmt.Errorf("must be greater than 0")
+	}
+	return micro, nil
 }
 
 func validateAccountingLocalFile(cfg AccountingLocalFileConfig) error {
