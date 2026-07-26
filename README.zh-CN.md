@@ -138,76 +138,57 @@ configs/
 
 ## 快速开始
 
-### 1. 准备配置
+### 1. 推荐安装 SyrogoConsole 套件
 
-从示例配置复制一份本地配置：
+Syrogo 支持直接编辑 YAML；日常配置、Provider、Client、Route、Usage、Logs 和历史回滚更推荐使用官方独立管理控制台 SyrogoConsole。Linux + `systemd` 主机可直接运行一体化安装器：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh | sudo bash
+```
+
+在空主机上，它会安装同版本 Core 与 Console；已有健康 Core 时会直接复用，不升级、不重启、不改配置；遇到残缺或不健康 Core 会停止。Console 默认监听 `127.0.0.1:23233`，Core 默认监听 `127.0.0.1:23234`。
+
+固定相同版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh \
+  | sudo bash -s -- --version v0.16.3
+```
+
+完整的新主机、已有 Core、`--console-only`、升级、SSH tunnel 和 TLS 边界见 [`docs/deploy.zh-CN.md`](./docs/deploy.zh-CN.md)。
+
+### 2. 手工管理 Core 配置
+
+如果不使用 Console，可继续直接管理 YAML：
 
 ```bash
 cp configs/config.example.yaml configs/config.yaml
+make run
 ```
 
-然后把 `configs/config.yaml` 中的 token、endpoint、auth_token 改成你本地可用的真实值。
+把 token、endpoint 和 auth_token 替换为真实值。顶层 `clients[]` 负责稳定身份与凭据；`inbounds[].clients[]` binding 的 `ref` 指向 Client name，`tag` 是路由身份。轮换 token 时保持 Client `name` 不变，可维持 Usage 与 quota 连续性。
 
-顶层 `clients[]` 负责稳定身份与凭据，即 `name`、`token` 和可选 `quota`。每个 `inbounds[].clients[]` 条目只是一条 binding：`ref` 指向顶层 Client name，`tag` 是请求从该 Inbound 进入时使用的路由身份。轮换 token 时保持 Client `name` 不变，Usage 与 quota 就会跨全部 bindings 保持全局连续。
+当前实现不会自动读取 `.env` 或展开 `${VAR}`，残留占位符会作为普通字符串使用。
 
-注意：当前实现不会自动读取 `.env`，也不会自动展开 `${VAR}`。如果配置文件里保留占位符字符串，它会被原样读入。
-
-### 2. 选择监听与入口
-
-当前既支持单监听，也支持多监听：
-
-- `server.listen`：单监听
-- `listeners[]`：多监听
-
-使用 `listeners[]` 时，可以把不同入口挂到不同端口，按场景暴露不同协议。
-
-### 3. 从 GitHub Releases 下载
-
-如果你不想从源码构建，可以直接从 GitHub Releases 下载预编译压缩包。
-
-当前计划提供的发布制品平台：
-- Linux amd64 / arm64
-- macOS amd64 / arm64
-
-下载后解压，直接运行其中的 `syrogo` 二进制即可。
-
-Syrogo 现在提供统一安装入口，同时支持本地执行和远程安装：
+只安装 Core 时仍可使用 Core installer：
 
 ```bash
-sudo bash ./scripts/install.sh
-sudo bash ./scripts/install.sh --version v0.1.0
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s --
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash
 ```
 
-如果不传 `--version` 或 `--archive`，安装器会自动解析 GitHub 上的 latest release。安装器默认使用 `/opt/syrogo/config/config.yaml` 作为配置路径，并创建 `/usr/local/bin/syrogo`，让普通 shell 可以直接执行 `syrogo run ...`；默认保留已安装配置，只有显式传 `--force-config` 才会覆盖。
+它默认保留 `/opt/syrogo/config/config.yaml`，仅在显式传入 `--force-config` 时覆盖。下载的 release archive 会校验 checksum，安装版本记录在 `/opt/syrogo/VERSION`。
 
-如果 GitHub release 下载较慢或不稳定，需要把代理传给安装器本身。只用代理包住第一段 `curl`，不会影响 `sudo bash` 内部下载 release 包的那次请求。网络特别慢时，可以调整 `SYROGO_INSTALL_CONNECT_TIMEOUT`、`SYROGO_INSTALL_MAX_TIME`、`SYROGO_INSTALL_RETRY`、`SYROGO_INSTALL_LOW_SPEED_LIMIT` 和 `SYROGO_INSTALL_LOW_SPEED_TIME`；代理非常慢时可设 `SYROGO_INSTALL_LOW_SPEED_LIMIT=1`：
+### 3. 选择监听与入口
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
-  | sudo bash -s -- --proxy http://127.0.0.1:7890
+当前既支持 `server.listen` 单监听，也支持 `listeners[]` 多监听。使用 `listeners[]` 时，可把不同入口挂到不同端口，按场景暴露不同协议。
 
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
-  | sudo SYROGO_INSTALL_PROXY=http://127.0.0.1:7890 bash -s --
-
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
-  | sudo SYROGO_INSTALL_PROXY=http://127.0.0.1:7890 SYROGO_INSTALL_CONNECT_TIMEOUT=120 SYROGO_INSTALL_MAX_TIME=1800 SYROGO_INSTALL_RETRY=10 SYROGO_INSTALL_LOW_SPEED_LIMIT=1 bash -s --
-```
-
-完整部署示例请见 [`docs/deploy.zh-CN.md`](./docs/deploy.zh-CN.md)。
-
-当前项目风险与建议下一步请见 [`docs/risk.zh-CN.md`](./docs/risk.zh-CN.md)。
-
-### 4. 启动服务
-
-优先使用：
+### 4. 本地开发启动
 
 ```bash
 make run
 ```
 
-如果只想做最小本地验证，也可以把某个 route 指到 `mock` outbound。
+若只需最小验证，可把 route 指向 `mock` outbound。当前项目风险与建议下一步见 [`docs/risk.zh-CN.md`](./docs/risk.zh-CN.md)。
 
 ### 5. 检查健康状态
 
@@ -547,13 +528,13 @@ curl http://127.0.0.1:23234/stats/latency/summary \
 
 Timeline 响应包含请求元信息、HTTP status、总耗时，以及 `route_plan`、`provider_dispatch`、`upstream_round_trip`、`upstream_read`、`upstream_stream_read`、`egress_write` 等阶段 span。Summary 响应会对最近请求的总耗时和各阶段 span 聚合输出 `count`、`avg_ms`、`p50_ms`、`p95_ms`、`p99_ms`、`max_ms`。配置 outbound proxy 时，`upstream_round_trip` 统计的是 Syrogo 到代理并收到响应头的耗时；代理到真实上游的内部耗时会包含在这段等待中，除非代理自身额外暴露指标，否则 Syrogo 侧无法继续拆分。
 
-也可以打开内置 Admin UI，在浏览器中查看 health、usage、quota、latency、logs 和 config 操作：
+推荐使用独立 SyrogoConsole 访问这些 Admin API，在浏览器中查看 health、usage、quota、latency、logs 并管理配置。Console 默认地址为：
 
 ```text
-http://127.0.0.1:23234/admin/
+http://127.0.0.1:23233
 ```
 
-通过独立的 `admin.token` 开启 Admin UI。这个 token 必须与业务 inbound client token、`accounting.admin_token` 都不同，因为浏览器管理入口和模型流量是不同的权限边界：
+Core 仍通过独立的 `admin.token` 保护 Admin API。该 token 必须与业务 inbound client token、`accounting.admin_token` 不同，因为浏览器管理入口和模型流量属于不同权限边界：
 
 ```yaml
 admin:
@@ -573,9 +554,9 @@ admin:
 
 日志会在下一次写入将超过 `max_size_mb` 时轮转，并在本地自然日首次写入时按日轮转。历史文件使用 gzip 压缩，并按保留天数、文件数量和总磁盘占用清理；当前日志文件永不删除。`/admin/logs` 会自动查询当前文件和仍保留的归档。完整落在有界近期缓存内的查询（最近 5 分钟、最多 8 MiB）优先从内存返回；cursor、历史、覆盖不完整或需要分页的查询会自动回退文件，避免遗漏结果。状态筛选支持精确状态码以及 `4xx`、`5xx` 状态族。成功的 `/admin/logs` 自动轮询不会生成 `admin_audit` 日志。
 
-UI 只会把 Admin UI token 保存在浏览器 local storage 中，并使用 `/admin/overview`、`/admin/usage`、`/admin/quota`、`/admin/latency`、`/admin/latency/summary`、`/admin/logs`、`/admin/config`、`/admin/config/validate`、`/admin/config/update`、`/admin/config/apply`、`/admin/config/history`、`/admin/config/history/diff`、`/admin/config/rollback`、`/admin/config/clients`、`/admin/config/clients/metrics`、`/admin/config/client/usage`、`/admin/config/client-binding/upsert`、`/admin/config/client-binding/delete`、`/admin/debug/traces`、`/admin/debug/route-dry-run`、`/admin/debug/providers`。Provider 和 Client 保存/删除都会原子更新配置并立即热应用，不需要再点击 Apply。Client CRUD 只处理顶层 `name`、`token`、`quota`；binding 使用 `inbound`、`ref`、`tag` 独立管理。删除 Client 前必须先解除它在所有 Inbound 上的 bindings。Client name 是稳定的 quota/accounting identity：轮换 token 时保持 name 不变，可保留跨全部 bindings 的全局连续性；编辑已有 Client 时 token 留空或填 `<redacted>` 会保留原值。Client quota 会完整 round-trip。若变更或删除 binding 会让 `routing.rules[].from_tags` 引用的 tag 失去最后一个来源，操作会被拒绝，应先让其他 binding 提供该 tag。
+SyrogoConsole 只会把 Admin token 保存在浏览器 local storage 中，并通过同源 `/admin/*` 代理访问 Core Admin API。Provider 和 Client 保存/删除都会原子更新配置并立即热应用，不需要再点击 Apply。Client CRUD 只处理顶层 `name`、`token`、`quota`；binding 使用 `inbound`、`ref`、`tag` 独立管理。删除 Client 前必须先解除它在所有 Inbound 上的 bindings。Client name 是稳定的 quota/accounting identity：轮换 token 时保持 name 不变，可保留跨全部 bindings 的全局连续性；编辑已有 Client 时 token 留空或填 `<redacted>` 会保留原值。Client quota 会完整 round-trip。若变更或删除 binding 会让 `routing.rules[].from_tags` 引用的 tag 失去最后一个来源，操作会被拒绝，应先让其他 binding 提供该 tag。
 
-Clients 列表独立请求配置与 metrics，因此 metrics 失败只显示 warning，CRUD 仍可用。紧凑 **Usage** 是全量历史，**Frequency** 是所选最近 7/30/90 个 UTC 自然日。点击 Client 可查看原生 CSS Grid contribution heatmap 和 Requests/Tokens/Cost/Errors 每日聚合。日期范围采用 UTC 前闭后开（含 `start_date`、不含 `end_date`）；当前 UTC 日标为 `partial`，已知 coverage 之前的旧日期标为 `unknown`，不能当作零值。“Daily records”是每日聚合，不是逐请求审计。内置无依赖单页控制台仍提供 Usage、Debug、Logs、脱敏配置、History/Rollback 与安全审计能力。
+Clients 列表独立请求配置与 metrics，因此 metrics 失败只显示 warning，CRUD 仍可用。紧凑 **Usage** 是全量历史，**Frequency** 是所选最近 7/30/90 个 UTC 自然日。点击 Client 可查看 contribution heatmap 和 Requests/Tokens/Cost/Errors 每日聚合。日期范围采用 UTC 前闭后开（含 `start_date`、不含 `end_date`）；当前 UTC 日标为 `partial`，已知 coverage 之前的旧日期标为 `unknown`，不能当作零值。“Daily records”是每日聚合，不是逐请求审计。
 
 ### 15. 校验配置变更
 

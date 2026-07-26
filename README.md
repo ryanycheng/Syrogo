@@ -138,76 +138,57 @@ configs/
 
 ## Quick start
 
-### 1. Prepare config
+### 1. Recommended SyrogoConsole suite installation
 
-Copy the example config to a local config file:
+Syrogo supports direct YAML editing. For day-to-day configuration, Provider, Client, Route, Usage, Logs, and history/rollback operations, use the official standalone SyrogoConsole. On Linux + `systemd`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh | sudo bash
+```
+
+On an empty host, it installs matching Core and Console versions. It reuses an existing healthy Core without upgrading, restarting, or changing its config, and fails closed for an incomplete or unhealthy Core. Console binds to `127.0.0.1:23233` and Core to `127.0.0.1:23234` by default.
+
+Pin both to the same version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh \
+  | sudo bash -s -- --version v0.16.3
+```
+
+See [`docs/deploy.md`](./docs/deploy.md) for new-host, existing-Core, `--console-only`, upgrade, SSH tunnel, and TLS guidance.
+
+### 2. Manage Core YAML manually
+
+Without Console, continue managing YAML directly:
 
 ```bash
 cp configs/config.example.yaml configs/config.yaml
+make run
 ```
 
-Then replace the token, endpoint, and auth_token fields in `configs/config.yaml` with real values available in your environment.
+Replace token, endpoint, and auth_token values. Top-level `clients[]` own stable identity and credentials; each `inbounds[].clients[]` binding uses `ref` for the Client name and `tag` for routing. Keep Client `name` stable during token rotation to preserve Usage and quota continuity.
 
-Top-level `clients[]` own stable identity and credentials: `name`, `token`, and optional `quota`. Each `inbounds[].clients[]` item is only a binding with `ref` (the top-level Client name) and `tag` (the routing identity for requests entering through that Inbound). Keep the Client `name` unchanged when rotating its token so global usage and quota continuity is preserved across all bindings.
+The implementation does not automatically read `.env` or expand `${VAR}`. Remaining placeholders are treated as literal strings.
 
-Note: the current implementation does not automatically read `.env` and does not expand `${VAR}`. If placeholder strings remain in the config file, they will be read as-is.
-
-### 2. Choose listeners and inbounds
-
-Both single-listener and multi-listener setups are supported:
-
-- `server.listen`: single listener
-- `listeners[]`: multiple listeners
-
-With `listeners[]`, you can expose different inbound protocols on different ports for different scenarios.
-
-### 3. Install from GitHub Releases
-
-If you do not want to build from source, you can download a prebuilt archive from GitHub Releases.
-
-Current release artifacts are planned for:
-- Linux amd64 / arm64
-- macOS amd64 / arm64
-
-After downloading a release archive, extract it and run the `syrogo` binary directly.
-
-Syrogo also ships with one installer entrypoint that works both locally and remotely:
+The standalone Core installer remains available:
 
 ```bash
-sudo bash ./scripts/install.sh
-sudo bash ./scripts/install.sh --version v0.1.0
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s --
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash
 ```
 
-Without `--version` or `--archive`, the installer resolves the latest GitHub release automatically. It uses `/opt/syrogo/config/config.yaml` as the default config path, creates `/usr/local/bin/syrogo` so `syrogo run ...` is available from normal shells, and keeps the installed config unless you pass `--force-config`.
+It preserves `/opt/syrogo/config/config.yaml` unless `--force-config` is explicit, verifies downloaded release checksums, and records the installed version in `/opt/syrogo/VERSION`.
 
-If GitHub release downloads are slow or unreliable, pass a proxy to the installer itself. Wrapping only the first `curl` does not affect the release archive download that runs inside `sudo bash`. For very slow links, tune `SYROGO_INSTALL_CONNECT_TIMEOUT`, `SYROGO_INSTALL_MAX_TIME`, `SYROGO_INSTALL_RETRY`, `SYROGO_INSTALL_LOW_SPEED_LIMIT`, and `SYROGO_INSTALL_LOW_SPEED_TIME`; set `SYROGO_INSTALL_LOW_SPEED_LIMIT=1` for very slow proxies:
+### 3. Choose listeners and inbounds
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
-  | sudo bash -s -- --proxy http://127.0.0.1:7890
+Use `server.listen` for one listener or `listeners[]` for multiple listeners. Multiple listeners can expose different protocols on different ports.
 
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
-  | sudo SYROGO_INSTALL_PROXY=http://127.0.0.1:7890 bash -s --
-
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
-  | sudo SYROGO_INSTALL_PROXY=http://127.0.0.1:7890 SYROGO_INSTALL_CONNECT_TIMEOUT=120 SYROGO_INSTALL_MAX_TIME=1800 SYROGO_INSTALL_RETRY=10 SYROGO_INSTALL_LOW_SPEED_LIMIT=1 bash -s --
-```
-
-For complete deployment examples, see [`docs/deploy.md`](./docs/deploy.md).
-
-For current project risks and suggested next steps, see [`docs/risk.md`](./docs/risk.md).
-
-### 4. Start the service
-
-Prefer:
+### 4. Start local development
 
 ```bash
 make run
 ```
 
-If you only want the smallest local verification path, you can point a route to the `mock` outbound.
+Point a route to the `mock` outbound for the smallest local verification path. See [`docs/risk.md`](./docs/risk.md) for current project risks.
 
 ### 5. Check health
 
@@ -547,13 +528,13 @@ curl http://127.0.0.1:23234/stats/latency/summary \
 
 The timeline response includes request metadata, HTTP status, total duration, and spans such as `route_plan`, `provider_dispatch`, `upstream_round_trip`, `upstream_read`, `upstream_stream_read`, and `egress_write`. The summary response aggregates recent requests into `count`, `avg_ms`, `p50_ms`, `p95_ms`, `p99_ms`, and `max_ms` for total latency and each span. When an outbound uses a proxy, `upstream_round_trip` measures the Syrogo-to-proxy path until response headers arrive; proxy-to-upstream work is included in that wait unless the proxy exposes its own metrics.
 
-Open the built-in Admin UI for a lightweight browser view of health, usage, quota, latency, logs, and config operations:
+Use the standalone SyrogoConsole to access these Admin APIs in a browser for health, usage, quota, latency, logs, and config management. Console listens at:
 
 ```text
-http://127.0.0.1:23234/admin/
+http://127.0.0.1:23233
 ```
 
-Enable it with a dedicated `admin.token`. This token must be different from business inbound client tokens and from `accounting.admin_token`, because browser administration and model traffic are separate trust boundaries:
+Core protects the Admin API with a dedicated `admin.token`. This token must differ from business inbound client tokens and `accounting.admin_token`, because browser administration and model traffic are separate trust boundaries:
 
 ```yaml
 admin:
@@ -573,9 +554,9 @@ admin:
 
 Log files rotate before a write would exceed `max_size_mb` and at the first write on a new local calendar day. Historical files are compressed with gzip and cleaned by age, file count, and total disk usage; the active file is never removed. `/admin/logs` automatically searches the active file and retained archives. Queries fully covered by the bounded recent cache (last 5 minutes, up to 8 MiB) use memory; cursor, older, incomplete, or multi-page queries fall back to files so results are not omitted. Status filters accept exact codes and families such as `4xx` and `5xx`. Successful `/admin/logs` polling does not emit an `admin_audit` entry.
 
-The UI stores the Admin UI token only in browser local storage and uses `/admin/overview`, `/admin/usage`, `/admin/quota`, `/admin/latency`, `/admin/latency/summary`, `/admin/logs`, `/admin/config`, `/admin/config/validate`, `/admin/config/update`, `/admin/config/apply`, `/admin/config/history`, `/admin/config/history/diff`, `/admin/config/rollback`, `/admin/config/clients`, `/admin/config/clients/metrics`, `/admin/config/client/usage`, `/admin/config/client-binding/upsert`, `/admin/config/client-binding/delete`, `/admin/debug/traces`, `/admin/debug/route-dry-run`, and `/admin/debug/providers`. The Overview page shows request, error, fallback, latency, quota, provider health, recent governance event, and Admin self-check summaries. Provider and Client save/delete operations atomically update the config and hot-apply it, so no separate Apply click is needed. Client CRUD handles only top-level `name`, `token`, and `quota`; bindings are managed independently with `inbound`, `ref`, and `tag`. A bound Client must be unbound from every Inbound before deletion. Client names are stable quota/accounting identities: rotate a token without renaming the Client to preserve global continuity across all bindings; an empty or `<redacted>` token on an existing Client keeps its current token. Client quota objects round-trip in full. Changing or deleting a binding that supplies the last source of a tag referenced by `routing.rules[].from_tags` is rejected; another binding must supply that tag first.
+SyrogoConsole stores the Admin token only in browser local storage and reaches Core through its same-origin `/admin/*` proxy. Provider and Client save/delete operations atomically update and hot-apply config. Client CRUD handles top-level `name`, `token`, and `quota`; bindings are managed independently with `inbound`, `ref`, and `tag`. A bound Client must be unbound from every Inbound before deletion. Keep the stable Client name during token rotation to preserve quota/accounting continuity. Changing or deleting the final binding source of a tag referenced by `routing.rules[].from_tags` is rejected until another binding supplies that tag.
 
-The Clients list combines independent config and metrics requests, so CRUD remains available with a metrics warning if accounting metrics fail. Its compact **Usage** is all-time, while **Frequency** covers the selected recent 7/30/90 UTC calendar days. Inline Client detail shows a native CSS Grid contribution heatmap and daily aggregates for Requests, Tokens, Cost, and Errors. Date ranges are UTC and half-open (`start_date` inclusive, `end_date` exclusive); the current UTC day is `partial`, while legacy dates before known coverage are `unknown` rather than zero. “Daily records” are aggregates, not a per-request audit trail. Other Usage, Debug, Logs, redaction, History/Rollback, and audit behavior remains available through the embedded dependency-free single-page console.
+The Clients list keeps config and metrics requests independent, so CRUD remains available with a warning if metrics fail. **Usage** is all-time, while **Frequency** covers the selected recent 7/30/90 UTC calendar days. Client detail includes a contribution heatmap and daily Requests, Tokens, Cost, and Errors aggregates. Date ranges are half-open UTC ranges; the current UTC day is `partial`, and dates before known coverage are `unknown` rather than zero. “Daily records” are aggregates, not per-request audit records.
 
 ### 15. Validate config changes
 

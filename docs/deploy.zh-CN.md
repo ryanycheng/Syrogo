@@ -1,281 +1,151 @@
-# 部署 Syrogo
+# 部署 Syrogo 与 SyrogoConsole
 
 中文 | [English](./deploy.md)
 
-本文面向 Syrogo `v0.1.x` 基线版本，重点提供一条**最小可用**的安装与部署路径。
+Syrogo 支持直接编辑 YAML 配置；日常配置、Provider、Client、Route、观测和历史回滚更推荐使用官方 SyrogoConsole。官方 Linux 部署入口是 SyrogoConsole 一体化安装器，Core 自带 Web 不属于安装或推荐路径。
 
-覆盖内容包括：
-- 在 `/opt/syrogo` 下准备和初始化配置
-- Linux 本地与远程一键安装
-- 使用 `systemd` 托管
-- 用同一入口完成升级
-- 基础排障
+## 1. 默认拓扑
 
----
+```text
+Browser -> SyrogoConsole 127.0.0.1:23233
+                     /admin/* -> Syrogo Core 127.0.0.1:23234
+Model clients -----------------> Syrogo Core protocol inbounds
+```
 
-## 1. 默认配置路径
+Console Server 托管 SPA，并把同源 `/admin/*` 代理到 Core。Admin token 由浏览器发送；Console Server 不保存或注入 token。默认监听均为 loopback，不应直接暴露到公网。
 
-安装器默认使用这个配置路径：
+要求：Linux、`systemd`、root、`curl`、`bash`、`sha256sum`。
+
+## 2. 推荐：新主机一体化安装
+
+使用 Console 最新稳定版：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh | sudo bash
+```
+
+固定 Core 与 Console 的相同版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh \
+  | sudo bash -s -- --version v0.16.3
+```
+
+在完全空的新主机上，安装器会：
+
+1. 安装同版本 Syrogo Core 到 `/opt/syrogo`。
+2. 创建仅监听 `127.0.0.1:23234` 的安全 bootstrap 配置。
+3. 安装 SyrogoConsole 到 `/opt/syrogo-console`。
+4. 创建并启动 `syrogo.service` 与 `syrogo-console.service`。
+5. 输出用于首次登录 Console 的 Core Admin token。
+
+bootstrap 配置使用 `mock` outbound，不包含第三方 Provider key。登录 Console 后，再配置真实 Provider、Client 和 Route。
+
+## 3. 已经安装过 Syrogo Core
+
+直接运行同一条 Console installer。若默认位置存在健康 Core，安装器会复用它，不升级、不重启、不改写配置：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh | sudo bash
+```
+
+也可明确要求只安装 Console：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh \
+  | sudo bash -s -- --console-only
+```
+
+已有 Core 必须满足：
+
+- `/opt/syrogo/bin/syrogo`、`/opt/syrogo/config/config.yaml` 和 `syrogo.service` 完整存在。
+- `http://127.0.0.1:23234/healthz` 健康。
+- 配置已启用 `admin` 并设置你掌握的 Admin token。
+
+安装器遇到残缺或不健康 Core 会停止，不猜测、不覆盖。请先修复 Core，再重试；`--with-core` 也不会覆盖这类安装。
+
+## 4. 只安装和管理 Core
+
+需要完全手工管理 YAML 时，可继续使用 Core installer：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash
+```
+
+固定版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
+  | sudo bash -s -- --version v0.16.3
+```
+
+Core installer 默认保留 `/opt/syrogo/config/config.yaml`，只在显式传入 `--force-config` 时覆盖。release archive 会按同一 Release 的 checksum 校验，安装版本记录在 `/opt/syrogo/VERSION`，新配置权限为 `0600`。
+
+## 5. 访问 Console
+
+本机浏览器访问：
+
+```text
+http://127.0.0.1:23233
+```
+
+远程管理推荐 SSH tunnel：
+
+```bash
+ssh -L 23233:127.0.0.1:23233 user@server
+```
+
+然后在本机访问 `http://127.0.0.1:23233`。若必须跨主机长期提供管理入口，应在 Console 外层配置受信任的 TLS 反向代理和访问控制；不要直接公开明文 loopback 管理面，也不要把 Admin token 写入代理配置。
+
+## 6. 配置与验证
+
+Core 配置位于：
 
 ```text
 /opt/syrogo/config/config.yaml
 ```
 
-首次安装时，如果这个路径还不存在，安装器会自动拉取 `configs/config.example.yaml`：
-- 使用 `--version` 时，拉对应 release tag 下的样例
-- 使用 `--archive` 时，拉 `master` 上的样例
-- 不传 `--version` 和 `--archive` 时，解析 latest release 后仍从 `master` 拉样例
+可在 Console 中治理，也可手工编辑 YAML。手工修改后，使用 Console Apply 或 Admin API 热应用；listener 地址、listener 绑定及部分日志配置变化仍需要重启 Core。
 
-如果你想手工提前准备，也可以这样做：
-
-```bash
-sudo mkdir -p /opt/syrogo/config
-sudo cp configs/config.example.yaml /opt/syrogo/config/config.yaml
-```
-
-然后把占位值替换成你环境中的真实值。
-
-至少要核对这些部分：
-- `server.listen` 或 `listeners[]`
-- inbound client token
-- outbound `endpoint`
-- outbound `auth_token`
-- `from_tags -> to_tags` 路由规则
-
-注意：
-- 当前实现不会自动读取 `.env`
-- `${VAR}` 占位符不会自动展开
-- 如果配置里保留占位符字符串，它会被当作普通字符串直接使用
-
----
-
-## 2. Linux 一键安装
-
-Syrogo 提供了一个统一安装入口，面向 Linux + `systemd` 主机。
-
-### 本地执行
-
-在仓库目录下可执行以下任一方式：
-
-```bash
-sudo bash ./scripts/install.sh
-```
-
-```bash
-sudo bash ./scripts/install.sh --version v0.1.0
-```
-
-```bash
-sudo bash ./scripts/install.sh --archive ./syrogo_v0.1.0_linux_amd64.tar.gz
-```
-
-### 远程 `curl | bash`
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s --
-```
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0
-```
-
-### 覆盖默认配置路径
-
-如果你想从其他本地路径复制配置到 `/opt/syrogo/config/config.yaml`，也可以显式指定：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.0 --config /path/to/config.yaml
-```
-
-安装器会自动：
-- 安装到 `/opt/syrogo`
-- 把二进制安装到 `/opt/syrogo/bin/syrogo`
-- 创建 `/usr/local/bin/syrogo`，让普通 shell 可以直接使用 `syrogo` 命令
-- 安装 `syrogo.service` 到 `/etc/systemd/system/syrogo.service`
-- 启用并重启 `syrogo` 服务
-- 最后对 `http://127.0.0.1:23234/healthz` 做一次健康检查
-
-当前边界：
-- 仅支持 Linux
-- 依赖 `systemd`
-- 需要 root 权限
-- 不会替你自动生成可直接上线的生产配置
-- 不处理 TLS、nginx、Docker、Kubernetes
-
----
-
-## 3. 配置覆盖行为
-
-默认情况下，安装器会保留已安装配置：
-
-```text
-/opt/syrogo/config/config.yaml
-```
-
-这意味着：
-- 首次安装时，如果默认配置路径不存在，安装器会先自动初始化 `/opt/syrogo/config/config.yaml`
-- 使用 `--version` 时，初始化样例来自对应 release tag
-- 使用 `--archive` 或 latest-release 安装时，初始化样例来自 `master`
-- 后续升级默认复用已安装配置
-- 重复执行安装器时，不会覆盖已安装配置，除非你显式要求
-
-如果你确实要用其他本地路径覆盖已安装配置，可传 `--force-config`：
-
-```bash
-sudo bash ./scripts/install.sh --version v0.1.1 --config /path/to/config.yaml --force-config
-```
-
----
-
-## 4. 升级流程
-
-升级与首次安装使用同一条安装入口。
-
-示例：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh | sudo bash -s -- --version v0.1.1
-```
-
-或者：
-
-```bash
-sudo bash ./scripts/install.sh --version v0.1.1
-```
-
-一个最小升级流程如下：
-1. 只在需要时更新 `/opt/syrogo/config/config.yaml`
-2. 用新版本号重新执行安装器
-3. 验证 `/healthz` 和一条真实协议请求
-
----
-
-## 5. 手工启动服务
-
-如果你不走安装器，也可以继续用显式配置路径手工启动：
-
-```bash
-/opt/syrogo/bin/syrogo -config /opt/syrogo/config/config.yaml
-```
-
-如果是在服务器上做临时排查，也可以短时间开启开发日志：
-
-```bash
-/opt/syrogo/bin/syrogo -config /opt/syrogo/config/config.yaml -dev-log
-```
-
----
-
-## 6. 验证健康状态与路由
-
-先检查健康状态：
+检查服务：
 
 ```bash
 curl http://127.0.0.1:23234/healthz
+curl http://127.0.0.1:23233/healthz
+sudo systemctl status syrogo syrogo-console
+sudo journalctl -u syrogo -u syrogo-console -f
 ```
 
-然后再验证你实际暴露的协议入口之一。
+随后验证实际协议入口，例如 `POST /v1/chat/completions`、`POST /v1/responses` 或 `POST /v1/messages`。
 
-建议优先验证：
-- `POST /v1/chat/completions`
-- `POST /v1/responses`
-- `POST /v1/messages`
+## 7. 升级
 
-如果只想先走最小 smoke test，可以先把某条 route 指向 `mock` outbound。
-
----
-
-## 7. 使用 systemd 托管
-
-安装器会把 unit 渲染到：
-
-```text
-/etc/systemd/system/syrogo.service
-```
-
-常用命令：
+Core 与 Console 联合部署时使用相同 SemVer。先确认目标 Core Release 已发布，再执行对应版本的两个安装器。Console installer 会复用健康 Core，不负责升级既有 Core：
 
 ```bash
-sudo systemctl status syrogo
-sudo journalctl -u syrogo -f
-sudo systemctl restart syrogo
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/Syrogo/refs/heads/master/scripts/install.sh \
+  | sudo bash -s -- --version v0.16.3
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh \
+  | sudo bash -s -- --version v0.16.3 --console-only
 ```
 
----
+升级前备份 `/opt/syrogo/config/config.yaml`，升级后检查两个 `/healthz` 和一条真实模型请求。
 
 ## 8. 卸载
 
-如果要删除服务以及 `/opt/syrogo` 下的全部安装内容：
+只卸载 Console，不影响 Core：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh \
+  | sudo bash -s -- --uninstall
+```
+
+单独卸载 Core 会删除 `/opt/syrogo` 及其中配置：
 
 ```bash
 sudo bash ./scripts/install.sh --uninstall
 ```
 
-`--purge-config` 目前仅为了兼容保留；由于默认配置本来就在 `/opt/syrogo` 下面，卸载时不会再有额外效果。如果 `/usr/local/bin/syrogo` 是指向 `/opt/syrogo/bin/syrogo` 的软链接，安装器也会一起移除。
+## 9. 当前边界
 
----
-
-## 9. 反向代理与网络说明
-
-Syrogo 可以直接暴露，也可以放在反向代理后面。
-
-对 `v0.1.x`，建议保持简单：
-- 先监听内网端口
-- 需要时再通过 nginx 或其他网关对外暴露
-- 只对受信任客户端发放 token
-- 不要在常规生产流量上长期开启重调试模式
-
-如果前面有反向代理，要确保转发路径和监听端口与你配置的 inbound 路径一致。
-
----
-
-## 10. 常见排障
-
-### 安装脚本在启动前失败
-
-优先检查：
-- 当前主机是否是 Linux
-- 是否存在 `systemd`
-- 是否以 root 身份执行
-- `/opt/syrogo/config/config.yaml` 是否可创建或可写
-- release 压缩包路径或 tag 是否正确
-
-### 服务能启动，但请求失败
-
-优先检查：
-- inbound token 是否正确
-- outbound `endpoint` 是否正确
-- outbound `auth_token` 是否正确
-- route tag 是否命中
-- 目标上游是否可达
-
-### `/healthz` 正常，但模型调用失败
-
-这通常说明服务本身已经启动，但下面某一层有问题：
-- route 选择
-- outbound 鉴权
-- 上游兼容边界
-- 上游实际期待的请求形状
-
-### 我需要更多诊断信息
-
-可临时开启：
-
-- `-dev-log`
-
-排查结束后，关闭额外调试输出。
-
----
-
-## 11. 当前部署边界
-
-`v0.1.x` 当前还不覆盖：
-- Windows 部署
-- macOS 一键安装
-- Docker 镜像
-- Kubernetes manifests
-- Helm charts
-- Homebrew / apt 包
-- 签名、公证与 SBOM 流程
-
-当前目标是先提供一条小而清晰、容易验证、容易维护的二进制部署路径。
+当前官方安装路径仅覆盖 Linux + `systemd` 的 amd64/arm64 二进制部署，暂不提供 Windows/macOS 一键安装、Docker、Kubernetes、Helm、系统包、自动 TLS 或公网访问控制。
