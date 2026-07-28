@@ -31,6 +31,8 @@ type App struct {
 	outboundQuotaTracker *quota.Tracker
 	clientQuotaTracker   *quota.Tracker
 	quotaSnapshotStore   *quota.SnapshotStore
+	sessionStore         *sessions.Store
+	sessionReaper        *sessions.Reaper
 	cfg                  config.Config
 	configPath           string
 	reloadManager        *ReloadManager
@@ -76,6 +78,8 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 		outboundQuotaTracker: runtime.outboundQuotaTracker,
 		clientQuotaTracker:   runtime.clientQuotaTracker,
 		quotaSnapshotStore:   runtime.quotaSnapshotStore,
+		sessionStore:         sessionStore,
+		sessionReaper:        sessions.NewReaper(sessionStore),
 		cfg:                  cfg,
 		configPath:           opts.ConfigPath,
 	}
@@ -209,8 +213,13 @@ func (a *App) Close(ctx context.Context) error {
 		return nil
 	}
 	var err error
+	if closeErr := a.sessionReaper.Close(ctx); closeErr != nil {
+		err = closeErr
+	}
 	if a.dispatcher != nil {
-		err = a.dispatcher.Close(ctx)
+		if closeErr := a.dispatcher.Close(ctx); closeErr != nil && err == nil {
+			err = closeErr
+		}
 	}
 	if closeErr := a.quotaSnapshotStore.Close(ctx); closeErr != nil && err == nil {
 		err = closeErr

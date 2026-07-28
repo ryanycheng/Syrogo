@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
 )
@@ -475,6 +478,84 @@ func TestLaunchAgentInjectsClaudeHooksWithSettingsOverlay(t *testing.T) {
 		t.Fatalf("settings path %q still exists or stat error = %v, want removed", settingsPath, err)
 	}
 }
+func TestClaudeSessionReporterRetriesAndReregistersAfterNotFound(t *testing.T) {
+	var paths []string
+	registerCalls := 0
+	requestDone := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { requestDone <- struct{}{} }()
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/session/register":
+			registerCalls++
+			if registerCalls == 1 {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode register body: %v", err)
+			}
+			if body["heartbeat_capability"] != "heartbeat_v1" {
+				t.Errorf("heartbeat_capability = %#v, want heartbeat_v1", body["heartbeat_capability"])
+			}
+			if body["started_at"] != "2026-07-28T12:00:00Z" {
+				t.Errorf("started_at = %#v, want stable launch time", body["started_at"])
+			}
+		case "/session/heartbeat":
+			if registerCalls == 2 {
+				http.Error(w, "missing", http.StatusNotFound)
+				return
+			}
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	opts := launcherOptions{BaseURL: server.URL, Stderr: &bytes.Buffer{}}
+	plan := launchPlan{Command: "claude", Client: launcherClient{InboundName: "anthropic-entry", ClientName: "claude", Token: "token"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	ticks := make(chan time.Time)
+	done := make(chan struct{})
+	startedAt := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	go func() {
+		defer close(done)
+		runClaudeSessionReporter(ctx, opts, plan, "session-1", 42, startedAt, false, ticks)
+	}()
+
+	ticks <- time.Now()
+	<-requestDone
+	ticks <- time.Now()
+	<-requestDone
+	ticks <- time.Now()
+	<-requestDone
+	<-requestDone
+	ticks <- time.Now()
+	<-requestDone
+	cancel()
+	<-done
+
+	want := []string{"/session/register", "/session/register", "/session/heartbeat", "/session/register", "/session/heartbeat"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths = %#v, want %#v", paths, want)
+	}
+}
+
+func TestPostSessionJSONContextReturnsTypedStatusError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "missing", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	err := postSessionJSONContext(context.Background(), server.URL, "/session/heartbeat", "token", map[string]any{})
+	var httpErr *sessionHTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("error = %v, want typed 404", err)
+	}
+}
+
 func TestMergeEnvOverridesExistingValues(t *testing.T) {
 	got := mergeEnv([]string{"OPENAI_API_KEY=old", "PATH=/bin"}, map[string]string{"OPENAI_API_KEY": "new", "OPENAI_BASE_URL": "http://gateway"})
 	joined := strings.Join(got, "\n")

@@ -10,17 +10,18 @@ import (
 )
 
 type sessionRegisterRequest struct {
-	SessionID   string            `json:"session_id"`
-	ClientName  string            `json:"client_name"`
-	InboundName string            `json:"inbound_name"`
-	Tag         string            `json:"tag"`
-	Host        string            `json:"host"`
-	PID         int               `json:"pid"`
-	CWD         string            `json:"cwd"`
-	GitBranch   string            `json:"git_branch"`
-	Command     []string          `json:"command"`
-	Tmux        sessions.TmuxInfo `json:"tmux"`
-	StartedAt   time.Time         `json:"started_at"`
+	SessionID           string            `json:"session_id"`
+	ClientName          string            `json:"client_name"`
+	InboundName         string            `json:"inbound_name"`
+	Tag                 string            `json:"tag"`
+	Host                string            `json:"host"`
+	PID                 int               `json:"pid"`
+	CWD                 string            `json:"cwd"`
+	GitBranch           string            `json:"git_branch"`
+	Command             []string          `json:"command"`
+	Tmux                sessions.TmuxInfo `json:"tmux"`
+	StartedAt           time.Time         `json:"started_at"`
+	HeartbeatCapability string            `json:"heartbeat_capability"`
 }
 
 type sessionHookEventRequest struct {
@@ -29,6 +30,11 @@ type sessionHookEventRequest struct {
 	EventName   string         `json:"event_name"`
 	Payload     map[string]any `json:"payload"`
 	ReceivedAt  time.Time      `json:"received_at"`
+}
+
+type sessionHeartbeatRequest struct {
+	SessionID   string `json:"session_id"`
+	InboundName string `json:"inbound_name"`
 }
 
 type sessionStoppedRequest struct {
@@ -55,6 +61,10 @@ func (h *Handler) handleSessionRegister(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "inbound_name is required")
 		return
 	}
+	if req.HeartbeatCapability != "" && req.HeartbeatCapability != sessions.HeartbeatCapabilityV1 {
+		writeError(w, http.StatusBadRequest, "unsupported heartbeat_capability")
+		return
+	}
 	inbound, resolved, ok := h.matchSessionClient(r, req.InboundName)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "invalid client binding")
@@ -65,18 +75,19 @@ func (h *Handler) handleSessionRegister(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	session, err := h.sessionStore.Register(sessions.Session{
-		ID:          req.SessionID,
-		ClientName:  resolved.Client.Name,
-		InboundName: inbound.Name,
-		Tag:         resolved.Binding.Tag,
-		Host:        req.Host,
-		PID:         req.PID,
-		CWD:         req.CWD,
-		GitBranch:   req.GitBranch,
-		Command:     req.Command,
-		Tmux:        req.Tmux,
-		Status:      sessions.StatusUnknown,
-		StartedAt:   req.StartedAt,
+		ID:                  req.SessionID,
+		ClientName:          resolved.Client.Name,
+		InboundName:         inbound.Name,
+		Tag:                 resolved.Binding.Tag,
+		Host:                req.Host,
+		PID:                 req.PID,
+		CWD:                 req.CWD,
+		GitBranch:           req.GitBranch,
+		Command:             req.Command,
+		Tmux:                req.Tmux,
+		Status:              sessions.StatusUnknown,
+		StartedAt:           req.StartedAt,
+		HeartbeatCapability: req.HeartbeatCapability,
 	})
 	if err != nil {
 		writeError(w, http.StatusConflict, "session ID belongs to a different owner")
@@ -112,6 +123,37 @@ func (h *Handler) handleSessionHookEvent(w http.ResponseWriter, r *http.Request)
 	})
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
+}
+
+func (h *Handler) handleSessionHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req sessionHeartbeatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if req.SessionID == "" || req.InboundName == "" {
+		writeError(w, http.StatusBadRequest, "session_id and inbound_name are required")
+		return
+	}
+	inbound, resolved, ok := h.matchSessionClient(r, req.InboundName)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "invalid client binding")
+		return
+	}
+	session, found, err := h.sessionStore.Heartbeat(resolved.Client.Name, inbound.Name, req.SessionID)
+	if !found {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})

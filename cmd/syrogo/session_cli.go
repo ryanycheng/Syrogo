@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -85,26 +86,41 @@ func runSessionHookEvent(opts sessionHookCLIOptions) int {
 	return 0
 }
 
+type sessionHTTPError struct {
+	Path       string
+	StatusCode int
+	Status     string
+}
+
+func (e *sessionHTTPError) Error() string {
+	return fmt.Sprintf("%s returned %s", e.Path, e.Status)
+}
+
 func postSessionJSON(baseURL string, path string, token string, body any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return postSessionJSONContext(ctx, baseURL, path, token, body)
+}
+
+func postSessionJSONContext(ctx context.Context, baseURL string, path string, token string, body any) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
 	url := strings.TrimRight(baseURL, "/") + path
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	client := http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s returned %s", path, resp.Status)
+		return &sessionHTTPError{Path: path, StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 	return nil
 }

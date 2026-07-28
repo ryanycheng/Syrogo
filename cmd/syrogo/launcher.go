@@ -1,23 +1,31 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"maps"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/sessions"
 )
 
-const defaultInstalledConfigPath = "/opt/syrogo/config/config.yaml"
+const (
+	defaultInstalledConfigPath = "/opt/syrogo/config/config.yaml"
+	sessionHeartbeatInterval   = 10 * time.Second
+	sessionRequestTimeout      = 2 * time.Second
+)
 
 var installedConfigPath = defaultInstalledConfigPath
 
@@ -301,11 +309,10 @@ func launchClaudeAgent(opts launcherOptions, plan launchPlan) error {
 		return err
 	}
 
-	if err := registerClaudeSession(opts, plan, sessionID, cmd.Process.Pid); err != nil {
-		_, _ = fmt.Fprintf(opts.Stderr, "syrogo session register: %v\n", err)
-	}
+	reporter := startClaudeSessionReporter(opts, plan, sessionID, cmd.Process.Pid)
 
 	waitErr := cmd.Wait()
+	reporter.Close()
 	exitCode := 0
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
@@ -316,23 +323,105 @@ func launchClaudeAgent(opts launcherOptions, plan launchPlan) error {
 	return waitErr
 }
 
-func registerClaudeSession(opts launcherOptions, plan launchPlan, sessionID string, pid int) error {
+type claudeSessionReporter struct {
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+func startClaudeSessionReporter(opts launcherOptions, plan launchPlan, sessionID string, pid int) *claudeSessionReporter {
+	ctx, cancel := context.WithCancel(context.Background())
+	reporter := &claudeSessionReporter{cancel: cancel}
+	startedAt := time.Now()
+	requestCtx, requestCancel := context.WithTimeout(ctx, sessionRequestTimeout)
+	err := registerClaudeSession(requestCtx, opts, plan, sessionID, pid, startedAt)
+	requestCancel()
+	registered := err == nil
+	if err != nil {
+		_, _ = fmt.Fprintf(opts.Stderr, "syrogo session register: %v\n", err)
+	}
+	reporter.wg.Add(1)
+	go func() {
+		defer reporter.wg.Done()
+		ticker := time.NewTicker(sessionHeartbeatInterval)
+		defer ticker.Stop()
+		runClaudeSessionReporter(ctx, opts, plan, sessionID, pid, startedAt, registered, ticker.C)
+	}()
+	return reporter
+}
+
+func (r *claudeSessionReporter) Close() {
+	if r == nil {
+		return
+	}
+	r.cancel()
+	r.wg.Wait()
+}
+
+func runClaudeSessionReporter(ctx context.Context, opts launcherOptions, plan launchPlan, sessionID string, pid int, startedAt time.Time, registered bool, ticks <-chan time.Time) {
+	for {
+		select {
+		case <-ticks:
+		case <-ctx.Done():
+			return
+		}
+
+		requestCtx, cancel := context.WithTimeout(ctx, sessionRequestTimeout)
+		if !registered {
+			err := registerClaudeSession(requestCtx, opts, plan, sessionID, pid, startedAt)
+			cancel()
+			if err == nil {
+				registered = true
+			} else if ctx.Err() == nil {
+				_, _ = fmt.Fprintf(opts.Stderr, "syrogo session register: %v\n", err)
+			}
+			continue
+		}
+
+		err := heartbeatClaudeSession(requestCtx, opts, plan, sessionID)
+		cancel()
+		if err == nil || ctx.Err() != nil {
+			continue
+		}
+		var httpErr *sessionHTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			requestCtx, cancel = context.WithTimeout(ctx, sessionRequestTimeout)
+			err = registerClaudeSession(requestCtx, opts, plan, sessionID, pid, startedAt)
+			cancel()
+			registered = err == nil
+			if err != nil && ctx.Err() == nil {
+				_, _ = fmt.Fprintf(opts.Stderr, "syrogo session register: %v\n", err)
+			}
+			continue
+		}
+		_, _ = fmt.Fprintf(opts.Stderr, "syrogo session heartbeat: %v\n", err)
+	}
+}
+
+func registerClaudeSession(ctx context.Context, opts launcherOptions, plan launchPlan, sessionID string, pid int, startedAt time.Time) error {
 	host, _ := os.Hostname()
 	cwd, _ := os.Getwd()
 	request := map[string]any{
-		"session_id":   sessionID,
-		"client_name":  plan.Client.ClientName,
-		"inbound_name": plan.Client.InboundName,
-		"tag":          plan.Client.Tag,
-		"host":         host,
-		"pid":          pid,
-		"cwd":          cwd,
-		"git_branch":   collectGitBranch(),
-		"command":      append([]string{plan.Command}, plan.Args...),
-		"tmux":         collectTmuxInfo(),
-		"started_at":   time.Now(),
+		"session_id":           sessionID,
+		"client_name":          plan.Client.ClientName,
+		"inbound_name":         plan.Client.InboundName,
+		"tag":                  plan.Client.Tag,
+		"host":                 host,
+		"pid":                  pid,
+		"cwd":                  cwd,
+		"git_branch":           collectGitBranch(),
+		"command":              append([]string{plan.Command}, plan.Args...),
+		"tmux":                 collectTmuxInfo(),
+		"started_at":           startedAt,
+		"heartbeat_capability": sessions.HeartbeatCapabilityV1,
 	}
-	return postSessionJSON(opts.BaseURL, "/session/register", plan.Client.Token, request)
+	return postSessionJSONContext(ctx, opts.BaseURL, "/session/register", plan.Client.Token, request)
+}
+
+func heartbeatClaudeSession(ctx context.Context, opts launcherOptions, plan launchPlan, sessionID string) error {
+	return postSessionJSONContext(ctx, opts.BaseURL, "/session/heartbeat", plan.Client.Token, map[string]any{
+		"session_id":   sessionID,
+		"inbound_name": plan.Client.InboundName,
+	})
 }
 
 func newSessionID() string {

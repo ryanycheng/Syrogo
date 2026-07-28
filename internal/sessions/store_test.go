@@ -202,3 +202,122 @@ func TestStorePruneStoppedOnlyRemovesExpiredStoppedSessions(t *testing.T) {
 		t.Fatalf("expected old-stopped to be pruned, got %#v", sessions)
 	}
 }
+
+func TestStoreHeartbeatAndSweepLifecycle(t *testing.T) {
+	store := NewStore()
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	lastSeen := now.Add(-time.Minute)
+
+	registered, err := store.Register(Session{
+		ID:                  "leased",
+		ClientName:          "client",
+		InboundName:         "inbound",
+		Status:              StatusIdle,
+		LastSeenAt:          lastSeen,
+		HeartbeatCapability: HeartbeatCapabilityV1,
+	})
+	if err != nil || registered.LastHeartbeatAt == nil || registered.LeaseExpiresAt == nil {
+		t.Fatalf("Register() = %#v, %v", registered, err)
+	}
+	if got := registered.LeaseExpiresAt.Sub(*registered.LastHeartbeatAt); got != DefaultLeaseTTL {
+		t.Fatalf("lease duration = %v, want %v", got, DefaultLeaseTTL)
+	}
+
+	now = now.Add(10 * time.Second)
+	heartbeat, ok, err := store.Heartbeat("client", "inbound", "leased")
+	if err != nil || !ok {
+		t.Fatalf("Heartbeat() = %#v, %v, %v", heartbeat, ok, err)
+	}
+	if heartbeat.LastSeenAt != lastSeen {
+		t.Fatalf("heartbeat changed LastSeenAt to %v", heartbeat.LastSeenAt)
+	}
+
+	now = heartbeat.LeaseExpiresAt.Add(-time.Nanosecond)
+	if result := store.Sweep(DefaultStoppedRetention, DefaultTransientTTL); result.LeaseExpired != 0 {
+		t.Fatalf("Sweep() before expiry = %#v", result)
+	}
+	now = heartbeat.LeaseExpiresAt.Add(0)
+	if result := store.Sweep(DefaultStoppedRetention, DefaultTransientTTL); result.LeaseExpired != 1 {
+		t.Fatalf("Sweep() at expiry = %#v", result)
+	}
+	stopped, ok := store.GetOwned("leased", "client", "inbound")
+	if !ok || stopped.Status != StatusStopped || stopped.StoppedAt == nil || stopped.ExitCode != nil {
+		t.Fatalf("expired session = %#v, ok=%v", stopped, ok)
+	}
+	if _, ok := store.LatestActive("client", "inbound"); ok {
+		t.Fatal("expired session remained active")
+	}
+}
+
+func TestStoreSweepDegradesTransientStatesOnly(t *testing.T) {
+	store := NewStore()
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	lastSeen := now.Add(-time.Hour)
+	for _, session := range []Session{
+		{ID: "tool", Status: StatusToolRunning, LastSeenAt: lastSeen},
+		{ID: "compact", Status: StatusCompacting, LastSeenAt: lastSeen},
+		{ID: "permission", Status: StatusWaitingPermission, LastSeenAt: lastSeen},
+		{ID: "legacy-idle", Status: StatusIdle, LastSeenAt: lastSeen},
+	} {
+		if _, err := store.Register(session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now = now.Add(DefaultTransientTTL)
+	result := store.Sweep(DefaultStoppedRetention, DefaultTransientTTL)
+	if result.TransientDegraded != 2 || result.LeaseExpired != 0 {
+		t.Fatalf("Sweep() = %#v", result)
+	}
+	items := store.List(ListFilter{})
+	statuses := map[string]Status{}
+	for _, item := range items {
+		statuses[item.ID] = item.Status
+		if item.LastSeenAt != lastSeen {
+			t.Fatalf("Sweep changed %s LastSeenAt to %v", item.ID, item.LastSeenAt)
+		}
+	}
+	if statuses["tool"] != StatusUnknown || statuses["compact"] != StatusUnknown || statuses["permission"] != StatusWaitingPermission || statuses["legacy-idle"] != StatusIdle {
+		t.Fatalf("statuses after Sweep = %#v", statuses)
+	}
+}
+
+func TestStoreStoppedIsAbsorbing(t *testing.T) {
+	store := NewStore()
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	_, _ = store.Register(Session{ID: "s1", ClientName: "client", InboundName: "inbound", Status: StatusRunning, HeartbeatCapability: HeartbeatCapabilityV1})
+	stopped, _ := store.MarkStopped("client", "inbound", "s1", 0)
+
+	now = now.Add(time.Minute)
+	if updated, ok := store.ApplyHookEvent("client", "inbound", HookEvent{SessionID: "s1", EventName: "UserPromptSubmit", ReceivedAt: now}); !ok || updated.Status != StatusStopped || *updated.StoppedAt != *stopped.StoppedAt {
+		t.Fatalf("late hook changed stopped session: %#v", updated)
+	}
+	if updated, ok, err := store.Heartbeat("client", "inbound", "s1"); err != nil || !ok || updated.Status != StatusStopped || *updated.LeaseExpiresAt != *stopped.LeaseExpiresAt {
+		t.Fatalf("late heartbeat changed stopped session: %#v, %v", updated, err)
+	}
+	if updated, err := store.Register(Session{ID: "s1", ClientName: "client", InboundName: "inbound", Status: StatusRunning}); err != nil || updated.Status != StatusStopped || *updated.StoppedAt != *stopped.StoppedAt {
+		t.Fatalf("repeat register changed stopped session: %#v, %v", updated, err)
+	}
+	if updated, ok := store.MarkStopped("client", "inbound", "s1", 9); !ok || updated.ExitCode == nil || *updated.ExitCode != 0 || *updated.StoppedAt != *stopped.StoppedAt {
+		t.Fatalf("repeat stopped changed session: %#v", updated)
+	}
+}
+
+func TestStoreActiveRegisterRetryPreservesLifecycle(t *testing.T) {
+	store := NewStore()
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	_, _ = store.Register(Session{ID: "s1", ClientName: "client", InboundName: "inbound", Status: StatusRunning, Host: "old"})
+	now = now.Add(time.Minute)
+	active, _ := store.ApplyHookEvent("client", "inbound", HookEvent{SessionID: "s1", EventName: "PreToolUse", ReceivedAt: now})
+	now = now.Add(time.Minute)
+	repeated, err := store.Register(Session{ID: "s1", ClientName: "client", InboundName: "inbound", Host: "new", HeartbeatCapability: HeartbeatCapabilityV1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.Status != StatusToolRunning || repeated.LastEvent != "PreToolUse" || repeated.LastSeenAt != active.LastSeenAt || repeated.Host != "new" || repeated.LeaseExpiresAt == nil {
+		t.Fatalf("repeat registration lost lifecycle: %#v", repeated)
+	}
+}

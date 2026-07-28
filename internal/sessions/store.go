@@ -8,7 +8,22 @@ import (
 	"time"
 )
 
-const DefaultStoppedRetention = time.Hour
+const (
+	DefaultStoppedRetention = time.Hour
+	DefaultLeaseTTL         = 45 * time.Second
+	DefaultTransientTTL     = 15 * time.Minute
+)
+
+var (
+	ErrSessionOwnerMismatch           = errors.New("session ID belongs to a different owner")
+	ErrHeartbeatCapabilityUnsupported = errors.New("session does not support heartbeat")
+)
+
+type SweepResult struct {
+	LeaseExpired      int
+	TransientDegraded int
+	StoppedPruned     int
+}
 
 type Store struct {
 	mu       sync.RWMutex
@@ -23,15 +38,29 @@ func NewStore() *Store {
 	}
 }
 
-var ErrSessionOwnerMismatch = errors.New("session ID belongs to a different owner")
-
 func (s *Store) Register(session Session) (Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if existing, ok := s.sessions[session.ID]; ok && (existing.ClientName != session.ClientName || existing.InboundName != session.InboundName) {
+	existing, exists := s.sessions[session.ID]
+	if exists && (existing.ClientName != session.ClientName || existing.InboundName != session.InboundName) {
 		return Session{}, ErrSessionOwnerMismatch
 	}
+	if exists && existing.Status == StatusStopped {
+		return cloneSession(existing), nil
+	}
 	now := s.now()
+	if exists {
+		session.Status = existing.Status
+		session.LastEvent = existing.LastEvent
+		session.StartedAt = existing.StartedAt
+		session.LastSeenAt = existing.LastSeenAt
+		session.StoppedAt = existing.StoppedAt
+		session.ExitCode = existing.ExitCode
+		session.statusObservedAt = existing.statusObservedAt
+		if existing.HeartbeatCapability != "" && session.HeartbeatCapability == "" {
+			session.HeartbeatCapability = existing.HeartbeatCapability
+		}
+	}
 	if session.StartedAt.IsZero() {
 		session.StartedAt = now
 	}
@@ -40,6 +69,18 @@ func (s *Store) Register(session Session) (Session, error) {
 	}
 	if session.Status == "" {
 		session.Status = StatusUnknown
+	}
+	if session.statusObservedAt.IsZero() {
+		session.statusObservedAt = now
+	}
+	if session.HeartbeatCapability == HeartbeatCapabilityV1 {
+		heartbeatAt := now
+		expiresAt := now.Add(DefaultLeaseTTL)
+		session.LastHeartbeatAt = &heartbeatAt
+		session.LeaseExpiresAt = &expiresAt
+	} else {
+		session.LastHeartbeatAt = nil
+		session.LeaseExpiresAt = nil
 	}
 	session.Command = append([]string(nil), session.Command...)
 	s.sessions[session.ID] = session
@@ -63,12 +104,17 @@ func (s *Store) ApplyHookEvent(clientName, inboundName string, event HookEvent) 
 	if !ok || session.ClientName != clientName || session.InboundName != inboundName {
 		return Session{}, false
 	}
+	if session.Status == StatusStopped {
+		return cloneSession(session), true
+	}
 	if event.ReceivedAt.IsZero() {
 		event.ReceivedAt = s.now()
 	}
+	now := s.now()
 	session.Status = StatusForHookEvent(event, session.Status)
 	session.LastEvent = event.EventName
 	session.LastSeenAt = event.ReceivedAt
+	session.statusObservedAt = now
 	if session.Status == StatusStopped && session.StoppedAt == nil {
 		stoppedAt := event.ReceivedAt
 		session.StoppedAt = &stoppedAt
@@ -84,13 +130,38 @@ func (s *Store) MarkStopped(clientName, inboundName, sessionID string, exitCode 
 	if !ok || session.ClientName != clientName || session.InboundName != inboundName {
 		return Session{}, false
 	}
+	if session.Status == StatusStopped {
+		return cloneSession(session), true
+	}
 	now := s.now()
 	session.Status = StatusStopped
 	session.LastSeenAt = now
 	session.StoppedAt = &now
 	session.ExitCode = &exitCode
+	session.statusObservedAt = now
 	s.sessions[sessionID] = session
 	return cloneSession(session), true
+}
+
+func (s *Store) Heartbeat(clientName, inboundName, sessionID string) (Session, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[sessionID]
+	if !ok || session.ClientName != clientName || session.InboundName != inboundName {
+		return Session{}, false, nil
+	}
+	if session.Status == StatusStopped {
+		return cloneSession(session), true, nil
+	}
+	if session.HeartbeatCapability != HeartbeatCapabilityV1 {
+		return Session{}, true, ErrHeartbeatCapabilityUnsupported
+	}
+	now := s.now()
+	expiresAt := now.Add(DefaultLeaseTTL)
+	session.LastHeartbeatAt = &now
+	session.LeaseExpiresAt = &expiresAt
+	s.sessions[sessionID] = session
+	return cloneSession(session), true, nil
 }
 
 func (s *Store) List(filter ListFilter) []Session {
@@ -114,21 +185,41 @@ func (s *Store) List(filter ListFilter) []Session {
 	return result
 }
 
-func (s *Store) PruneStopped(maxAge time.Duration) int {
-	if maxAge <= 0 {
-		return 0
-	}
+func (s *Store) Sweep(stoppedRetention, transientTTL time.Duration) SweepResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cutoff := s.now().Add(-maxAge)
-	removed := 0
+	now := s.now()
+	result := SweepResult{}
 	for id, session := range s.sessions {
-		if session.Status == StatusStopped && session.LastSeenAt.Before(cutoff) {
-			delete(s.sessions, id)
-			removed++
+		if session.Status == StatusStopped {
+			if stoppedRetention > 0 && session.LastSeenAt.Before(now.Add(-stoppedRetention)) {
+				delete(s.sessions, id)
+				result.StoppedPruned++
+			}
+			continue
+		}
+		if session.HeartbeatCapability == HeartbeatCapabilityV1 && session.LeaseExpiresAt != nil && !now.Before(*session.LeaseExpiresAt) {
+			session.Status = StatusStopped
+			session.LastSeenAt = now
+			session.StoppedAt = &now
+			session.ExitCode = nil
+			session.statusObservedAt = now
+			s.sessions[id] = session
+			result.LeaseExpired++
+			continue
+		}
+		if transientTTL > 0 && (session.Status == StatusToolRunning || session.Status == StatusCompacting) && !session.statusObservedAt.IsZero() && !now.Before(session.statusObservedAt.Add(transientTTL)) {
+			session.Status = StatusUnknown
+			session.statusObservedAt = now
+			s.sessions[id] = session
+			result.TransientDegraded++
 		}
 	}
-	return removed
+	return result
+}
+
+func (s *Store) PruneStopped(maxAge time.Duration) int {
+	return s.Sweep(maxAge, 0).StoppedPruned
 }
 
 func (s *Store) LatestActive(clientName, inboundName string) (Session, bool) {
@@ -176,6 +267,14 @@ func matchesFilter(session Session, filter ListFilter) bool {
 
 func cloneSession(session Session) Session {
 	session.Command = append([]string(nil), session.Command...)
+	if session.LeaseExpiresAt != nil {
+		leaseExpiresAt := *session.LeaseExpiresAt
+		session.LeaseExpiresAt = &leaseExpiresAt
+	}
+	if session.LastHeartbeatAt != nil {
+		lastHeartbeatAt := *session.LastHeartbeatAt
+		session.LastHeartbeatAt = &lastHeartbeatAt
+	}
 	if session.StoppedAt != nil {
 		stoppedAt := *session.StoppedAt
 		session.StoppedAt = &stoppedAt

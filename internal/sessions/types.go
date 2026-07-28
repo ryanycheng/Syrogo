@@ -12,26 +12,32 @@ const (
 	StatusIdle              Status = "idle"
 	StatusCompacting        Status = "compacting"
 	StatusStopped           Status = "stopped"
+
+	HeartbeatCapabilityV1 = "heartbeat_v1"
 )
 
 type Session struct {
-	ID          string     `json:"id"`
-	ClientName  string     `json:"client_name"`
-	InboundName string     `json:"inbound_name"`
-	Tag         string     `json:"tag"`
-	Host        string     `json:"host"`
-	PID         int        `json:"pid"`
-	CWD         string     `json:"cwd"`
-	GitBranch   string     `json:"git_branch,omitempty"`
-	Command     []string   `json:"command,omitempty"`
-	Tmux        TmuxInfo   `json:"tmux"`
-	Status      Status     `json:"status"`
-	Mode        string     `json:"mode,omitempty"`
-	LastEvent   string     `json:"last_event,omitempty"`
-	StartedAt   time.Time  `json:"started_at"`
-	LastSeenAt  time.Time  `json:"last_seen_at"`
-	StoppedAt   *time.Time `json:"stopped_at,omitempty"`
-	ExitCode    *int       `json:"exit_code,omitempty"`
+	ID                  string     `json:"id"`
+	ClientName          string     `json:"client_name"`
+	InboundName         string     `json:"inbound_name"`
+	Tag                 string     `json:"tag"`
+	Host                string     `json:"host"`
+	PID                 int        `json:"pid"`
+	CWD                 string     `json:"cwd"`
+	GitBranch           string     `json:"git_branch,omitempty"`
+	Command             []string   `json:"command,omitempty"`
+	Tmux                TmuxInfo   `json:"tmux"`
+	Status              Status     `json:"status"`
+	Mode                string     `json:"mode,omitempty"`
+	LastEvent           string     `json:"last_event,omitempty"`
+	StartedAt           time.Time  `json:"started_at"`
+	LastSeenAt          time.Time  `json:"last_seen_at"`
+	HeartbeatCapability string     `json:"heartbeat_capability,omitempty"`
+	LastHeartbeatAt     *time.Time `json:"last_heartbeat_at,omitempty"`
+	LeaseExpiresAt      *time.Time `json:"lease_expires_at,omitempty"`
+	StoppedAt           *time.Time `json:"stopped_at,omitempty"`
+	ExitCode            *int       `json:"exit_code,omitempty"`
+	statusObservedAt    time.Time
 }
 
 type TmuxInfo struct {

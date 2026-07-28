@@ -244,6 +244,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/stats/latency/summary", h.handleLatencySummaryStats)
 	mux.HandleFunc("/stats/latency", h.handleLatencyStats)
 	mux.HandleFunc("/session/register", h.handleSessionRegister)
+	mux.HandleFunc("/session/heartbeat", h.handleSessionHeartbeat)
 	mux.HandleFunc("/session/hook-event", h.handleSessionHookEvent)
 	mux.HandleFunc("/session/stopped", h.handleSessionStopped)
 	mux.HandleFunc("/admin/usage", h.withAdminAudit("usage", h.handleAdminUsage))

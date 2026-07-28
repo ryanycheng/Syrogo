@@ -101,6 +101,7 @@ func TestSessionEndpointsRejectCrossOwnerUpdates(t *testing.T) {
 	}
 
 	for path, body := range map[string]string{
+		"/session/heartbeat":  `{"session_id":"s1","inbound_name":"second"}`,
 		"/session/hook-event": `{"session_id":"s1","inbound_name":"second","event_name":"Stop"}`,
 		"/session/stopped":    `{"session_id":"s1","inbound_name":"second","exit_code":0}`,
 	} {
@@ -205,6 +206,49 @@ func TestSessionRegisterRejectsInvalidToken(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestSessionHeartbeatLifecycle(t *testing.T) {
+	h := newAdminTestHandler(t)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	unsupported := httptest.NewRecorder()
+	mux.ServeHTTP(unsupported, authorizedRequest(http.MethodPost, "/session/register", "client-token", []byte(`{"session_id":"unsupported","inbound_name":"openai-entry","heartbeat_capability":"future"}`)))
+	if unsupported.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported capability status = %d, body=%s", unsupported.Code, unsupported.Body.String())
+	}
+
+	legacy := httptest.NewRecorder()
+	mux.ServeHTTP(legacy, authorizedRequest(http.MethodPost, "/session/register", "client-token", []byte(`{"session_id":"legacy","inbound_name":"openai-entry"}`)))
+	legacyHeartbeat := httptest.NewRecorder()
+	mux.ServeHTTP(legacyHeartbeat, authorizedRequest(http.MethodPost, "/session/heartbeat", "client-token", []byte(`{"session_id":"legacy","inbound_name":"openai-entry"}`)))
+	if legacyHeartbeat.Code != http.StatusBadRequest {
+		t.Fatalf("legacy heartbeat status = %d, body=%s", legacyHeartbeat.Code, legacyHeartbeat.Body.String())
+	}
+
+	register := httptest.NewRecorder()
+	mux.ServeHTTP(register, authorizedRequest(http.MethodPost, "/session/register", "client-token", []byte(`{"session_id":"leased","inbound_name":"openai-entry","heartbeat_capability":"heartbeat_v1"}`)))
+	if register.Code != http.StatusOK || !strings.Contains(register.Body.String(), `"lease_expires_at"`) {
+		t.Fatalf("register status = %d, body=%s", register.Code, register.Body.String())
+	}
+	heartbeat := httptest.NewRecorder()
+	mux.ServeHTTP(heartbeat, authorizedRequest(http.MethodPost, "/session/heartbeat", "client-token", []byte(`{"session_id":"leased","inbound_name":"openai-entry"}`)))
+	if heartbeat.Code != http.StatusOK || !strings.Contains(heartbeat.Body.String(), `"heartbeat_capability":"heartbeat_v1"`) {
+		t.Fatalf("heartbeat status = %d, body=%s", heartbeat.Code, heartbeat.Body.String())
+	}
+
+	stopped := httptest.NewRecorder()
+	mux.ServeHTTP(stopped, authorizedRequest(http.MethodPost, "/session/stopped", "client-token", []byte(`{"session_id":"leased","inbound_name":"openai-entry","exit_code":0}`)))
+	lateHeartbeat := httptest.NewRecorder()
+	mux.ServeHTTP(lateHeartbeat, authorizedRequest(http.MethodPost, "/session/heartbeat", "client-token", []byte(`{"session_id":"leased","inbound_name":"openai-entry"}`)))
+	lateHook := httptest.NewRecorder()
+	mux.ServeHTTP(lateHook, authorizedRequest(http.MethodPost, "/session/hook-event", "client-token", []byte(`{"session_id":"leased","inbound_name":"openai-entry","event_name":"UserPromptSubmit"}`)))
+	for name, response := range map[string]*httptest.ResponseRecorder{"heartbeat": lateHeartbeat, "hook": lateHook} {
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"stopped"`) {
+			t.Fatalf("late %s status = %d, body=%s", name, response.Code, response.Body.String())
+		}
 	}
 }
 

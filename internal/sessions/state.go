@@ -3,6 +3,9 @@ package sessions
 import "strings"
 
 func StatusForHookEvent(event HookEvent, current Status) Status {
+	if current == StatusStopped {
+		return StatusStopped
+	}
 	switch event.EventName {
 	case "SessionStart":
 		return StatusIdle
