@@ -95,7 +95,14 @@ For remote administration, use an SSH tunnel:
 ssh -L 23233:127.0.0.1:23233 user@server
 ```
 
-Then open `http://127.0.0.1:23233` locally. For a long-lived cross-host management endpoint, put a trusted TLS reverse proxy and access control in front of Console. Do not expose the plaintext management plane directly or store the Admin token in proxy configuration.
+Then open `http://127.0.0.1:23233` locally. Console persists its listen address in `/etc/syrogo-console.env`; the default remains `127.0.0.1:23233`, ordinary upgrades preserve the file, and the first supporting upgrade migrates a valid address from the old systemd unit. To configure a new installation or explicitly change the address, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh \
+  | sudo env SYROGO_CONSOLE_LISTEN=0.0.0.0:23233 bash
+```
+
+The value must include the fixed port `23233`. For a long-lived cross-host management endpoint, put a trusted TLS reverse proxy, access control, and firewall rules in front of Console. Do not expose the plaintext management plane directly or store the Admin token in proxy configuration.
 
 ## 6. Configure and verify
 
@@ -129,11 +136,11 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads
   | sudo bash -s -- --version v0.16.3 --console-only
 ```
 
-Back up `/opt/syrogo/config/config.yaml` first, then verify both `/healthz` endpoints and one real model request.
+Back up `/opt/syrogo/config/config.yaml` first, then verify both `/healthz` endpoints and one real model request. Console leaves `/etc/syrogo-console.env` unchanged during an ordinary upgrade.
 
 ## 8. Uninstall
 
-Remove Console without changing Core:
+Remove Console and `/etc/syrogo-console.env` without changing Core:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh \

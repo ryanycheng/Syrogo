@@ -62,7 +62,7 @@ func TestAdminUIReturnsIndexHTMLWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want text/html", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"Admin UI token", "/admin/app.js", "provider-test-model", "provider-models-json", "Strict JSON array of canonical names and aliases", "An empty array means unrestricted", "each fallback provider then resolves", "atomically update the config and hot-apply", "provider-quota-json", "rolling and fixed interval/daily/weekly", "reset_all", "Usage totals are all-time", "Timeline range", "client-days", "data-client-days=\"7\"", "data-client-days=\"30\"", "data-client-days=\"90\"", "clients-warning", "client-detail", "client-quota-json", "hourly-requests", "type\":\"requests", "max_tokens", "max_cost_usd", "Each window has exactly one type", "unpriced usage counts as $0", "Usage and quota are global", "client-bindings-section", "client-binding-error", "binding-inbound", "binding-tag", "remove every binding first", "usage-range", "usage-start-date", "usage-end-date", "log-bytes", "logs-meta", "overview-summary", "sessions-table", "sessions-view-cards", "sessions-view-table", "session-status-filter", "live-requests-table", "refresh-live-requests", "config-diff", "Apply current file", "config-history", "Debug", "dry-run-model"} {
+	for _, want := range []string{"Admin UI token", "/admin/app.js", "provider-test-model", "provider-models-json", "Strict JSON array of canonical names and aliases", "An empty array means unrestricted", "each fallback provider then resolves", "atomically update the config and hot-apply", "provider-quota-json", "rolling and fixed interval/daily/weekly", "reset_all", "Usage totals are all-time", "Timeline range", "client-days", "data-client-days=\"7\"", "data-client-days=\"30\"", "data-client-days=\"90\"", "clients-warning", "client-detail", "client-quota-json", "hourly-requests", "type\":\"requests", "max_tokens", "max_cost_usd", "Each window has exactly one type", "unpriced usage counts as $0", "Usage and quota are global", "client-bindings-section", "client-binding-error", "binding-inbound", "binding-tag", "remove every binding first", "usage-range", "usage-start-date", "usage-end-date", "log-bytes", "logs-meta", "overview-summary", "sessions-table", "sessions-view-cards", "sessions-view-table", "session-status-filter", "live-requests-table", "refresh-live-requests", "config-diff", "Apply current file", "config-history", "Debug", "dry-run-model", "First-match wins", "original requested model", "route-match-models", "One pattern per line", "match: null", "only * is a wildcard", "Agent mode, Plan mode, prompts, and tool results are not inspected", "Processing has three stages", "Unknown models do not automatically downgrade"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
@@ -85,13 +85,16 @@ func TestAdminUIReturnsStaticAssetsWhenEnabled(t *testing.T) {
 		t.Fatalf("content type = %q, want javascript", contentType)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"/admin/sessions", "startSessionsRefresh", "data-provider-check-protocol", "model: testModel", "#provider-models-json", "item.models || []", "models = JSON.parse", "models, capabilities", "#provider-quota-json", "max_tokens", "used_tokens", "fixed_period", "last_quota_exceeded_at", "usage_estimation_mode", "renderSessionCards", "item.tag", "/admin/config/clients", "/admin/config/clients/metrics?days=", "Promise.allSettled", "Metrics unavailable", "clientPayload", "return { name: value(\"#client-name\"), token: value(\"#client-token\"), quota }", "#client-quota-json", "used_cost_usd", "max_cost_usd", "unpriced_count", "quota-warning", "window.type", "error.body = body", "binding_tag_last_source", "route_names", "showClientBindingError", "Add or update another Client binding", "from_tags", "/admin/config/client-binding/upsert", "/admin/config/client-binding/delete", "Remove all ${bindings.length} binding(s)", "renderClientBindings", "response?.saved", "response?.applied", "Client saved and applied.", "Client deleted and applied.", "/admin/config/client/usage?name=", "renderClientHeatmap", "Math.log1p", "tabindex=\"0\"", "role=\"img\"", "partial", "unknown", "Daily aggregates, not a per-request audit log", "/admin/usage", "/admin/logs", "/admin/overview", "/admin/latency/active", "refreshLiveRequests", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback", "/admin/debug/traces", "/admin/debug/route-dry-run", "/admin/debug/providers", "/admin/config/history/diff"} {
+	for _, want := range []string{"/admin/sessions", "startSessionsRefresh", "data-provider-check-protocol", "model: testModel", "#provider-models-json", "item.models || []", "models = JSON.parse", "models, capabilities", "#provider-quota-json", "max_tokens", "used_tokens", "fixed_period", "last_quota_exceeded_at", "usage_estimation_mode", "renderSessionCards", "item.tag", "/admin/config/clients", "/admin/config/clients/metrics?days=", "Promise.allSettled", "Metrics unavailable", "clientPayload", "return { name: value(\"#client-name\"), token: value(\"#client-token\"), quota }", "#client-quota-json", "used_cost_usd", "max_cost_usd", "unpriced_count", "quota-warning", "window.type", "error.body = body", "binding_tag_last_source", "route_names", "showClientBindingError", "Add or update another Client binding", "from_tags", "/admin/config/client-binding/upsert", "/admin/config/client-binding/delete", "Remove all ${bindings.length} binding(s)", "renderClientBindings", "response?.saved", "response?.applied", "Client saved and applied.", "Client deleted and applied.", "/admin/config/client/usage?name=", "renderClientHeatmap", "Math.log1p", "tabindex=\"0\"", "role=\"img\"", "partial", "unknown", "Daily aggregates, not a per-request audit log", "/admin/usage", "/admin/logs", "/admin/overview", "/admin/latency/active", "refreshLiveRequests", "redacted_content", "window.confirm", "renderConfigDiff", "max_bytes", "/admin/config/apply", "/admin/config/history", "/admin/config/rollback", "/admin/debug/traces", "/admin/debug/route-dry-run", "/admin/debug/providers", "/admin/config/history/diff", "routeOrderRevision", "response.order_revision", "item.match?.models", "match: matchModels.length ? { models: matchModels } : null", "Priority", "Request models / fallback", "data-route-move=\"up\"", "data-route-move=\"down\"", "/admin/config/routes/reorder", "from_index: fromIndex", "to_index: toIndex", "expected_revision: routeOrderRevision", "error.status === 409", "Route order changed elsewhere", "Route saved and applied.", "Route deleted and applied."} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
 		}
 	}
 	if strings.Contains(body, "Client saved. Click Apply") || strings.Contains(body, "Client deleted. Click Apply") {
 		t.Fatalf("client CRUD still instructs a separate Apply: %s", body)
+	}
+	if strings.Contains(body, "Route saved. Click Apply") || strings.Contains(body, "Route deleted. Click Apply") {
+		t.Fatalf("route CRUD still instructs a separate Apply: %s", body)
 	}
 	payloadStart := strings.Index(body, "function providerPayload()")
 	if payloadStart < 0 {
@@ -144,6 +147,24 @@ func TestAdminUIClientHeatmapStylesUseNativeGridAndFiveLevels(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, want := range []string{".contribution-heatmap", "display: grid", "grid-template-rows: repeat(7", ".heatmap-cell.level-1", ".heatmap-cell.level-2", ".heatmap-cell.level-3", ".heatmap-cell.level-4", ".heatmap-cell.level-5", ".heatmap-cell.unknown", ".heatmap-cell.partial", ".heatmap-cell:hover::after", ".heatmap-cell:focus::after"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("styles missing %q", want)
+		}
+	}
+}
+
+func TestAdminUIRouteOrderingStyles(t *testing.T) {
+	h := newAdminTestHandler(t)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/styles.css", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{"button:disabled", ".route-table", ".route-order-actions", ".route-patterns"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("styles missing %q", want)
 		}
@@ -1151,6 +1172,108 @@ func TestAdminConfigClientDeleteRejectsBoundClient(t *testing.T) {
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "binding(s) still reference it") {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 	}
+}
+
+func TestAdminConfigRoutesMatchAndRevisionRoundTrip(t *testing.T) {
+	h := newAdminTestHandler(t)
+	h.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	content := strings.Replace(validGatewayConfigYAML(), "      strategy: failover", "      strategy: failover\n      match:\n        models: [\"claude-*\"]", 1)
+	if err := os.WriteFile(h.configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.SetConfigReloader(fileMutationReloader{path: h.configPath})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	getRoutes := func() struct {
+		Items         []routeResourceResponse `json:"items"`
+		OrderRevision string                  `json:"order_revision"`
+	} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, authorizedRequest(http.MethodGet, "/admin/config/routes", "admin-ui-token", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET routes status = %d, body=%s", w.Code, w.Body.String())
+		}
+		var response struct {
+			Items         []routeResourceResponse `json:"items"`
+			OrderRevision string                  `json:"order_revision"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	response := getRoutes()
+	if len(response.Items) != 1 || response.Items[0].Match == nil || len(response.Items[0].Match.Models) != 1 || response.Items[0].Match.Models[0] != "claude-*" || response.OrderRevision == "" {
+		t.Fatalf("routes response = %#v", response)
+	}
+	body := []byte(`{"name":"office-route","from_tags":["office"],"to_tags":["mock-tag"],"strategy":"failover","match":null}`)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/route/upsert", "admin-ui-token", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("upsert status = %d, body=%s", w.Code, w.Body.String())
+	}
+	fallback := getRoutes()
+	if fallback.Items[0].Match != nil || !strings.Contains(mustJSON(t, fallback.Items[0]), `"match":null`) {
+		t.Fatalf("fallback route = %#v, want match null", fallback.Items[0])
+	}
+	if fallback.OrderRevision == response.OrderRevision {
+		t.Fatal("order revision did not cover complete route content")
+	}
+}
+
+func TestAdminConfigRoutesReorderCAS(t *testing.T) {
+	rules := []config.RoutingRule{{Name: "first"}, {Name: "second"}, {Name: "third"}}
+	revision := config.RouteOrderRevision(rules)
+	var mutations int
+	h := newAdminTestHandler(t)
+	h.SetConfigReloader(fakeConfigReloader{mutate: func(_ context.Context, reason string, mutate ConfigMutation) (ReloadResult, error) {
+		mutations++
+		next, err := mutate(config.Config{Routing: config.RoutingConfig{Rules: rules}})
+		if err != nil {
+			return ReloadResult{}, err
+		}
+		if reason != "routes_reorder" || next.Routing.Rules[0].Name != "second" || next.Routing.Rules[2].Name != "first" {
+			t.Fatalf("reason=%q rules=%#v", reason, next.Routing.Rules)
+		}
+		return ReloadResult{OK: true, Saved: true, Applied: true}, nil
+	}})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	w := httptest.NewRecorder()
+	body := []byte(fmt.Sprintf(`{"from_index":0,"to_index":2,"expected_revision":%q}`, revision))
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/routes/reorder", "admin-ui-token", body))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"applied":true`) {
+		t.Fatalf("success status = %d, body=%s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/routes/reorder", "admin-ui-token", []byte(`{"from_index":0,"to_index":2,"expected_revision":"stale"}`)))
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"error_code":"route_order_conflict"`) || !strings.Contains(w.Body.String(), `"current_revision"`) {
+		t.Fatalf("conflict status = %d, body=%s", w.Code, w.Body.String())
+	}
+
+	for _, body := range []string{`{"from_index":1,"to_index":1,"expected_revision":"x"}`, `{"from_index":-1,"to_index":0,"expected_revision":"x"}`, fmt.Sprintf(`{"from_index":0,"to_index":3,"expected_revision":%q}`, revision)} {
+		w = httptest.NewRecorder()
+		mux.ServeHTTP(w, authorizedRequest(http.MethodPost, "/admin/config/routes/reorder", "admin-ui-token", []byte(body)))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("invalid reorder status = %d, body=%s", w.Code, w.Body.String())
+		}
+	}
+	if mutations != 3 {
+		t.Fatalf("mutation closure calls = %d, want success, conflict, and bounds validation", mutations)
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestAdminConfigRouteMutationsUseAtomicReloader(t *testing.T) {

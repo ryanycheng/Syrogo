@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/ryanycheng/Syrogo/internal/protocol"
 
@@ -152,6 +153,11 @@ type RoutingRule struct {
 	Weights     map[string]int    `yaml:"weights"`
 	TargetModel string            `yaml:"target_model"`
 	ModelMap    map[string]string `yaml:"model_map"`
+	Match       *RoutingRuleMatch `yaml:"match,omitempty"`
+}
+
+type RoutingRuleMatch struct {
+	Models []string `yaml:"models" json:"models"`
 }
 
 type RoutingConfig struct {
@@ -637,6 +643,28 @@ func (c Config) Validate() error {
 	for i, rule := range c.Routing.Rules {
 		if len(rule.FromTags) == 0 {
 			return fmt.Errorf("routing.rules[%d].from_tags is required", i)
+		}
+		if rule.Match != nil {
+			if len(rule.Match.Models) == 0 {
+				return fmt.Errorf("routing.rules[%d].match.models must contain at least one pattern", i)
+			}
+			seenPatterns := make(map[string]struct{}, len(rule.Match.Models))
+			for j, pattern := range rule.Match.Models {
+				field := fmt.Sprintf("routing.rules[%d].match.models[%d]", i, j)
+				if pattern == "" {
+					return fmt.Errorf("%s must not be empty", field)
+				}
+				if strings.TrimSpace(pattern) != pattern {
+					return fmt.Errorf("%s must not have leading or trailing whitespace", field)
+				}
+				if strings.IndexFunc(pattern, unicode.IsControl) >= 0 {
+					return fmt.Errorf("%s must not contain control characters", field)
+				}
+				if _, ok := seenPatterns[pattern]; ok {
+					return fmt.Errorf("%s duplicates pattern %q", field, pattern)
+				}
+				seenPatterns[pattern] = struct{}{}
+			}
 		}
 		if len(rule.ToTags) == 0 {
 			return fmt.Errorf("routing.rules[%d].to_tags is required", i)

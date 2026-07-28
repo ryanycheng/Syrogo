@@ -152,20 +152,10 @@ func (s *Store) LatestActive(clientName, inboundName string) (Session, bool) {
 }
 
 func statusPriority(status Status) int {
-	switch status {
-	case StatusWaitingPermission:
+	if status == StatusWaitingPermission {
 		return 0
-	case StatusToolRunning, StatusCompacting:
-		return 1
-	case StatusRunning:
-		return 2
-	case StatusIdle, StatusUnknown:
-		return 3
-	case StatusStopped:
-		return 4
-	default:
-		return 3
 	}
+	return 1
 }
 
 func matchesFilter(session Session, filter ListFilter) bool {

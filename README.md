@@ -271,27 +271,68 @@ Current scope:
 - `activate` prints real shell `export` statements for `eval`, so do not paste its output into logs
 - the launched client still runs locally; Syrogo handles its model API traffic
 
-### 8. Map route models
+### 8. Match and map route models
 
-If one route needs to accept several inbound model names and send provider-specific names upstream, use `model_map` on the routing rule:
+Rules are evaluated in configuration order, and the first rule whose `from_tags` and optional `match.models` both match wins. This lets one client binding tag select Haiku, Sonnet, and Opus tiers while retaining a final unconditional fallback:
+
+```yaml
+routing:
+  rules:
+    - name: "anthropic-haiku"
+      from_tags: ["anthropic-to-responses"]
+      match:
+        models: ["claude-*-haiku-*"]
+      to_tags: ["responses-primary"]
+      strategy: "failover"
+      target_model: "gpt-5.4-mini"
+
+    - name: "anthropic-sonnet"
+      from_tags: ["anthropic-to-responses"]
+      match:
+        models: ["claude-*-sonnet-*"]
+      to_tags: ["responses-primary"]
+      strategy: "failover"
+      target_model: "gpt-5.4"
+
+    - name: "anthropic-opus"
+      from_tags: ["anthropic-to-responses"]
+      match:
+        models: ["claude-*-opus-*"]
+      to_tags: ["responses-primary"]
+      strategy: "failover"
+      target_model: "gpt-5.4-pro"
+
+    # Last, unconditional bootstrap-compatible fallback.
+    - name: "anthropic-fallback"
+      from_tags: ["anthropic-to-responses"]
+      to_tags: ["responses-primary"]
+      strategy: "failover"
+      target_model: "gpt-5.4"
+```
+
+`match.models` inspects only the original `model` requested by the client, before any rewrite. It does not infer Claude Code agent mode or Plan mode and does not inspect prompts, messages, tool declarations, or tool results. Matching is case-sensitive and against the full model string; `*` is the only wildcard (zero or more characters), with no regex, `?`, or character-class syntax. An omitted/null `match` is unconditional for the matching tag, so place fallback rules after narrower rules. Unknown model names do not automatically downgrade; they match only an explicit pattern or a later unconditional fallback.
+
+Model processing has three separate stages:
+
+1. `match.models` selects a route from the client's original requested model.
+2. The selected route applies `target_model` or an exact-key `model_map` rewrite (a rule cannot set both).
+3. Each planned outbound independently resolves that routed model against its own canonical `models[].name` and aliases.
+
+For example, a multi-model mapping route can use:
 
 ```yaml
 routing:
   rules:
     - name: "responses-route"
-      from_tags:
-        - "responses"
-      to_tags:
-        - "responses-primary"
+      from_tags: ["responses"]
+      to_tags: ["responses-primary"]
       strategy: "failover"
       model_map:
         gpt-4: "gpt-4o-mini"
         claude-sonnet-4-6: "gpt-5.4"
 ```
 
-Use `target_model` for one fixed model override, or `model_map` for per-request model mapping. A rule cannot set both.
-
-Each outbound can also declare the canonical models it supports and optional inbound aliases:
+Each outbound can declare the canonical models it supports and optional aliases:
 
 ```yaml
 outbounds:
@@ -305,7 +346,9 @@ outbounds:
         aliases: ["gpt-4-mini", "fast"]
 ```
 
-An omitted or empty `models` list is unrestricted. Routing applies `target_model` or `model_map` first; each fallback provider then independently resolves that routed name against its own canonical names and aliases. This lets the same alias map to different upstream names on different providers. A provider that does not accept the routed model is skipped; if no planned provider accepts it, the inbound protocol receives HTTP 404 with `model_not_found` (or its protocol-equivalent error envelope).
+An omitted or empty `models` list is unrestricted. After route matching and route-level rewriting, each fallback provider independently resolves the routed name against its own canonical names and aliases. This lets the same alias map to different upstream names on different providers. A provider that does not accept the routed model is skipped; there is no automatic downgrade. If no planned provider accepts it, the inbound protocol receives HTTP 404 with `model_not_found` (or its protocol-equivalent error envelope).
+
+Route create/update/delete operations through the Admin APIs and built-in Admin UI atomically save and hot-apply the configuration. Rule order is runtime priority and can be changed with `POST /admin/config/routes/reorder`; the endpoint uses the `order_revision` returned by `GET /admin/config/routes` for conflict detection, saves the global order, and hot-applies it without a separate Apply action. External or manual YAML edits still require `/admin/config/apply`.
 
 ### 9. Configure outbound proxy
 

@@ -29,6 +29,8 @@ let clientMetricsDays = 7;
 let activeClient = null;
 let activeClientDetail = null;
 let clientHeatmapMetric = "requests";
+let routeItems = [];
+let routeOrderRevision = "";
 
 const i18n = {
   en: {
@@ -711,18 +713,27 @@ function formatCost(number) { return `$${Number(number || 0).toFixed(6)}`; }
 async function refreshRoutes() {
   await refreshResourceOptions();
   const response = await fetchJSON("/admin/config/routes");
-  const items = response.items || [];
-  document.querySelector("#routes-table").innerHTML = items.length === 0 ? emptyState("No routes.") : renderRouteTable(items);
+  routeItems = response.items || [];
+  routeOrderRevision = response.order_revision || "";
+  document.querySelector("#routes-table").innerHTML = routeItems.length === 0 ? emptyState("No routes.") : renderRouteTable(routeItems);
 }
 
 function renderRouteTable(items) {
-  return `<table><thead><tr><th>Name</th><th>From tags</th><th>To tags</th><th>Strategy</th><th>Target model</th><th>Model map</th><th>Actions</th></tr></thead><tbody>${items.map((item) => `<tr data-route='${escapeAttr(JSON.stringify(item))}' data-row><td><strong>${escapeHTML(item.name || "")}</strong></td><td>${escapeHTML((item.from_tags || []).join(", "))}</td><td>${escapeHTML((item.to_tags || []).join(", "))}</td><td>${badge(item.strategy || "unknown", "")}</td><td>${escapeHTML(item.target_model || "")}</td><td><pre>${escapeHTML(pretty(item.model_map || {}))}</pre></td><td><button class="small" data-route-edit='${escapeAttr(JSON.stringify(item))}'>Edit</button></td></tr>`).join("")}</tbody></table>`;
+  return `<table class="route-table"><thead><tr><th>Priority</th><th>Name</th><th>Request models / fallback</th><th>From tags</th><th>To tags</th><th>Strategy</th><th>Routed model</th><th>Actions</th></tr></thead><tbody>${items.map((item, index) => renderRouteRow(item, index, items.length)).join("")}</tbody></table>`;
+}
+
+function renderRouteRow(item, index, count) {
+  const patterns = item.match?.models || [];
+  const requestModels = patterns.length ? `<div class="route-patterns">${patterns.map((pattern) => `<code>${escapeHTML(pattern)}</code>`).join("")}</div>` : `${badge("fallback", "muted")}<div class="muted">any original requested model</div>`;
+  const routedModel = item.target_model ? `<code>${escapeHTML(item.target_model)}</code>` : Object.keys(item.model_map || {}).length ? `<pre>${escapeHTML(pretty(item.model_map))}</pre>` : `<span class="muted">original model unchanged</span>`;
+  return `<tr data-route='${escapeAttr(JSON.stringify(item))}' data-row><td><strong>${index + 1}</strong><div class="route-order-actions"><button type="button" class="small ghost" data-route-move="up" data-route-index="${index}" ${index === 0 ? "disabled" : ""} aria-label="Move ${escapeAttr(item.name || "route")} up">↑</button><button type="button" class="small ghost" data-route-move="down" data-route-index="${index}" ${index === count - 1 ? "disabled" : ""} aria-label="Move ${escapeAttr(item.name || "route")} down">↓</button></div></td><td><strong>${escapeHTML(item.name || "")}</strong></td><td>${requestModels}</td><td>${escapeHTML((item.from_tags || []).join(", "))}</td><td>${escapeHTML((item.to_tags || []).join(", "))}</td><td>${badge(item.strategy || "unknown", "")}</td><td>${routedModel}</td><td><button class="small" data-route-edit='${escapeAttr(JSON.stringify(item))}'>Edit</button></td></tr>`;
 }
 
 function fillRouteForm(item = {}) {
   document.querySelector("#route-modal-title").textContent = item.name ? "编辑 Route" : "新增 Route";
   document.querySelector("#route-name").value = item.name || "";
   document.querySelector("#route-from-tags").value = (item.from_tags || []).join(", ");
+  document.querySelector("#route-match-models").value = (item.match?.models || []).join("\n");
   document.querySelector("#route-to-tags").value = (item.to_tags || []).join(", ");
   document.querySelector("#route-strategy").value = item.strategy || "failover";
   document.querySelector("#route-target-model").value = item.target_model || "";
@@ -738,8 +749,9 @@ function closeRouteModal() { document.querySelector("#route-modal").classList.ad
 async function saveRoute() {
   let modelMap = {}; let weights = {};
   try { modelMap = parseOptionalJSON("#route-model-map"); weights = parseOptionalJSON("#route-weights"); } catch (error) { showToast(error.message); return; }
-  const payload = { name: value("#route-name"), from_tags: csv("#route-from-tags"), to_tags: csv("#route-to-tags"), strategy: value("#route-strategy"), target_model: value("#route-target-model"), model_map: modelMap, weights };
-  await mutateResource("/admin/config/route/upsert", payload, async () => { closeRouteModal(); await refreshRoutes(); }, "Route saved. Click Apply current file when ready.");
+  const matchModels = value("#route-match-models").split("\n").map((pattern) => pattern.trim()).filter(Boolean);
+  const payload = { name: value("#route-name"), from_tags: csv("#route-from-tags"), to_tags: csv("#route-to-tags"), strategy: value("#route-strategy"), target_model: value("#route-target-model"), model_map: modelMap, weights, match: matchModels.length ? { models: matchModels } : null };
+  await mutateResource("/admin/config/route/upsert", payload, async () => { closeRouteModal(); await refreshRoutes(); }, "Route saved and applied.");
 }
 async function deleteRoute() {
   const name = value("#route-name");
@@ -756,7 +768,24 @@ async function deleteRoute() {
   const invalid = typedName !== name;
   input.classList.toggle("invalid", invalid);
   if (invalid) { showToast("Type the route name to confirm deletion."); return; }
-  await mutateResource("/admin/config/route/delete", { name }, async () => { closeRouteModal(); await refreshRoutes(); }, "Route deleted. Click Apply current file when ready.");
+  await mutateResource("/admin/config/route/delete", { name }, async () => { closeRouteModal(); await refreshRoutes(); }, "Route deleted and applied.");
+}
+
+async function reorderRoute(fromIndex, toIndex) {
+  if (fromIndex < 0 || toIndex < 0 || fromIndex >= routeItems.length || toIndex >= routeItems.length || fromIndex === toIndex) return;
+  try {
+    const response = await fetchJSON("/admin/config/routes/reorder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from_index: fromIndex, to_index: toIndex, expected_revision: routeOrderRevision }) });
+    if (!response?.saved || !response?.applied) throw new Error(response?.reason || "Route order was not both saved and applied.");
+    showToast("Route priority saved and applied.");
+    await refreshRoutes();
+  } catch (error) {
+    if (error.status === 409) {
+      showToast("Route order changed elsewhere. Refreshed the latest priorities; please retry.");
+      await refreshRoutes();
+      return;
+    }
+    showToast(error.message);
+  }
 }
 
 async function mutateResource(path, payload, refresh, successMessage) {
@@ -967,7 +996,7 @@ function bindEvents() {
   document.querySelector("#close-route-modal").addEventListener("click", closeRouteModal);
   document.querySelector("#save-route").addEventListener("click", saveRoute);
   document.querySelector("#delete-route").addEventListener("click", deleteRoute);
-  document.querySelector("#routes-table").addEventListener("click", (event) => { const button = event.target.closest("button[data-route-edit]"); if (button) { fillRouteForm(JSON.parse(button.dataset.routeEdit)); return; } const row = event.target.closest("tr[data-route]"); if (row) fillRouteForm(JSON.parse(row.dataset.route)); });
+  document.querySelector("#routes-table").addEventListener("click", (event) => { const moveButton = event.target.closest("button[data-route-move]"); if (moveButton) { event.stopPropagation(); const fromIndex = Number(moveButton.dataset.routeIndex); reorderRoute(fromIndex, fromIndex + (moveButton.dataset.routeMove === "up" ? -1 : 1)); return; } const button = event.target.closest("button[data-route-edit]"); if (button) { event.stopPropagation(); fillRouteForm(JSON.parse(button.dataset.routeEdit)); return; } const row = event.target.closest("tr[data-route]"); if (row) fillRouteForm(JSON.parse(row.dataset.route)); });
   document.querySelector("#refresh-usage").addEventListener("click", refreshUsage);
   document.querySelector("#usage-range").addEventListener("change", syncUsageRangeInputs);
   document.querySelector("#refresh-live-requests").addEventListener("click", refreshLiveRequests);

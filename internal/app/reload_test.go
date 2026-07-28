@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -419,6 +420,57 @@ func TestAdminClientMutationFailurePreservesDiskAndRuntime(t *testing.T) {
 	app.Server.Listeners()[0].Handler.ServeHTTP(request, authorizedRequest(http.MethodPost, "/v1/chat/completions", "client-token", body))
 	if request.Code != http.StatusOK {
 		t.Fatalf("original token status = %d, body=%s", request.Code, request.Body.String())
+	}
+}
+
+func TestAdminRouteReorderConflictPreservesDiskRuntimeAndHistory(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Admin = config.AdminConfig{Enabled: true, Token: "admin-ui-token"}
+	cfg.Routing.Rules = append(cfg.Routing.Rules, config.RoutingRule{
+		Name: "fallback-route", FromTags: []string{"office"}, ToTags: []string{"mock-tag"}, Strategy: "failover",
+	})
+	path := writeReloadTestConfig(t, cfg)
+	app, err := NewWithOptions(cfg, Options{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close(context.Background()) }()
+	handler := app.Server.Listeners()[0].Handler
+
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, authorizedRequest(http.MethodGet, "/admin/config/routes", "admin-ui-token", nil))
+	var routes struct {
+		OrderRevision string `json:"order_revision"`
+	}
+	if err := json.Unmarshal(get.Body.Bytes(), &routes); err != nil || routes.OrderRevision == "" {
+		t.Fatalf("GET routes body=%s err=%v", get.Body.String(), err)
+	}
+	originalData, _ := os.ReadFile(path)
+	originalDispatcher := app.dispatcher
+	originalHistory := len(app.reloadManager.History())
+
+	stale := httptest.NewRecorder()
+	handler.ServeHTTP(stale, authorizedRequest(http.MethodPost, "/admin/config/routes/reorder", "admin-ui-token", []byte(`{"from_index":0,"to_index":1,"expected_revision":"stale"}`)))
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), `"error_code":"route_order_conflict"`) {
+		t.Fatalf("stale status=%d body=%s", stale.Code, stale.Body.String())
+	}
+	unchangedData, _ := os.ReadFile(path)
+	if string(unchangedData) != string(originalData) || app.dispatcher != originalDispatcher || app.cfg.Routing.Rules[0].Name != "office-route" || len(app.reloadManager.History()) != originalHistory {
+		t.Fatal("stale reorder changed disk, runtime, or history")
+	}
+
+	success := httptest.NewRecorder()
+	body := []byte(fmt.Sprintf(`{"from_index":0,"to_index":1,"expected_revision":%q}`, routes.OrderRevision))
+	handler.ServeHTTP(success, authorizedRequest(http.MethodPost, "/admin/config/routes/reorder", "admin-ui-token", body))
+	if success.Code != http.StatusOK || !strings.Contains(success.Body.String(), `"applied":true`) {
+		t.Fatalf("success status=%d body=%s", success.Code, success.Body.String())
+	}
+	stored, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Routing.Rules[0].Name != "fallback-route" || app.cfg.Routing.Rules[0].Name != "fallback-route" || app.dispatcher == originalDispatcher || len(app.reloadManager.History()) != originalHistory+1 {
+		t.Fatalf("reorder not saved/hot-applied: stored=%#v runtime=%#v", stored.Routing.Rules, app.cfg.Routing.Rules)
 	}
 }
 

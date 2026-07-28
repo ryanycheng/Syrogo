@@ -144,19 +144,27 @@ func TestStoreConcurrentUpdates(t *testing.T) {
 	}
 }
 
-func TestStoreListPrioritizesActionableSessions(t *testing.T) {
+func TestStoreListPrioritizesAttentionThenRecentActivity(t *testing.T) {
 	store := NewStore()
 	now := time.Date(2026, 7, 18, 10, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
 
-	_, _ = store.Register(Session{ID: "stopped-new", Status: StatusStopped, LastSeenAt: now})
-	_, _ = store.Register(Session{ID: "running-old", Status: StatusRunning, LastSeenAt: now.Add(-10 * time.Minute)})
-	_, _ = store.Register(Session{ID: "permission-old", Status: StatusWaitingPermission, LastSeenAt: now.Add(-20 * time.Minute)})
-	_, _ = store.Register(Session{ID: "idle-new", Status: StatusIdle, LastSeenAt: now.Add(time.Minute)})
-	_, _ = store.Register(Session{ID: "tool-old", Status: StatusToolRunning, LastSeenAt: now.Add(-30 * time.Minute)})
+	_, _ = store.Register(Session{ID: "tool-oldest", Status: StatusToolRunning, LastSeenAt: now.Add(-30 * time.Minute)})
+	_, _ = store.Register(Session{ID: "running-older", Status: StatusRunning, LastSeenAt: now.Add(-20 * time.Minute)})
+	_, _ = store.Register(Session{ID: "permission-older", Status: StatusWaitingPermission, LastSeenAt: now.Add(-15 * time.Minute)})
+	_, _ = store.Register(Session{ID: "permission-newer", Status: StatusWaitingPermission, LastSeenAt: now.Add(-10 * time.Minute)})
+	_, _ = store.Register(Session{ID: "stopped-next", Status: StatusStopped, LastSeenAt: now.Add(-2 * time.Minute)})
+	_, _ = store.Register(Session{ID: "idle-notification-newest", Status: StatusIdle, LastEvent: "Notification", LastSeenAt: now.Add(-time.Minute)})
 
 	sessions := store.List(ListFilter{})
-	want := []string{"permission-old", "tool-old", "running-old", "idle-new", "stopped-new"}
+	want := []string{
+		"permission-newer",
+		"permission-older",
+		"idle-notification-newest",
+		"stopped-next",
+		"running-older",
+		"tool-oldest",
+	}
 	if len(sessions) != len(want) {
 		t.Fatalf("got %d sessions, want %d", len(sessions), len(want))
 	}

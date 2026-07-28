@@ -54,6 +54,87 @@ func TestNewRejectsUnknownOutboundTag(t *testing.T) {
 	}
 }
 
+func TestPlanMatchesModelsInRuleOrder(t *testing.T) {
+	r, err := New(config.RoutingConfig{Rules: []config.RoutingRule{
+		{Name: "wrong-tag", FromTags: []string{"other"}, Match: &config.RoutingRuleMatch{Models: []string{"claude-*"}}, ToTags: []string{"mock-a"}, Strategy: "failover"},
+		{Name: "wrong-model", FromTags: []string{"office"}, Match: &config.RoutingRuleMatch{Models: []string{"gpt-*"}}, ToTags: []string{"mock-a"}, Strategy: "failover"},
+		{Name: "matched", FromTags: []string{"office"}, Match: &config.RoutingRuleMatch{Models: []string{"other", "claude-*"}}, ToTags: []string{"mock-b"}, Strategy: "failover"},
+		{Name: "fallback", FromTags: []string{"office"}, ToTags: []string{"mock-c"}, Strategy: "failover"},
+	}}, testProviders(), testOutbounds())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	plan, err := r.Plan(runtime.RouteContext{Request: runtime.Request{Model: "claude-sonnet-4-6"}, ActiveTag: "office"})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if plan.MatchedRule != "matched" || plan.Steps[0].OutboundName != "mock-2" {
+		t.Fatalf("Plan() = %#v, want matched rule and mock-2", plan)
+	}
+}
+
+func TestPlanModelMatchUsesOriginalModelBeforeMapping(t *testing.T) {
+	r, err := New(config.RoutingConfig{Rules: []config.RoutingRule{
+		{Name: "source-model", FromTags: []string{"office"}, Match: &config.RoutingRuleMatch{Models: []string{"client-*"}}, ToTags: []string{"mock-a"}, Strategy: "failover", ModelMap: map[string]string{"client-model": "provider-model"}},
+		{Name: "mapped-model", FromTags: []string{"office"}, Match: &config.RoutingRuleMatch{Models: []string{"provider-*"}}, ToTags: []string{"mock-b"}, Strategy: "failover"},
+	}}, testProviders(), testOutbounds())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	plan, err := r.Plan(runtime.RouteContext{Request: runtime.Request{Model: "client-model"}, ActiveTag: "office"})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if plan.MatchedRule != "source-model" || plan.Steps[0].Model != "provider-model" {
+		t.Fatalf("Plan() = %#v, want source-model matched before mapping", plan)
+	}
+}
+
+func TestPlanModelWildcardSemantics(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		model   string
+		match   bool
+	}{
+		{name: "exact", pattern: "claude", model: "claude", match: true},
+		{name: "full string", pattern: "claude", model: "claude-extra", match: false},
+		{name: "case sensitive", pattern: "Claude-*", model: "claude-sonnet", match: false},
+		{name: "star empty", pattern: "claude*", model: "claude", match: true},
+		{name: "star slash", pattern: "openai/*/mini", model: "openai/gpt/4o/mini", match: true},
+		{name: "multiple stars empty", pattern: "a**b", model: "ab", match: true},
+		{name: "question literal", pattern: "gpt-?", model: "gpt-?", match: true},
+		{name: "question not wildcard", pattern: "gpt-?", model: "gpt-4", match: false},
+		{name: "brackets literal", pattern: "model[1]", model: "model[1]", match: true},
+		{name: "backslash literal", pattern: `model\\name`, model: `model\\name`, match: true},
+		{name: "single star matches empty", pattern: "*", model: "", match: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := New(config.RoutingConfig{Rules: []config.RoutingRule{
+				{Name: "conditional", FromTags: []string{"office"}, Match: &config.RoutingRuleMatch{Models: []string{tc.pattern}}, ToTags: []string{"mock-a"}, Strategy: "failover"},
+				{Name: "fallback", FromTags: []string{"office"}, ToTags: []string{"mock-b"}, Strategy: "failover"},
+			}}, testProviders(), testOutbounds())
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			plan, err := r.Plan(runtime.RouteContext{Request: runtime.Request{Model: tc.model}, ActiveTag: "office"})
+			if err != nil {
+				t.Fatalf("Plan() error = %v", err)
+			}
+			want := "fallback"
+			if tc.match {
+				want = "conditional"
+			}
+			if plan.MatchedRule != want {
+				t.Fatalf("MatchedRule = %q, want %q", plan.MatchedRule, want)
+			}
+		})
+	}
+}
+
 func TestPlanUsesFirstMatchingRule(t *testing.T) {
 	r, err := New(config.RoutingConfig{Rules: []config.RoutingRule{
 		{Name: "rule-1", FromTags: []string{"office"}, ToTags: []string{"mock-a"}, Strategy: "failover"},

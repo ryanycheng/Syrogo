@@ -271,27 +271,68 @@ eval "$(syrogo activate codex --client responses-key)"
 - `activate` 会输出真实 shell `export` 语句供 `eval` 使用，不要把输出贴到日志里
 - 被启动的客户端仍在本地运行，Syrogo 负责承接它的模型 API 流量
 
-### 8. 映射路由模型
+### 8. 匹配并映射路由模型
 
-如果一条 route 需要接受多个入口模型名，并把它们映射成上游 provider 使用的模型名，可以在 routing rule 上使用 `model_map`：
+规则按配置顺序依次判断，`from_tags` 和可选 `match.models` 都命中的第一条规则获胜。因此同一个 Client binding tag 可以按 Haiku、Sonnet、Opus 分层，并保留最后一条无条件 fallback：
+
+```yaml
+routing:
+  rules:
+    - name: "anthropic-haiku"
+      from_tags: ["anthropic-to-responses"]
+      match:
+        models: ["claude-*-haiku-*"]
+      to_tags: ["responses-primary"]
+      strategy: "failover"
+      target_model: "gpt-5.4-mini"
+
+    - name: "anthropic-sonnet"
+      from_tags: ["anthropic-to-responses"]
+      match:
+        models: ["claude-*-sonnet-*"]
+      to_tags: ["responses-primary"]
+      strategy: "failover"
+      target_model: "gpt-5.4"
+
+    - name: "anthropic-opus"
+      from_tags: ["anthropic-to-responses"]
+      match:
+        models: ["claude-*-opus-*"]
+      to_tags: ["responses-primary"]
+      strategy: "failover"
+      target_model: "gpt-5.4-pro"
+
+    # 最后一条无条件规则保留 bootstrap 旧 fallback 行为。
+    - name: "anthropic-fallback"
+      from_tags: ["anthropic-to-responses"]
+      to_tags: ["responses-primary"]
+      strategy: "failover"
+      target_model: "gpt-5.4"
+```
+
+`match.models` 只检查客户端原始请求中的 `model`，并且发生在任何模型改写之前。它不会识别 Claude Code 的 agent 模式或 Plan 模式，也不会检查 prompt、messages、tool 声明或 tool result。匹配区分大小写并覆盖完整 model 字符串；仅 `*` 表示零个或多个字符，不支持正则、`?` 或字符类。省略 `match` 或设为 null 表示对匹配 tag 无条件命中，因此 fallback 必须放在更具体规则之后。未知 model 不会自动降级，只能命中显式 pattern 或后续无条件 fallback。
+
+模型处理分为三个独立阶段：
+
+1. `match.models` 使用客户端原始 requested model 选择 route。
+2. 选中的 route 使用 `target_model` 或精确 key 的 `model_map` 改写模型（两者不能同时配置）。
+3. 执行计划中的每个 outbound 分别用自己的 canonical `models[].name` 和 aliases 解析改写后的模型。
+
+例如，多模型映射 route 可以配置为：
 
 ```yaml
 routing:
   rules:
     - name: "responses-route"
-      from_tags:
-        - "responses"
-      to_tags:
-        - "responses-primary"
+      from_tags: ["responses"]
+      to_tags: ["responses-primary"]
       strategy: "failover"
       model_map:
         gpt-4: "gpt-4o-mini"
         claude-sonnet-4-6: "gpt-5.4"
 ```
 
-如果整条规则固定覆盖为一个目标模型，使用 `target_model`；如果要按请求模型逐项映射，使用 `model_map`。同一条规则不能同时配置两者。
-
-每个 outbound 还可以声明自己支持的 canonical 模型名和可选入口 alias：
+每个 outbound 还可以声明自己支持的 canonical 模型名和可选 alias：
 
 ```yaml
 outbounds:
@@ -305,7 +346,9 @@ outbounds:
         aliases: ["gpt-4-mini", "fast"]
 ```
 
-省略 `models` 或配置为空列表表示不限制模型。路由会先应用 `target_model` 或 `model_map`，然后每个 fallback provider 再根据自己的 canonical 名称与 alias 独立解析映射后的模型，因此同一 alias 可以在不同 provider 上对应不同的上游模型名。不接受该模型的 provider 会被跳过；如果执行计划中的 provider 都不接受，入口协议会收到 HTTP 404 和 `model_not_found`（或对应协议的错误 envelope）。
+省略 `models` 或配置为空列表表示不限制模型。完成 route 匹配与 route 级改写后，每个 fallback provider 再根据自己的 canonical 名称与 alias 独立解析 routed model，因此同一 alias 可以在不同 provider 上对应不同的上游模型名。不接受该模型的 provider 会被跳过，系统不会自动降级；如果执行计划中的 provider 都不接受，入口协议会收到 HTTP 404 和 `model_not_found`（或对应协议的错误 envelope）。
+
+通过 Admin API 或内置 Admin UI 创建、更新、删除 Route 时，会原子保存配置并立即热 Apply。规则顺序就是运行时优先级；`POST /admin/config/routes/reorder` 使用 `GET /admin/config/routes` 返回的 `order_revision` 检测并发冲突，保存全局顺序后立即热 Apply，不需要额外点击 Apply。外部工具或人工直接修改 YAML 后仍需调用 `/admin/config/apply`。
 
 ### 9. 配置 outbound 代理
 

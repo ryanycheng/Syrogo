@@ -2,6 +2,7 @@ package router
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
@@ -12,6 +13,8 @@ import (
 type compiledRule struct {
 	name             string
 	fromTags         []string
+	modelPatterns    []wildcardPattern
+	hasModelMatch    bool
 	toTags           []string
 	strategy         runtime.RoutingStrategy
 	modelMap         map[string]string
@@ -76,6 +79,9 @@ func (r *Router) plan(ctx runtime.RouteContext, mutate bool) (runtime.ExecutionP
 		if !matchTag(rule.fromTags, ctx.ActiveTag) {
 			continue
 		}
+		if !rule.matchesModel(ctx.Request.Model) {
+			continue
+		}
 
 		if len(rule.resolvedSet) == 0 {
 			return runtime.ExecutionPlan{}, provider.NewRetryableError(fmt.Errorf("routing rule %q has no enabled outbounds", rule.name))
@@ -136,6 +142,74 @@ func matchTag(tags []string, activeTag string) bool {
 	return false
 }
 
+type wildcardPattern struct {
+	literals     []string
+	leadingStar  bool
+	trailingStar bool
+}
+
+func compileModelPatterns(match *config.RoutingRuleMatch) []wildcardPattern {
+	if match == nil {
+		return nil
+	}
+	patterns := make([]wildcardPattern, 0, len(match.Models))
+	for _, pattern := range match.Models {
+		parts := strings.Split(pattern, "*")
+		literals := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if part != "" {
+				literals = append(literals, part)
+			}
+		}
+		patterns = append(patterns, wildcardPattern{
+			literals:     literals,
+			leadingStar:  strings.HasPrefix(pattern, "*"),
+			trailingStar: strings.HasSuffix(pattern, "*"),
+		})
+	}
+	return patterns
+}
+
+func (r compiledRule) matchesModel(model string) bool {
+	if !r.hasModelMatch {
+		return true
+	}
+	for _, pattern := range r.modelPatterns {
+		if pattern.matches(model) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p wildcardPattern) matches(value string) bool {
+	if len(p.literals) == 0 {
+		return true
+	}
+
+	position := 0
+	for i, literal := range p.literals {
+		last := i == len(p.literals)-1
+		if i == 0 && !p.leadingStar {
+			if !strings.HasPrefix(value, literal) {
+				return false
+			}
+			position = len(literal)
+			continue
+		}
+		if last && !p.trailingStar {
+			start := len(value) - len(literal)
+			return start >= position && strings.HasSuffix(value, literal)
+		}
+		index := strings.Index(value[position:], literal)
+		if index < 0 {
+			return false
+		}
+		position += index + len(literal)
+	}
+	return p.trailingStar || position == len(value)
+}
+
 func compileRules(rules []config.RoutingRule, outboundByTag map[string][]string) []compiledRule {
 	compiled := make([]compiledRule, 0, len(rules))
 	for i, rule := range rules {
@@ -157,6 +231,8 @@ func compileRules(rules []config.RoutingRule, outboundByTag map[string][]string)
 		compiled = append(compiled, compiledRule{
 			name:             name,
 			fromTags:         append([]string(nil), rule.FromTags...),
+			modelPatterns:    compileModelPatterns(rule.Match),
+			hasModelMatch:    rule.Match != nil,
 			toTags:           append([]string(nil), rule.ToTags...),
 			strategy:         runtime.RoutingStrategy(rule.Strategy),
 			modelMap:         compileModelMap(rule),

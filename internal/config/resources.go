@@ -1,6 +1,11 @@
 package config
 
-import "fmt"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+)
 
 const RedactedValue = "<redacted>"
 
@@ -180,6 +185,35 @@ func DeleteRoute(cfg Config, name string) Config {
 	}
 	cfg.Routing.Rules = rules
 	return cfg
+}
+
+func RouteOrderRevision(rules []RoutingRule) string {
+	data, _ := json.Marshal(rules)
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func MoveRoute(cfg Config, fromIndex, toIndex int) (Config, error) {
+	if fromIndex < 0 || fromIndex >= len(cfg.Routing.Rules) {
+		return cfg, fmt.Errorf("from_index %d is out of bounds", fromIndex)
+	}
+	if toIndex < 0 || toIndex >= len(cfg.Routing.Rules) {
+		return cfg, fmt.Errorf("to_index %d is out of bounds", toIndex)
+	}
+	if fromIndex == toIndex {
+		return cfg, fmt.Errorf("from_index and to_index must differ")
+	}
+
+	rules := append([]RoutingRule(nil), cfg.Routing.Rules...)
+	moved := rules[fromIndex]
+	if fromIndex < toIndex {
+		copy(rules[fromIndex:toIndex], rules[fromIndex+1:toIndex+1])
+	} else {
+		copy(rules[toIndex+1:fromIndex+1], rules[toIndex:fromIndex])
+	}
+	rules[toIndex] = moved
+	cfg.Routing.Rules = rules
+	return cfg, nil
 }
 
 func OutboundEnabled(outbound OutboundSpec) bool {

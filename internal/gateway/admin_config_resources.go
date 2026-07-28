@@ -70,14 +70,27 @@ func (e *bindingTagLastSourceError) Error() string {
 }
 
 type routeResourceRequest struct {
-	Name        string            `json:"name"`
-	FromTags    []string          `json:"from_tags"`
-	ToTags      []string          `json:"to_tags"`
-	Strategy    string            `json:"strategy"`
-	Weights     map[string]int    `json:"weights"`
-	TargetModel string            `json:"target_model"`
-	ModelMap    map[string]string `json:"model_map"`
+	Name        string                   `json:"name"`
+	FromTags    []string                 `json:"from_tags"`
+	ToTags      []string                 `json:"to_tags"`
+	Strategy    string                   `json:"strategy"`
+	Weights     map[string]int           `json:"weights"`
+	TargetModel string                   `json:"target_model"`
+	ModelMap    map[string]string        `json:"model_map"`
+	Match       *config.RoutingRuleMatch `json:"match"`
 }
+
+type reorderRoutesRequest struct {
+	FromIndex        int    `json:"from_index"`
+	ToIndex          int    `json:"to_index"`
+	ExpectedRevision string `json:"expected_revision"`
+}
+
+type routeOrderConflictError struct {
+	CurrentRevision string
+}
+
+func (e *routeOrderConflictError) Error() string { return "route order revision conflict" }
 
 type deleteRouteRequest struct {
 	Name string `json:"name"`
@@ -112,13 +125,14 @@ type clientResourceResponse struct {
 }
 
 type routeResourceResponse struct {
-	Name        string            `json:"name"`
-	FromTags    []string          `json:"from_tags"`
-	ToTags      []string          `json:"to_tags"`
-	Strategy    string            `json:"strategy"`
-	Weights     map[string]int    `json:"weights"`
-	TargetModel string            `json:"target_model"`
-	ModelMap    map[string]string `json:"model_map"`
+	Name        string                   `json:"name"`
+	FromTags    []string                 `json:"from_tags"`
+	ToTags      []string                 `json:"to_tags"`
+	Strategy    string                   `json:"strategy"`
+	Weights     map[string]int           `json:"weights"`
+	TargetModel string                   `json:"target_model"`
+	ModelMap    map[string]string        `json:"model_map"`
+	Match       *config.RoutingRuleMatch `json:"match"`
 }
 
 func (h *Handler) handleAdminSession(w http.ResponseWriter, r *http.Request) {
@@ -436,9 +450,13 @@ func (h *Handler) handleConfigRoutes(w http.ResponseWriter, r *http.Request) {
 			Weights:     rule.Weights,
 			TargetModel: rule.TargetModel,
 			ModelMap:    rule.ModelMap,
+			Match:       rule.Match,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":          items,
+		"order_revision": config.RouteOrderRevision(cfg.Routing.Rules),
+	})
 }
 
 func (h *Handler) handleConfigRouteUpsert(w http.ResponseWriter, r *http.Request) {
@@ -455,8 +473,66 @@ func (h *Handler) handleConfigRouteUpsert(w http.ResponseWriter, r *http.Request
 		return
 	}
 	h.writeAdminConfigMutation(w, r, "route_upsert_"+req.Name, func(cfg config.Config) (config.Config, error) {
-		return config.UpsertRoute(cfg, config.RoutingRule(req)), nil
+		return config.UpsertRoute(cfg, config.RoutingRule{
+			Name:        req.Name,
+			FromTags:    req.FromTags,
+			ToTags:      req.ToTags,
+			Strategy:    req.Strategy,
+			Weights:     req.Weights,
+			TargetModel: req.TargetModel,
+			ModelMap:    req.ModelMap,
+			Match:       req.Match,
+		}), nil
 	})
+}
+
+func (h *Handler) handleConfigRoutesReorder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.authorizeAdmin(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	var req reorderRoutesRequest
+	if !decodeJSONResourceRequest(w, r, &req) {
+		return
+	}
+	if req.FromIndex < 0 || req.ToIndex < 0 || req.FromIndex == req.ToIndex {
+		writeError(w, http.StatusBadRequest, "from_index and to_index must be distinct non-negative indexes")
+		return
+	}
+	if req.ExpectedRevision == "" {
+		writeError(w, http.StatusBadRequest, "expected_revision is required")
+		return
+	}
+	if h.configReloader == nil {
+		writeError(w, http.StatusServiceUnavailable, "config reload is not configured")
+		return
+	}
+	result, err := h.configReloader.MutateConfig(r.Context(), "routes_reorder", func(cfg config.Config) (config.Config, error) {
+		currentRevision := config.RouteOrderRevision(cfg.Routing.Rules)
+		if req.ExpectedRevision != currentRevision {
+			return cfg, &routeOrderConflictError{CurrentRevision: currentRevision}
+		}
+		return config.MoveRoute(cfg, req.FromIndex, req.ToIndex)
+	})
+	if err != nil {
+		var conflict *routeOrderConflictError
+		if errors.As(err, &conflict) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"ok":               false,
+				"error":            err.Error(),
+				"error_code":       "route_order_conflict",
+				"current_revision": conflict.CurrentRevision,
+			})
+			return
+		}
+		writeAdminConfigMutationError(w, result, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) handleConfigRouteDelete(w http.ResponseWriter, r *http.Request) {
@@ -503,31 +579,35 @@ func (h *Handler) writeAdminConfigMutation(w http.ResponseWriter, r *http.Reques
 	}
 	result, err := h.configReloader.MutateConfig(r.Context(), reason, mutate)
 	if err != nil {
-		response := map[string]any{
-			"ok":                false,
-			"saved":             result.Saved,
-			"applied":           result.Applied,
-			"restart_required":  result.RestartRequired,
-			"reason":            result.Reason,
-			"history_id":        result.HistoryID,
-			"quota_state_reset": result.QuotaStateReset,
-			"error":             err.Error(),
-		}
-		var bindingErr *bindingTagLastSourceError
-		if errors.As(err, &bindingErr) {
-			response["error_code"] = "binding_tag_last_source"
-			response["details"] = map[string]any{
-				"operation":   bindingErr.Operation,
-				"client":      bindingErr.Client,
-				"inbound":     bindingErr.Inbound,
-				"tag":         bindingErr.Tag,
-				"route_names": bindingErr.RouteNames,
-			}
-		}
-		writeJSON(w, http.StatusBadRequest, response)
+		writeAdminConfigMutationError(w, result, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func writeAdminConfigMutationError(w http.ResponseWriter, result ReloadResult, err error) {
+	response := map[string]any{
+		"ok":                false,
+		"saved":             result.Saved,
+		"applied":           result.Applied,
+		"restart_required":  result.RestartRequired,
+		"reason":            result.Reason,
+		"history_id":        result.HistoryID,
+		"quota_state_reset": result.QuotaStateReset,
+		"error":             err.Error(),
+	}
+	var bindingErr *bindingTagLastSourceError
+	if errors.As(err, &bindingErr) {
+		response["error_code"] = "binding_tag_last_source"
+		response["details"] = map[string]any{
+			"operation":   bindingErr.Operation,
+			"client":      bindingErr.Client,
+			"inbound":     bindingErr.Inbound,
+			"tag":         bindingErr.Tag,
+			"route_names": bindingErr.RouteNames,
+		}
+	}
+	writeJSON(w, http.StatusBadRequest, response)
 }
 
 func validateClientTagRemoval(cfg config.Config, operation, inboundName, ref, tag string) error {

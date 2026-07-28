@@ -933,6 +933,79 @@ func TestConfigValidateRejectsRoutingModelMapEmptyTarget(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRoutingRuleModelMatch(t *testing.T) {
+	t.Run("valid patterns are accepted", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Routing.Rules[0].Match = &RoutingRuleMatch{Models: []string{"claude-*", "literal?[]\\", "*"}}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	tests := []struct {
+		name    string
+		models  []string
+		wantErr string
+	}{
+		{name: "missing models", wantErr: "routing.rules[0].match.models must contain at least one pattern"},
+		{name: "empty pattern", models: []string{""}, wantErr: "routing.rules[0].match.models[0] must not be empty"},
+		{name: "leading whitespace", models: []string{" claude-*"}, wantErr: "routing.rules[0].match.models[0] must not have leading or trailing whitespace"},
+		{name: "trailing whitespace", models: []string{"claude-* "}, wantErr: "routing.rules[0].match.models[0] must not have leading or trailing whitespace"},
+		{name: "control character", models: []string{"claude-\x00model"}, wantErr: "routing.rules[0].match.models[0] must not contain control characters"},
+		{name: "duplicate", models: []string{"claude-*", "claude-*"}, wantErr: "routing.rules[0].match.models[1] duplicates pattern \"claude-*\""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Routing.Rules[0].Match = &RoutingRuleMatch{Models: tc.models}
+			if err := cfg.Validate(); err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("Validate() error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseBytesRoutingRuleMatchOmittedAndNullAreFallbacks(t *testing.T) {
+	for _, matchYAML := range []string{"", "      match: null\n"} {
+		data := []byte(`server: {listen: ":8080"}
+outbounds: [{name: mock, protocol: mock, tag: mock-tag}]
+routing:
+  rules:
+    - from_tags: [office]
+      to_tags: [mock-tag]
+      strategy: failover
+` + matchYAML)
+		cfg, err := ParseBytes(data)
+		if err != nil {
+			t.Fatalf("ParseBytes() error = %v", err)
+		}
+		if cfg.Routing.Rules[0].Match != nil {
+			t.Fatalf("Match = %#v, want nil fallback", cfg.Routing.Rules[0].Match)
+		}
+	}
+}
+
+func TestParseBytesRoutingRuleMatchModels(t *testing.T) {
+	data := []byte(`server: {listen: ":8080"}
+outbounds: [{name: mock, protocol: mock, tag: mock-tag}]
+routing:
+  rules:
+    - from_tags: [office]
+      match:
+        models: ["claude-*", "openai/gpt-?"]
+      to_tags: [mock-tag]
+      strategy: failover
+`)
+	cfg, err := ParseBytes(data)
+	if err != nil {
+		t.Fatalf("ParseBytes() error = %v", err)
+	}
+	match := cfg.Routing.Rules[0].Match
+	if match == nil || len(match.Models) != 2 || match.Models[1] != "openai/gpt-?" {
+		t.Fatalf("Match = %#v, want parsed model patterns", match)
+	}
+}
+
 func TestConfigValidateSupportsWeightedRoundRobin(t *testing.T) {
 	cfg := validConfig()
 	cfg.Routing.Rules[0].Strategy = "weighted_round_robin"

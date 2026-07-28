@@ -44,6 +44,8 @@ button {
 }
 
 button:hover { background: var(--primary-dark); border-color: var(--primary-dark); }
+button:disabled { cursor: not-allowed; opacity: 0.42; }
+button:disabled:hover { background: inherit; border-color: inherit; }
 button.danger { background: #fff; border-color: #ffd2d0; color: var(--danger); }
 button.danger:hover { background: #fff2f1; border-color: #ffb8b5; }
 button.secondary { background: #f2f3f5; color: #1f2329; border-color: #dee0e3; }
@@ -401,6 +403,12 @@ td pre { margin: 0; max-height: 110px; overflow: auto; border-radius: 8px; backg
 .heatmap-cell:focus { box-shadow: 0 0 0 3px rgba(51, 112, 255, 0.22); }
 .daily-records { margin-top: 12px; box-shadow: none; }
 .daily-records table { min-width: 720px; }
+.route-table { min-width: 1120px; }
+.route-table th:first-child, .route-table td:first-child { width: 112px; }
+.route-order-actions { display: flex; gap: 5px; margin-top: 7px; }
+.route-order-actions button { min-width: 30px; padding: 4px 7px; }
+.route-patterns { display: grid; gap: 5px; }
+.route-patterns code { width: fit-content; max-width: 260px; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 6px; background: #f5f7fa; padding: 3px 6px; font-size: 12px; }
 
 @media (max-width: 900px) {
   .login-page { min-height: 100vh; overflow: auto; padding: 24px; }

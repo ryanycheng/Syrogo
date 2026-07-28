@@ -271,6 +271,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/config/client-binding/upsert", h.withAdminAudit("config_client_binding_upsert", h.handleConfigClientBindingUpsert))
 	mux.HandleFunc("/admin/config/client-binding/delete", h.withAdminAudit("config_client_binding_delete", h.handleConfigClientBindingDelete))
 	mux.HandleFunc("/admin/config/routes", h.withAdminAudit("config_routes", h.handleConfigRoutes))
+	mux.HandleFunc("/admin/config/routes/reorder", h.withAdminAudit("config_routes_reorder", h.handleConfigRoutesReorder))
 	mux.HandleFunc("/admin/config/route/upsert", h.withAdminAudit("config_route_upsert", h.handleConfigRouteUpsert))
 	mux.HandleFunc("/admin/config/route/delete", h.withAdminAudit("config_route_delete", h.handleConfigRouteDelete))
 	mux.HandleFunc("/admin/config/validate", h.withAdminAudit("config_validate", h.handleConfigValidate))
@@ -550,6 +551,10 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/config/routes" {
 		h.handleConfigRoutes(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/config/routes/reorder" {
+		h.handleConfigRoutesReorder(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/config/route/upsert" {

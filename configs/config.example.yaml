@@ -100,6 +100,45 @@ routing:
       #   gpt-4: "gpt-4o-mini"
       #   claude-sonnet-4-6: "gpt-5.4"
 
+    # Rules are evaluated in order; the first rule whose from_tags and optional match.models
+    # both match wins. match.models sees only the client's original requested model. Patterns
+    # are full-string, case-sensitive, and support only * as a wildcard. It does not inspect
+    # agent/Plan mode, prompts, messages, tools, or tool results.
+    - name: "anthropic-haiku-to-responses"
+      from_tags:
+        - "anthropic-to-responses"
+      match:
+        models:
+          - "claude-*-haiku-*"
+      to_tags:
+        - "responses-primary"
+      strategy: "failover"
+      target_model: "gpt-5.4-mini"
+
+    - name: "anthropic-sonnet-to-responses"
+      from_tags:
+        - "anthropic-to-responses"
+      match:
+        models:
+          - "claude-*-sonnet-*"
+      to_tags:
+        - "responses-primary"
+      strategy: "failover"
+      target_model: "gpt-5.4"
+
+    - name: "anthropic-opus-to-responses"
+      from_tags:
+        - "anthropic-to-responses"
+      match:
+        models:
+          - "claude-*-opus-*"
+      to_tags:
+        - "responses-primary"
+      strategy: "failover"
+      target_model: "gpt-5.4-pro"
+
+    # Keep an unconditional rule last as the bootstrap-compatible fallback. Unknown models do
+    # not automatically downgrade; they reach this rule only because it has no match block.
     - name: "anthropic-to-responses-route"
       from_tags:
         - "anthropic-to-responses"

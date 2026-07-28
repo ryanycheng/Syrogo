@@ -95,7 +95,14 @@ http://127.0.0.1:23233
 ssh -L 23233:127.0.0.1:23233 user@server
 ```
 
-然后在本机访问 `http://127.0.0.1:23233`。若必须跨主机长期提供管理入口，应在 Console 外层配置受信任的 TLS 反向代理和访问控制；不要直接公开明文 loopback 管理面，也不要把 Admin token 写入代理配置。
+然后在本机访问 `http://127.0.0.1:23233`。Console 监听配置持久化在 `/etc/syrogo-console.env`，默认值为 `127.0.0.1:23233`，普通升级不会覆盖；首次升级到支持该文件的版本时，安装器会从旧 systemd unit 迁移已有地址。首次安装或主动修改监听地址可执行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh \
+  | sudo env SYROGO_CONSOLE_LISTEN=0.0.0.0:23233 bash
+```
+
+监听值必须包含固定端口 `23233`。若必须跨主机长期提供管理入口，应在 Console 外层配置受信任的 TLS 反向代理、访问控制和防火墙；不要直接公开明文管理面，也不要把 Admin token 写入代理配置。
 
 ## 6. 配置与验证
 
@@ -129,11 +136,11 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads
   | sudo bash -s -- --version v0.16.3 --console-only
 ```
 
-升级前备份 `/opt/syrogo/config/config.yaml`，升级后检查两个 `/healthz` 和一条真实模型请求。
+升级前备份 `/opt/syrogo/config/config.yaml`，升级后检查两个 `/healthz` 和一条真实模型请求。Console 的 `/etc/syrogo-console.env` 在普通升级中保持不变。
 
 ## 8. 卸载
 
-只卸载 Console，不影响 Core：
+只卸载 Console，不影响 Core；该操作同时删除 `/etc/syrogo-console.env`：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads/main/scripts/install.sh \

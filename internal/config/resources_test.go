@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestRedactedConfigRedactsSecrets(t *testing.T) {
 	cfg := minimalResourceConfig()
@@ -107,6 +110,39 @@ func TestOutboundAndRouteResources(t *testing.T) {
 	cfg = DeleteRoute(cfg, "mobile-route")
 	if len(cfg.Routing.Rules) != 1 {
 		t.Fatalf("Rules = %#v", cfg.Routing.Rules)
+	}
+}
+
+func TestRouteOrderRevisionAndMove(t *testing.T) {
+	cfg := minimalResourceConfig()
+	cfg.Routing.Rules = append(cfg.Routing.Rules,
+		RoutingRule{Name: "second", FromTags: []string{"office"}, ToTags: []string{"mock-primary"}, Strategy: "failover"},
+		RoutingRule{Name: "third", FromTags: []string{"office"}, ToTags: []string{"mock-primary"}, Strategy: "failover"},
+	)
+	originalRules := append([]RoutingRule(nil), cfg.Routing.Rules...)
+	originalRevision := RouteOrderRevision(cfg.Routing.Rules)
+	if !strings.HasPrefix(originalRevision, "sha256:") || originalRevision != RouteOrderRevision(cfg.Routing.Rules) {
+		t.Fatalf("RouteOrderRevision() = %q, want stable sha256 revision", originalRevision)
+	}
+
+	moved, err := MoveRoute(cfg, 0, 2)
+	if err != nil {
+		t.Fatalf("MoveRoute() error = %v", err)
+	}
+	if got := []string{moved.Routing.Rules[0].Name, moved.Routing.Rules[1].Name, moved.Routing.Rules[2].Name}; got[0] != "second" || got[1] != "third" || got[2] != "office-route" {
+		t.Fatalf("moved route order = %v", got)
+	}
+	if cfg.Routing.Rules[0].Name != originalRules[0].Name || cfg.Routing.Rules[1].Name != originalRules[1].Name {
+		t.Fatalf("MoveRoute() aliased input rules: %#v", cfg.Routing.Rules)
+	}
+	if RouteOrderRevision(moved.Routing.Rules) == originalRevision {
+		t.Fatal("route order revision did not change after move")
+	}
+
+	for _, indexes := range [][2]int{{-1, 0}, {0, -1}, {3, 0}, {0, 3}, {1, 1}} {
+		if _, err := MoveRoute(cfg, indexes[0], indexes[1]); err == nil {
+			t.Fatalf("MoveRoute(%d, %d) error = nil", indexes[0], indexes[1])
+		}
 	}
 }
 
