@@ -109,6 +109,34 @@ func TestReloadManagerRequiresRestartForListenerChange(t *testing.T) {
 	}
 }
 
+func TestRestartRequiredReasonForSessionSnapshotConfiguration(t *testing.T) {
+	base := baseConfig()
+	base.Sessions.Snapshot = config.SessionSnapshotConfig{
+		Enabled:       boolPointer(true),
+		Dir:           "tmp/sessions",
+		FlushInterval: config.DurationValue("5s"),
+	}
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{"enabled", func(c *config.Config) { c.Sessions.Snapshot.Enabled = boolPointer(false) }, "session snapshot configuration changed"},
+		{"dir", func(c *config.Config) { c.Sessions.Snapshot.Dir = "tmp/other-sessions" }, "session snapshot configuration changed"},
+		{"interval", func(c *config.Config) { c.Sessions.Snapshot.FlushInterval = config.DurationValue("10s") }, "session snapshot configuration changed"},
+		{"equivalent interval", func(c *config.Config) { c.Sessions.Snapshot.FlushInterval = config.DurationValue("5000ms") }, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			next := base
+			tc.mutate(&next)
+			if got := restartRequiredReason(base, next); got != tc.want {
+				t.Fatalf("restartRequiredReason() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRestartRequiredReasonForLoggingConfiguration(t *testing.T) {
 	falseValue := false
 	trueValue := true

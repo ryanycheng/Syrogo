@@ -137,16 +137,17 @@ func run(configPath string, cfg config.Config, devLogEnabled bool, logPath strin
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownErr := application.Server.Shutdown(shutdownCtx)
+	cancelShutdown()
 
-	if err := application.Server.Shutdown(ctx); err != nil {
-		return err
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+	closeErr := application.Close(closeCtx)
+	cancelClose()
+	if shutdownErr != nil {
+		return shutdownErr
 	}
-	if err := application.Close(ctx); err != nil {
-		return err
-	}
-	return nil
+	return closeErr
 }
 
 type startupBannerData struct {

@@ -251,6 +251,12 @@ outbounds:
     #   usage_estimation: true
     #   usage_estimation_mode: "heuristic"
 
+sessions:
+  snapshot:
+    enabled: true
+    dir: "./data/sessions"
+    flush_interval: "5s"
+
 governance:
   quota:
     snapshot:

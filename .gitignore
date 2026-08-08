@@ -1,6 +1,7 @@
 bin/
 dist/
 tmp/
+data/
 docs/local/
 /syrogo
 coverage.out

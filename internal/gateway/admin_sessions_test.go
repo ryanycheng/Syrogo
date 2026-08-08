@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
 	"github.com/ryanycheng/Syrogo/internal/provider"
@@ -307,6 +308,39 @@ func TestAdminSessionsRequiresAdminToken(t *testing.T) {
 	for _, want := range []string{"office-key", `"tag":"office"`, "tmux attach -t", "tmux select-window", "tmux select-pane"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body = %s, want %s", body, want)
+		}
+	}
+}
+
+func TestAdminSessionsIncludesOptionalRecoveryFields(t *testing.T) {
+	h := newAdminTestHandler(t)
+	recoveredAt := time.Date(2026, time.August, 12, 9, 30, 0, 0, time.UTC)
+	registered, err := h.sessionStore.Register(sessions.Session{
+		ID:                  "recovering-session",
+		ClientName:          "office-key",
+		InboundName:         "openai-entry",
+		Status:              sessions.StatusUnknown,
+		HeartbeatCapability: sessions.HeartbeatCapabilityV1,
+		RecoveryPending:     true,
+		RecoveredAt:         &recoveredAt,
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, authorizedRequest(http.MethodGet, "/admin/sessions", "admin-ui-token", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{
+		`"recovered_at":"2026-08-12T09:30:00Z"`,
+		`"last_heartbeat_at":"` + registered.LastHeartbeatAt.Format(time.RFC3339Nano) + `"`,
+	} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Fatalf("body = %s, want %s", w.Body.String(), want)
 		}
 	}
 }

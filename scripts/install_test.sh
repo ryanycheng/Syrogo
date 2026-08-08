@@ -121,6 +121,28 @@ test_config_mode_and_preservation() {
   rm -rf "$fixture"
 }
 
+test_install_directories_data_mode_and_preservation() {
+  local fixture mode marker
+  fixture="$(mktemp -d)"
+  INSTALL_ROOT="$fixture/root"
+
+  ensure_install_directories
+  [ -d "$INSTALL_ROOT/data" ] || {
+    printf 'FAIL: install data directory was not created\n' >&2
+    exit 1
+  }
+  mode="$(stat -c '%a' "$INSTALL_ROOT/data")"
+  assert_eq "700" "$mode" "new data directory mode"
+
+  printf 'preserve on upgrade\n' > "$INSTALL_ROOT/data/marker"
+  ensure_install_directories
+  mode="$(stat -c '%a' "$INSTALL_ROOT/data")"
+  marker="$(<"$INSTALL_ROOT/data/marker")"
+  assert_eq "700" "$mode" "data directory mode after upgrade"
+  assert_eq "preserve on upgrade" "$marker" "existing data contents preservation"
+  rm -rf "$fixture"
+}
+
 test_version_receipts() {
   local fixture output
   fixture="$(mktemp -d)"
@@ -229,6 +251,7 @@ test_bootstrap_config_rendering() {
 
 test_verify_release_archive
 test_config_mode_and_preservation
+test_install_directories_data_mode_and_preservation
 test_version_receipts
 test_bootstrap_argument_contract
 test_bootstrap_config_rendering

@@ -466,6 +466,13 @@ ensure_service_user() {
   useradd --system --home-dir "$INSTALL_ROOT" --shell /usr/sbin/nologin "$SERVICE_USER"
 }
 
+ensure_install_directories() {
+  install -d -m 0755 "$INSTALL_ROOT/bin" "$INSTALL_ROOT/config" "$INSTALL_ROOT/logs" "$INSTALL_ROOT/tmp"
+  if [ ! -d "$INSTALL_ROOT/data" ]; then
+    install -d -m 0700 "$INSTALL_ROOT/data"
+  fi
+}
+
 extract_binary() {
   local extract_dir binary_source
   [ -f "$ARCHIVE" ] || fail "archive not found: $ARCHIVE"
@@ -481,7 +488,7 @@ extract_binary() {
   binary_source="$(find "$extract_dir" -type f -name syrogo | head -n 1)"
   [ -n "$binary_source" ] || fail "syrogo binary not found in archive"
 
-  install -d -m 0755 "$INSTALL_ROOT/bin" "$INSTALL_ROOT/config" "$INSTALL_ROOT/logs" "$INSTALL_ROOT/tmp"
+  ensure_install_directories
   install -m 0755 "$binary_source" "$BIN_PATH"
 }
 

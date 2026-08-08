@@ -25,6 +25,7 @@ type Config struct {
 	Outbounds  []OutboundSpec   `yaml:"outbounds"`
 	Accounting AccountingConfig `yaml:"accounting"`
 	Governance GovernanceConfig `yaml:"governance"`
+	Sessions   SessionsConfig   `yaml:"sessions"`
 	Admin      AdminConfig      `yaml:"admin"`
 }
 
@@ -214,6 +215,20 @@ func (d DurationValue) Duration() time.Duration {
 		return 0
 	}
 	return parsed
+}
+
+type SessionsConfig struct {
+	Snapshot SessionSnapshotConfig `yaml:"snapshot"`
+}
+
+type SessionSnapshotConfig struct {
+	Enabled       *bool         `yaml:"enabled"`
+	Dir           string        `yaml:"dir"`
+	FlushInterval DurationValue `yaml:"flush_interval"`
+}
+
+func (c SessionSnapshotConfig) EnabledEffective() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 type GovernanceConfig struct {
@@ -424,6 +439,13 @@ func mappingValue(node *yaml.Node, key string) *yaml.Node {
 }
 
 func (c *Config) applyDefaults() {
+	snapshot := &c.Sessions.Snapshot
+	if snapshot.Dir == "" {
+		snapshot.Dir = "./data/sessions"
+	}
+	if snapshot.FlushInterval == "" {
+		snapshot.FlushInterval = DurationValue("5s")
+	}
 	if c.Admin.Logs.Path == "" {
 		c.Admin.Logs.Path = "tmp/dev.log"
 	}
@@ -463,6 +485,14 @@ func (c *Config) applyDefaults() {
 
 func (c Config) Validate() error {
 	c.applyDefaults()
+	if c.Sessions.Snapshot.EnabledEffective() {
+		if strings.TrimSpace(c.Sessions.Snapshot.Dir) == "" {
+			return fmt.Errorf("sessions.snapshot.dir is required")
+		}
+		if c.Sessions.Snapshot.FlushInterval.Duration() <= 0 {
+			return fmt.Errorf("sessions.snapshot.flush_interval must be positive")
+		}
+	}
 	if len(c.ListenAddresses()) == 0 {
 		return fmt.Errorf("server.listen or listeners is required")
 	}

@@ -271,6 +271,12 @@ Current scope:
 - `activate` prints real shell `export` statements for `eval`, so do not paste its output into logs
 - the launched client still runs locally; Syrogo handles its model API traffic
 
+#### Session snapshots
+
+Session snapshots are enabled by default. The example config uses `sessions.snapshot.dir: "./data/sessions"` with `flush_interval: "5s"`; set `sessions.snapshot.enabled: false` explicitly to disable them. Because the systemd installation uses `/opt/syrogo` as its working directory, snapshots live at `/opt/syrogo/data/sessions`. The directory is mode `0700` and snapshot files are `0600`. They contain sensitive metadata such as host, CWD, command, and tmux details, so restrict access and back up this directory.
+
+Syrogo snapshots periodically and flushes again on normal shutdown; a crash can lose at most one flush interval. After restart, previously active sessions first become `unknown` with `recovery_pending`, then heartbeat confirms them; sessions not confirmed within 45 seconds become `stopped`. This is a single-host local recovery feature and does not take over old PIDs. Core upgrades preserve `/opt/syrogo/data`, but uninstall removes all of `/opt/syrogo`, so back it up first.
+
 ### 8. Match and map route models
 
 Rules are evaluated in configuration order, and the first rule whose `from_tags` and optional `match.models` both match wins. This lets one client binding tag select Haiku, Sonnet, and Opus tiers while retaining a final unconditional fallback:

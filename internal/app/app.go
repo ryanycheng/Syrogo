@@ -32,6 +32,7 @@ type App struct {
 	clientQuotaTracker   *quota.Tracker
 	quotaSnapshotStore   *quota.SnapshotStore
 	sessionStore         *sessions.Store
+	sessionSnapshotStore *sessions.SnapshotStore
 	sessionReaper        *sessions.Reaper
 	cfg                  config.Config
 	configPath           string
@@ -64,9 +65,27 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 	}
 	runtime, err := buildRuntime(cfg, store)
 	if err != nil {
+		_ = store.Close(context.Background())
 		return nil, err
 	}
 	sessionStore := sessions.NewStore()
+	sessionSnapshotConfig := cfg.Sessions.Snapshot
+	if sessionSnapshotConfig.Dir == "" {
+		sessionSnapshotConfig.Dir = "./data/sessions"
+	}
+	if sessionSnapshotConfig.FlushInterval == "" {
+		sessionSnapshotConfig.FlushInterval = config.DurationValue("5s")
+	}
+	sessionSnapshotStore, err := sessions.NewSnapshotStore(sessions.SnapshotConfig{
+		Enabled:       sessionSnapshotConfig.EnabledEffective(),
+		Dir:           sessionSnapshotConfig.Dir,
+		FlushInterval: sessionSnapshotConfig.FlushInterval.Duration(),
+	}, sessionStore)
+	if err != nil {
+		_ = runtime.dispatcher.Close(context.Background())
+		_ = runtime.quotaSnapshotStore.Close(context.Background())
+		return nil, fmt.Errorf("create session snapshot store: %w", err)
+	}
 	listeners, bindings := buildListeners(runtime, cfg, opts.ConfigPath, sessionStore, slog.Default())
 	for _, binding := range bindings {
 		binding.handler.SetRecentLogs(opts.RecentLogs)
@@ -79,6 +98,7 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 		clientQuotaTracker:   runtime.clientQuotaTracker,
 		quotaSnapshotStore:   runtime.quotaSnapshotStore,
 		sessionStore:         sessionStore,
+		sessionSnapshotStore: sessionSnapshotStore,
 		sessionReaper:        sessions.NewReaper(sessionStore),
 		cfg:                  cfg,
 		configPath:           opts.ConfigPath,
@@ -214,6 +234,9 @@ func (a *App) Close(ctx context.Context) error {
 	}
 	var err error
 	if closeErr := a.sessionReaper.Close(ctx); closeErr != nil {
+		err = closeErr
+	}
+	if closeErr := a.sessionSnapshotStore.Close(ctx); closeErr != nil && err == nil {
 		err = closeErr
 	}
 	if a.dispatcher != nil {

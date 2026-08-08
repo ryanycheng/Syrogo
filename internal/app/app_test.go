@@ -7,14 +7,23 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryanycheng/Syrogo/internal/config"
+	"github.com/ryanycheng/Syrogo/internal/sessions"
 )
+
+func boolPointer(value bool) *bool {
+	return &value
+}
 
 func baseConfig() config.Config {
 	return config.Config{
+		Sessions:  config.SessionsConfig{Snapshot: config.SessionSnapshotConfig{Enabled: boolPointer(false)}},
 		Clients:   []config.ClientSpec{{Name: "office-key", Token: "client-token"}},
 		Listeners: []config.ListenerSpec{{Name: "public", Listen: ":8080", Inbounds: []string{"openai-entry"}}},
 		Inbounds: []config.InboundSpec{{
@@ -221,6 +230,48 @@ func TestNewInjectsClientQuotaTrackerIntoDispatcher(t *testing.T) {
 	window := app.clientQuotaTracker.ClientSnapshot()[0].Windows[0]
 	if window.UnpricedCount != 1 || window.UsedCostUSD != "" || window.Warning == "" {
 		t.Fatalf("client quota window = %#v, want unpriced terminal usage", window)
+	}
+}
+
+func TestNewRestoresSessionSnapshotAndCloseFlushes(t *testing.T) {
+	dir := t.TempDir()
+	cfg := baseConfig()
+	cfg.Sessions.Snapshot = config.SessionSnapshotConfig{
+		Enabled:       boolPointer(true),
+		Dir:           dir,
+		FlushInterval: config.DurationValue("1h"),
+	}
+
+	first, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	_, err = first.sessionStore.Register(sessions.Session{
+		ID:          "session-1",
+		ClientName:  "office-key",
+		InboundName: "openai-entry",
+		Status:      sessions.StatusRunning,
+		StartedAt:   time.Now(),
+		LastSeenAt:  time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "latest.json")); err != nil {
+		t.Fatalf("session snapshot after Close() error = %v", err)
+	}
+
+	restored, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() restore error = %v", err)
+	}
+	defer func() { _ = restored.Close(context.Background()) }()
+	loaded := restored.sessionStore.List(sessions.ListFilter{})
+	if len(loaded) != 1 || loaded[0].ID != "session-1" {
+		t.Fatalf("restored sessions = %#v, want session-1", loaded)
 	}
 }
 

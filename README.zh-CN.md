@@ -271,6 +271,12 @@ eval "$(syrogo activate codex --client responses-key)"
 - `activate` 会输出真实 shell `export` 语句供 `eval` 使用，不要把输出贴到日志里
 - 被启动的客户端仍在本地运行，Syrogo 负责承接它的模型 API 流量
 
+#### Session snapshot
+
+Session snapshot 默认启用；示例配置使用 `sessions.snapshot.dir: "./data/sessions"` 和 `flush_interval: "5s"`，可显式设置 `sessions.snapshot.enabled: false` 关闭。systemd 安装的 WorkingDirectory 为 `/opt/syrogo`，因此实际目录是 `/opt/syrogo/data/sessions`；目录权限为 `0700`，snapshot 文件为 `0600`。其中会保存 host、CWD、command、tmux 等敏感元数据，请限制访问并备份该目录。
+
+运行中会周期写 snapshot，正常关闭时再次 flush；崩溃最多丢失一个 flush interval。重启后，原 active session 先恢复为 `unknown` 且标记 `recovery_pending`，由 heartbeat 确认；45 秒内未确认则转为 `stopped`。这是单机本地恢复能力，不会接管旧 PID。Core installer 升级会保留 `/opt/syrogo/data`，但卸载会删除整个 `/opt/syrogo`，请在卸载前另行备份。
+
 ### 8. 匹配并映射路由模型
 
 规则按配置顺序依次判断，`from_tags` 和可选 `match.models` 都命中的第一条规则获胜。因此同一个 Client binding tag 可以按 Haiku、Sonnet、Opus 分层，并保留最后一条无条件 fallback：

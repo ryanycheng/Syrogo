@@ -35,6 +35,8 @@ type Session struct {
 	HeartbeatCapability string     `json:"heartbeat_capability,omitempty"`
 	LastHeartbeatAt     *time.Time `json:"last_heartbeat_at,omitempty"`
 	LeaseExpiresAt      *time.Time `json:"lease_expires_at,omitempty"`
+	RecoveryPending     bool       `json:"recovery_pending,omitempty"`
+	RecoveredAt         *time.Time `json:"recovered_at,omitempty"`
 	StoppedAt           *time.Time `json:"stopped_at,omitempty"`
 	ExitCode            *int       `json:"exit_code,omitempty"`
 	statusObservedAt    time.Time

@@ -283,6 +283,13 @@ func (m *ReloadManager) rollback(ctx context.Context, id string) (ReloadResult, 
 }
 
 func restartRequiredReason(current, next config.Config) string {
+	currentSessionSnapshot := effectiveSessionSnapshotConfig(current.Sessions.Snapshot)
+	nextSessionSnapshot := effectiveSessionSnapshotConfig(next.Sessions.Snapshot)
+	if currentSessionSnapshot.EnabledEffective() != nextSessionSnapshot.EnabledEffective() ||
+		currentSessionSnapshot.Dir != nextSessionSnapshot.Dir ||
+		currentSessionSnapshot.FlushInterval.Duration() != nextSessionSnapshot.FlushInterval.Duration() {
+		return "session snapshot configuration changed"
+	}
 	currentListeners := normalizedListeners(current)
 	nextListeners := normalizedListeners(next)
 	if len(currentListeners) != len(nextListeners) {
@@ -303,6 +310,16 @@ func restartRequiredReason(current, next config.Config) string {
 		return "logging configuration changed"
 	}
 	return ""
+}
+
+func effectiveSessionSnapshotConfig(snapshot config.SessionSnapshotConfig) config.SessionSnapshotConfig {
+	if snapshot.Dir == "" {
+		snapshot.Dir = "./data/sessions"
+	}
+	if snapshot.FlushInterval == "" {
+		snapshot.FlushInterval = config.DurationValue("5s")
+	}
+	return snapshot
 }
 
 func loggingConfigurationChanged(current, next config.AdminLogsConfig) bool {

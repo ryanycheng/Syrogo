@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"errors"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -26,9 +27,10 @@ type SweepResult struct {
 }
 
 type Store struct {
-	mu       sync.RWMutex
-	sessions map[string]Session
-	now      func() time.Time
+	mu         sync.RWMutex
+	sessions   map[string]Session
+	generation uint64
+	now        func() time.Time
 }
 
 func NewStore() *Store {
@@ -56,6 +58,8 @@ func (s *Store) Register(session Session) (Session, error) {
 		session.LastSeenAt = existing.LastSeenAt
 		session.StoppedAt = existing.StoppedAt
 		session.ExitCode = existing.ExitCode
+		session.RecoveryPending = existing.RecoveryPending
+		session.RecoveredAt = existing.RecoveredAt
 		session.statusObservedAt = existing.statusObservedAt
 		if existing.HeartbeatCapability != "" && session.HeartbeatCapability == "" {
 			session.HeartbeatCapability = existing.HeartbeatCapability
@@ -78,12 +82,13 @@ func (s *Store) Register(session Session) (Session, error) {
 		expiresAt := now.Add(DefaultLeaseTTL)
 		session.LastHeartbeatAt = &heartbeatAt
 		session.LeaseExpiresAt = &expiresAt
+		session.RecoveryPending = false
 	} else {
 		session.LastHeartbeatAt = nil
 		session.LeaseExpiresAt = nil
 	}
 	session.Command = append([]string(nil), session.Command...)
-	s.sessions[session.ID] = session
+	s.setSessionLocked(session.ID, session)
 	return cloneSession(session), nil
 }
 
@@ -119,7 +124,7 @@ func (s *Store) ApplyHookEvent(clientName, inboundName string, event HookEvent) 
 		stoppedAt := event.ReceivedAt
 		session.StoppedAt = &stoppedAt
 	}
-	s.sessions[event.SessionID] = session
+	s.setSessionLocked(event.SessionID, session)
 	return cloneSession(session), true
 }
 
@@ -139,7 +144,7 @@ func (s *Store) MarkStopped(clientName, inboundName, sessionID string, exitCode 
 	session.StoppedAt = &now
 	session.ExitCode = &exitCode
 	session.statusObservedAt = now
-	s.sessions[sessionID] = session
+	s.setSessionLocked(sessionID, session)
 	return cloneSession(session), true
 }
 
@@ -160,7 +165,11 @@ func (s *Store) Heartbeat(clientName, inboundName, sessionID string) (Session, b
 	expiresAt := now.Add(DefaultLeaseTTL)
 	session.LastHeartbeatAt = &now
 	session.LeaseExpiresAt = &expiresAt
-	s.sessions[sessionID] = session
+	if session.RecoveryPending {
+		session.RecoveryPending = false
+		session.Status = StatusUnknown
+	}
+	s.setSessionLocked(sessionID, session)
 	return cloneSession(session), true, nil
 }
 
@@ -194,6 +203,7 @@ func (s *Store) Sweep(stoppedRetention, transientTTL time.Duration) SweepResult 
 		if session.Status == StatusStopped {
 			if stoppedRetention > 0 && session.LastSeenAt.Before(now.Add(-stoppedRetention)) {
 				delete(s.sessions, id)
+				s.generation++
 				result.StoppedPruned++
 			}
 			continue
@@ -204,14 +214,14 @@ func (s *Store) Sweep(stoppedRetention, transientTTL time.Duration) SweepResult 
 			session.StoppedAt = &now
 			session.ExitCode = nil
 			session.statusObservedAt = now
-			s.sessions[id] = session
+			s.setSessionLocked(id, session)
 			result.LeaseExpired++
 			continue
 		}
 		if transientTTL > 0 && (session.Status == StatusToolRunning || session.Status == StatusCompacting) && !session.statusObservedAt.IsZero() && !now.Before(session.statusObservedAt.Add(transientTTL)) {
 			session.Status = StatusUnknown
 			session.statusObservedAt = now
-			s.sessions[id] = session
+			s.setSessionLocked(id, session)
 			result.TransientDegraded++
 		}
 	}
@@ -228,7 +238,7 @@ func (s *Store) LatestActive(clientName, inboundName string) (Session, bool) {
 	var latest Session
 	found := false
 	for _, session := range s.sessions {
-		if session.ClientName != clientName || session.InboundName != inboundName || session.Status == StatusStopped {
+		if session.ClientName != clientName || session.InboundName != inboundName || session.Status == StatusStopped || session.RecoveryPending {
 			continue
 		}
 		if !found || session.LastSeenAt.After(latest.LastSeenAt) {
@@ -265,6 +275,15 @@ func matchesFilter(session Session, filter ListFilter) bool {
 	return true
 }
 
+func (s *Store) setSessionLocked(id string, session Session) bool {
+	if existing, ok := s.sessions[id]; ok && reflect.DeepEqual(existing, session) {
+		return false
+	}
+	s.sessions[id] = session
+	s.generation++
+	return true
+}
+
 func cloneSession(session Session) Session {
 	session.Command = append([]string(nil), session.Command...)
 	if session.LeaseExpiresAt != nil {
@@ -274,6 +293,10 @@ func cloneSession(session Session) Session {
 	if session.LastHeartbeatAt != nil {
 		lastHeartbeatAt := *session.LastHeartbeatAt
 		session.LastHeartbeatAt = &lastHeartbeatAt
+	}
+	if session.RecoveredAt != nil {
+		recoveredAt := *session.RecoveredAt
+		session.RecoveredAt = &recoveredAt
 	}
 	if session.StoppedAt != nil {
 		stoppedAt := *session.StoppedAt

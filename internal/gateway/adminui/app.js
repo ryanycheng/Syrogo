@@ -148,16 +148,15 @@ function renderSessions() {
 }
 
 function renderSessionsTable(items) {
-  return `<table><thead><tr><th>Status</th><th>Client</th><th>Tag</th><th>Location</th><th>Workspace</th><th>Last seen</th><th>Commands</th></tr></thead><tbody>${items.map(renderSessionRow).join("")}</tbody></table>`;
+  return `<table><thead><tr><th>Status</th><th>Client</th><th>Tag</th><th>Location</th><th>Workspace</th><th>Activity</th><th>Commands</th></tr></thead><tbody>${items.map(renderSessionRow).join("")}</tbody></table>`;
 }
 
 function renderSessionRow(item) {
   const tmux = item.tmux || {};
   const commands = item.commands || {};
-  const status = item.status || "unknown";
   const location = tmux.present ? `${escapeHTML(tmux.session || "-")} / w${escapeHTML(tmux.window_index || "-")} / p${escapeHTML(tmux.pane_id || tmux.pane_index || "-")}` : "not in tmux";
   const command = commands.attach || commands.select_window || commands.select_pane;
-  return `<tr><td>${badge(status, sessionStatusKind(status))}</td><td><strong>${escapeHTML(item.client_name || "-")}</strong><div class="muted">${escapeHTML(item.inbound_name || "-")}</div></td><td>${badge(item.tag || "-", item.tag ? "" : "muted")}</td><td>${location}</td><td><strong>${escapeHTML(item.cwd || "-")}</strong><div class="muted">${escapeHTML(item.host || "-")}</div></td><td>${escapeHTML(formatDateTime(item.last_seen_at || item.started_at))}</td><td class="session-commands">${command ? `<code>${escapeHTML(command)}</code>` : `<span class="muted">No tmux command</span>`}</td></tr>`;
+  return `<tr><td>${sessionStatusBadge(item)}${sessionExitBadge(item)}</td><td><strong>${escapeHTML(item.client_name || "-")}</strong><div class="muted">${escapeHTML(item.inbound_name || "-")}</div></td><td>${badge(item.tag || "-", item.tag ? "" : "muted")}</td><td>${location}</td><td><strong>${escapeHTML(item.cwd || "-")}</strong><div class="muted">${escapeHTML(item.host || "-")}</div></td><td>${sessionActivity(item)}</td><td class="session-commands">${command ? `<code>${escapeHTML(command)}</code>` : `<span class="muted">No tmux command</span>`}</td></tr>`;
 }
 
 function renderSessionCards(items) {
@@ -168,11 +167,31 @@ function renderSessionCard(item) {
   const tmux = item.tmux || {};
   const commands = item.commands || {};
   const status = item.status || "unknown";
-  const statusKind = sessionStatusKind(status) || "ok";
+  const statusKind = item.recovery_pending ? "muted" : sessionStatusKind(status) || "ok";
   const location = tmux.present ? [`${escapeHTML(tmux.session || "-")}`, `w${escapeHTML(tmux.window_index || "-")}${tmux.window_name ? ` · ${escapeHTML(tmux.window_name)}` : ""}`, `p${escapeHTML(tmux.pane_id || tmux.pane_index || "-")}`].join(" / ") : "not in tmux";
   const command = commands.attach || commands.select_window || commands.select_pane;
   const commandHTML = command ? `<code>${escapeHTML(command)}</code>` : `<span class="muted">No tmux command</span>`;
-  return `<article class="session-card ${escapeHTML(statusKind)}"><div class="session-card-head"><div>${badge(status, statusKind)}<span>${escapeHTML(item.last_event || "no hook")}</span></div><strong>${escapeHTML(formatDateTime(item.last_seen_at || item.started_at))}</strong></div><div class="session-card-main"><h3>${escapeHTML(item.client_name || "-")}</h3><p>${escapeHTML(item.inbound_name || "-")} · tag ${escapeHTML(item.tag || "-")}</p></div><div class="session-card-meta"><span>tmux</span><strong>${location}</strong><span>cwd</span><strong>${escapeHTML(item.cwd || "-")}</strong><span>host</span><strong>${escapeHTML(item.host || "-")}</strong></div><div class="session-card-commands">${commandHTML}</div></article>`;
+  return `<article class="session-card ${escapeHTML(statusKind)}"><div class="session-card-head"><div>${sessionStatusBadge(item)}${sessionExitBadge(item)}<span>${escapeHTML(item.last_event || "no hook")}</span></div><strong>${escapeHTML(formatDateTime(item.last_seen_at || item.started_at))}</strong></div><div class="session-card-main"><h3>${escapeHTML(item.client_name || "-")}</h3><p>${escapeHTML(item.inbound_name || "-")} · tag ${escapeHTML(item.tag || "-")}</p></div><div class="session-card-meta"><span>tmux</span><strong>${location}</strong><span>cwd</span><strong>${escapeHTML(item.cwd || "-")}</strong><span>host</span><strong>${escapeHTML(item.host || "-")}</strong>${item.last_heartbeat_at ? `<span>heartbeat</span><strong>${escapeHTML(formatDateTime(item.last_heartbeat_at))}</strong>` : ""}${item.recovered_at ? `<span>recovered</span><strong>${escapeHTML(formatDateTime(item.recovered_at))}</strong>` : ""}</div><div class="session-card-commands">${commandHTML}</div></article>`;
+}
+
+function sessionStatusBadge(item) {
+  if (item.recovery_pending) return `${badge("recovering", "muted")}<div class="muted">waiting for heartbeat</div>`;
+  const status = item.status || "unknown";
+  return badge(status, sessionStatusKind(status));
+}
+
+function sessionExitBadge(item) {
+  if (item.status !== "stopped") return "";
+  if (item.exit_code === null || item.exit_code === undefined) return badge("exit unavailable · interrupted", "muted");
+  const code = Number(item.exit_code);
+  return badge(code === 0 ? "exit 0 · completed" : `exit ${item.exit_code} · failed`, code === 0 ? "muted" : "danger");
+}
+
+function sessionActivity(item) {
+  const rows = [`seen ${formatDateTime(item.last_seen_at || item.started_at)}`];
+  if (item.last_heartbeat_at) rows.push(`heartbeat ${formatDateTime(item.last_heartbeat_at)}`);
+  if (item.recovered_at) rows.push(`recovered ${formatDateTime(item.recovered_at)}`);
+  return `<div class="info-stack">${rows.map((row) => `<span>${escapeHTML(row)}</span>`).join("")}</div>`;
 }
 
 function setSessionsViewMode(mode) {

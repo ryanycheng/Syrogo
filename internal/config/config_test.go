@@ -62,6 +62,53 @@ routing:
 	if cfg.Inbounds[0].Name != "openai-entry" {
 		t.Fatalf("ParseBytes() inbound = %#v, want openai-entry", cfg.Inbounds[0])
 	}
+	if !cfg.Sessions.Snapshot.EnabledEffective() {
+		t.Fatal("sessions.snapshot effective enabled = false, want true")
+	}
+	if cfg.Sessions.Snapshot.Dir != "./data/sessions" {
+		t.Fatalf("sessions.snapshot.dir = %q, want ./data/sessions", cfg.Sessions.Snapshot.Dir)
+	}
+	if cfg.Sessions.Snapshot.FlushInterval != DurationValue("5s") {
+		t.Fatalf("sessions.snapshot.flush_interval = %q, want 5s", cfg.Sessions.Snapshot.FlushInterval)
+	}
+}
+
+func TestParseBytesPreservesDisabledSessionSnapshot(t *testing.T) {
+	cfg := validConfig()
+	disabled := false
+	cfg.Sessions.Snapshot.Enabled = &disabled
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal() error = %v", err)
+	}
+	parsed, err := ParseBytes(data)
+	if err != nil {
+		t.Fatalf("ParseBytes() error = %v", err)
+	}
+	if parsed.Sessions.Snapshot.EnabledEffective() {
+		t.Fatal("sessions.snapshot effective enabled = true, want false")
+	}
+}
+
+func TestConfigValidateRejectsInvalidSessionSnapshot(t *testing.T) {
+	tests := []struct {
+		name     string
+		dir      string
+		interval DurationValue
+	}{
+		{name: "dir", dir: "   ", interval: DurationValue("5s")},
+		{name: "invalid interval", dir: t.TempDir(), interval: DurationValue("later")},
+		{name: "non-positive interval", dir: t.TempDir(), interval: DurationValue("0s")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Sessions.Snapshot = SessionSnapshotConfig{Dir: tc.dir, FlushInterval: tc.interval}
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "sessions.snapshot") {
+				t.Fatalf("Validate() error = %v, want session snapshot validation error", err)
+			}
+		})
+	}
 }
 
 func TestParseBytesMigratesLegacyClientsAndMarshalsCanonical(t *testing.T) {

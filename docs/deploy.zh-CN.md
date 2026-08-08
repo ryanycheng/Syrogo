@@ -114,6 +114,18 @@ Core 配置位于：
 
 可在 Console 中治理，也可手工编辑 YAML。手工修改后，使用 Console Apply 或 Admin API 热应用；listener 地址、listener 绑定及部分日志配置变化仍需要重启 Core。
 
+Session snapshot 默认启用。示例配置为：
+
+```yaml
+sessions:
+  snapshot:
+    enabled: true
+    dir: "./data/sessions"
+    flush_interval: "5s"
+```
+
+systemd 的 WorkingDirectory 是 `/opt/syrogo`，实际 snapshot 位于 `/opt/syrogo/data/sessions`；目录权限为 `0700`，snapshot 文件为 `0600`。文件包含 host、CWD、command、tmux 等敏感元数据，应限制访问并备份该目录。服务周期写 snapshot，正常关闭时再次 flush；崩溃最多丢失一个 flush interval。重启时原 active session 先变为 `unknown` 并标记 `recovery_pending`，等待 heartbeat 确认，45 秒无确认则转为 `stopped`。该能力仅用于单机本地恢复，不会接管旧 PID；不需要时可显式配置 `sessions.snapshot.enabled: false`。
+
 检查服务：
 
 ```bash
@@ -136,7 +148,7 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads
   | sudo bash -s -- --version v0.16.3 --console-only
 ```
 
-升级前备份 `/opt/syrogo/config/config.yaml`，升级后检查两个 `/healthz` 和一条真实模型请求。Console 的 `/etc/syrogo-console.env` 在普通升级中保持不变。
+升级前备份 `/opt/syrogo/config/config.yaml` 和 `/opt/syrogo/data/sessions`，升级后检查两个 `/healthz` 和一条真实模型请求。Core installer 会保留已有 `/opt/syrogo/data` 及其 mode；Console 的 `/etc/syrogo-console.env` 在普通升级中保持不变。
 
 ## 8. 卸载
 
@@ -147,7 +159,7 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads
   | sudo bash -s -- --uninstall
 ```
 
-单独卸载 Core 会删除 `/opt/syrogo` 及其中配置：
+单独卸载 Core 会删除 `/opt/syrogo` 及其中配置和 `/opt/syrogo/data/sessions`；如需保留 Session snapshot，请先备份：
 
 ```bash
 sudo bash ./scripts/install.sh --uninstall
