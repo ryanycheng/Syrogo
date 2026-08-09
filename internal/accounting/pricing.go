@@ -53,6 +53,16 @@ func (c PriceCalculator) CostUSDWithMatch(provider, model string, usage runtime.
 func (c PriceCalculator) match(provider, model string) (config.AccountingPriceConfig, bool) {
 	provider = strings.TrimSpace(provider)
 	model = strings.TrimSpace(model)
+	if price, ok := c.matchExact(provider, model); ok {
+		return price, true
+	}
+	if separator := strings.LastIndex(model, "/"); separator >= 0 {
+		return c.matchExact("", strings.TrimSpace(model[separator+1:]))
+	}
+	return config.AccountingPriceConfig{}, false
+}
+
+func (c PriceCalculator) matchExact(provider, model string) (config.AccountingPriceConfig, bool) {
 	var modelOnly config.AccountingPriceConfig
 	modelOnlyOK := false
 	for i := len(c.items) - 1; i >= 0; i-- {

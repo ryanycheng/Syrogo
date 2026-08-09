@@ -56,6 +56,37 @@ func TestPriceCalculatorUsesDefaultModelPrice(t *testing.T) {
 	}
 }
 
+func TestPriceCalculatorFallsBackFromQualifiedModelToModelOnlyPrice(t *testing.T) {
+	calculator := NewPriceCalculator(nil)
+	cost := calculator.CostUSD("custom-openai", "openai/gpt-4o-mini", runtime.UsageBreakdown{
+		InputTokens:  1_000_000,
+		OutputTokens: 1_000_000,
+	})
+	if cost != 0.75 {
+		t.Fatalf("cost = %v, want 0.75", cost)
+	}
+}
+
+func TestPriceCalculatorQualifiedExactPriceTakesPriority(t *testing.T) {
+	calculator := NewPriceCalculator([]config.AccountingPriceConfig{{
+		Model:               "gpt-4o-mini",
+		InputPerMillionUSD:  1,
+		OutputPerMillionUSD: 2,
+	}, {
+		Provider:            "custom-openai",
+		Model:               "openai/gpt-4o-mini",
+		InputPerMillionUSD:  3,
+		OutputPerMillionUSD: 4,
+	}})
+	cost := calculator.CostUSD("custom-openai", "openai/gpt-4o-mini", runtime.UsageBreakdown{
+		InputTokens:  1_000_000,
+		OutputTokens: 1_000_000,
+	})
+	if cost != 7 {
+		t.Fatalf("cost = %v, want 7", cost)
+	}
+}
+
 func TestPriceCalculatorUserModelPriceOverridesDefault(t *testing.T) {
 	calculator := NewPriceCalculator([]config.AccountingPriceConfig{{
 		Model:                  "gpt-4o-mini",
