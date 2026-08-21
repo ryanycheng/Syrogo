@@ -26,6 +26,7 @@ type Config struct {
 	Accounting AccountingConfig `yaml:"accounting"`
 	Governance GovernanceConfig `yaml:"governance"`
 	Sessions   SessionsConfig   `yaml:"sessions"`
+	OAuth      OAuthConfig      `yaml:"oauth"`
 	Admin      AdminConfig      `yaml:"admin"`
 }
 
@@ -170,12 +171,22 @@ type OutboundSpec struct {
 	Protocol     string               `yaml:"protocol"`
 	Endpoint     string               `yaml:"endpoint"`
 	AuthToken    string               `yaml:"auth_token"`
+	Auth         OutboundAuthConfig   `yaml:"auth" json:"auth"`
 	Tag          string               `yaml:"tag"`
 	Enabled      *bool                `yaml:"enabled"`
 	Models       []OutboundModelSpec  `yaml:"models" json:"models"`
 	Capabilities OutboundCapabilities `yaml:"capabilities"`
 	Quota        OutboundQuotaConfig  `yaml:"quota" json:"quota"`
 	Proxy        OutboundProxyConfig  `yaml:"proxy"`
+}
+
+type OutboundAuthConfig struct {
+	Type          string `yaml:"type" json:"type"`
+	CredentialRef string `yaml:"credential_ref" json:"credential_ref"`
+}
+
+type OAuthConfig struct {
+	Dir string `yaml:"dir"`
 }
 
 type OutboundModelSpec struct {
@@ -439,6 +450,9 @@ func mappingValue(node *yaml.Node, key string) *yaml.Node {
 }
 
 func (c *Config) applyDefaults() {
+	if c.OAuth.Dir == "" {
+		c.OAuth.Dir = "./data/oauth"
+	}
 	snapshot := &c.Sessions.Snapshot
 	if snapshot.Dir == "" {
 		snapshot.Dir = "./data/sessions"
@@ -622,9 +636,15 @@ func (c Config) Validate() error {
 		if outbound.Tag == "" {
 			return fmt.Errorf("outbounds.%s.tag is required", outbound.Name)
 		}
+		if err := validateOutboundAuth(outbound); err != nil {
+			return err
+		}
 		switch outbound.Protocol {
 		case "mock":
 		case "openai_chat", "openai_responses", "anthropic_messages":
+			if outbound.Auth.Type == "claude_consumer_oauth" || outbound.Auth.Type == "codex_consumer_oauth" {
+				break
+			}
 			if outbound.Endpoint == "" {
 				return fmt.Errorf("outbounds.%s.endpoint is required", outbound.Name)
 			}
@@ -807,6 +827,42 @@ func validateClientQuota(index int, client ClientSpec) error {
 		return nil
 	}
 	return validateQuotaWindows(fmt.Sprintf("clients[%d].quota", index), quota.Windows)
+}
+
+func validateOutboundAuth(outbound OutboundSpec) error {
+	authType := strings.TrimSpace(outbound.Auth.Type)
+	credentialRef := strings.TrimSpace(outbound.Auth.CredentialRef)
+	if authType == "" {
+		if credentialRef != "" {
+			return fmt.Errorf("outbounds.%s.auth.credential_ref requires auth.type", outbound.Name)
+		}
+		return nil
+	}
+	if outbound.AuthToken != "" {
+		return fmt.Errorf("outbounds.%s.auth cannot be used with auth_token", outbound.Name)
+	}
+	if credentialRef == "" {
+		return fmt.Errorf("outbounds.%s.auth.credential_ref is required", outbound.Name)
+	}
+	if strings.ContainsAny(credentialRef, `/\\`) || strings.TrimSpace(credentialRef) != credentialRef {
+		return fmt.Errorf("outbounds.%s.auth.credential_ref is invalid", outbound.Name)
+	}
+	switch authType {
+	case "claude_consumer_oauth":
+		if outbound.Protocol != "anthropic_messages" {
+			return fmt.Errorf("outbounds.%s.auth.type claude_consumer_oauth requires anthropic_messages", outbound.Name)
+		}
+	case "codex_consumer_oauth":
+		if outbound.Protocol != "openai_responses" {
+			return fmt.Errorf("outbounds.%s.auth.type codex_consumer_oauth requires openai_responses", outbound.Name)
+		}
+	default:
+		return fmt.Errorf("outbounds.%s.auth.type %q is unsupported", outbound.Name, authType)
+	}
+	if outbound.Endpoint != "" {
+		return fmt.Errorf("outbounds.%s.endpoint must be empty for OAuth consumer compatibility", outbound.Name)
+	}
+	return nil
 }
 
 func validateOutboundModels(outbound OutboundSpec) error {

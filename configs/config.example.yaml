@@ -245,6 +245,17 @@ outbounds:
     endpoint: "https://example-anthropic-compatible.local/v1"
     auth_token: "${ANTHROPIC_API_KEY_PRIMARY}"
     tag: "anthropic-primary"
+    # Optional experimental Claude consumer OAuth. It uses a fixed compatibility endpoint;
+    # omit endpoint and auth_token, then connect credential_ref in Admin UI.
+    # This is not an official third-party OAuth integration and may be affected by upstream terms.
+    # auth:
+    #   type: "claude_consumer_oauth"
+    #   credential_ref: "claude-main"
+    # Optional experimental Codex consumer OAuth. It uses a fixed OpenAI Responses endpoint;
+    # protocol must be openai_responses and endpoint/auth_token must be omitted.
+    # auth:
+    #   type: "codex_consumer_oauth"
+    #   credential_ref: "codex-main"
     # Optional platform-side usage fallback when the upstream omits usage.
     # This is a heuristic estimate, not the provider billing truth.
     # capabilities:
@@ -256,6 +267,10 @@ sessions:
     enabled: true
     dir: "./data/sessions"
     flush_interval: "5s"
+
+oauth:
+  # Stores OAuth access/refresh credentials separately from config history.
+  dir: "./data/oauth"
 
 governance:
   quota:

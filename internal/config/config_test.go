@@ -71,6 +71,9 @@ routing:
 	if cfg.Sessions.Snapshot.FlushInterval != DurationValue("5s") {
 		t.Fatalf("sessions.snapshot.flush_interval = %q, want 5s", cfg.Sessions.Snapshot.FlushInterval)
 	}
+	if cfg.OAuth.Dir != "./data/oauth" {
+		t.Fatalf("oauth.dir = %q, want ./data/oauth", cfg.OAuth.Dir)
+	}
 }
 
 func TestParseBytesPreservesDisabledSessionSnapshot(t *testing.T) {

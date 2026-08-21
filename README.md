@@ -277,6 +277,12 @@ Session snapshots are enabled by default. The example config uses `sessions.snap
 
 Syrogo snapshots periodically and flushes again on normal shutdown; a crash can lose at most one flush interval. After restart, previously active sessions first become `unknown` with `recovery_pending`, then heartbeat confirms them; sessions not confirmed within 45 seconds become `stopped`. This is a single-host local recovery feature and does not take over old PIDs. Core upgrades preserve `/opt/syrogo/data`, but uninstall removes all of `/opt/syrogo`, so back it up first.
 
+#### Upstream OAuth (experimental compatibility)
+
+API keys remain the stable default. The Admin UI can connect experimental consumer OAuth credentials for Claude and Codex. Config stores only `auth.type` and `credential_ref`; access tokens, refresh tokens, and PKCE/device-flow secrets are stored separately under `oauth.dir` (default `./data/oauth`, or `/opt/syrogo/data/oauth` with systemd), with directory mode `0700` and credential-file mode `0600`.
+
+Claude uses Authorization Code + PKCE: open the displayed authorization URL and paste the callback URL into the Admin UI. Codex uses device flow: open the displayed verification URL and enter its user code. These are consumer-client compatibility paths, not official third-party OAuth integrations, and can be affected by upstream protocol changes or terms. Do not provide browser cookies or `sessionKey`; OAuth outbounds use fixed upstream endpoints so bearer credentials are never sent to a custom endpoint. Codex OAuth streaming and Admin UI provider checks are intentionally unavailable.
+
 ### 8. Match and map route models
 
 Rules are evaluated in configuration order, and the first rule whose `from_tags` and optional `match.models` both match wins. This lets one client binding tag select Haiku, Sonnet, and Opus tiers while retaining a final unconditional fallback:

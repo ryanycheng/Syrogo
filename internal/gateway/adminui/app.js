@@ -341,6 +341,62 @@ function badge(text, kind = "") {
   return `<span class="badge ${escapeAttr(kind)}">${escapeHTML(text)}</span>`;
 }
 
+async function refreshOAuthCredentials() {
+  const target = document.querySelector("#oauth-credentials");
+  try {
+    const response = await fetchJSON("/admin/oauth/credentials");
+    const items = response.items || [];
+    target.innerHTML = items.length ? `<table><thead><tr><th>ID</th><th>Provider</th><th>Account</th><th>Expires</th><th></th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHTML(item.id)}</td><td>${escapeHTML(item.provider)}</td><td>${escapeHTML(item.account_label || "-")}</td><td>${escapeHTML(formatTime(item.expires_at))}</td><td><button class="danger small" data-oauth-delete="${escapeAttr(item.id)}">Disconnect</button></td></tr>`).join("")}</tbody></table>` : emptyState("No OAuth accounts connected.");
+  } catch (error) { target.innerHTML = emptyState(error.message); }
+}
+
+function showOAuthFlow(message) {
+  const target = document.querySelector("#oauth-flow");
+  target.className = "inline-status";
+  target.innerHTML = message;
+}
+
+async function startOAuth(provider) {
+  const credentialID = value("#oauth-credential-id");
+  if (!credentialID) { showToast("Credential ID is required."); return; }
+  try {
+    const flow = await fetchJSON(`/admin/oauth/${provider}/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ credential_id: credentialID }) });
+    if (provider === "claude") {
+      showOAuthFlow(`Open <a href="${escapeAttr(flow.authorization_url)}" target="_blank" rel="noopener noreferrer">Claude authorization</a>, then paste the callback URL.<div class="actions"><input id="oauth-callback" placeholder="http://localhost:54545/callback?..."><button id="complete-claude-oauth">Complete Claude</button></div>`);
+      document.querySelector("#complete-claude-oauth").addEventListener("click", () => completeClaudeOAuth(flow.flow_id));
+      return;
+    }
+    showOAuthFlow(`Open <a href="${escapeAttr(flow.verification_url)}" target="_blank" rel="noopener noreferrer">Codex device authorization</a> and enter <strong>${escapeHTML(flow.user_code)}</strong>. Waiting for approval.`);
+    pollCodexOAuth(flow.flow_id, Number(flow.interval || 5));
+  } catch (error) { showToast(error.message); }
+}
+
+async function completeClaudeOAuth(flowID) {
+  try {
+    await fetchJSON("/admin/oauth/claude/complete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ flow_id: flowID, callback: value("#oauth-callback") }) });
+    document.querySelector("#oauth-flow").className = "inline-status hidden";
+    await refreshOAuthCredentials();
+    showToast("Claude OAuth account connected.");
+  } catch (error) { showToast(error.message); }
+}
+
+async function pollCodexOAuth(flowID, interval) {
+  try {
+    const response = await fetchJSON("/admin/oauth/codex/poll", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ flow_id: flowID }) });
+    if (response.status === "pending") { window.setTimeout(() => pollCodexOAuth(flowID, interval), Math.max(interval, 5) * 1000); return; }
+    document.querySelector("#oauth-flow").className = "inline-status hidden";
+    await refreshOAuthCredentials();
+    showToast("Codex OAuth account connected.");
+  } catch (error) { showOAuthFlow(escapeHTML(error.message)); }
+}
+
+async function deleteOAuthCredential(id) {
+  try {
+    await fetchJSON("/admin/oauth/credentials/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ credential_id: id }) });
+    await refreshOAuthCredentials();
+  } catch (error) { showToast(error.message); }
+}
+
 function fillProviderForm(item = {}) {
   activeProvider = item.name ? item : null;
   document.querySelector("#provider-modal-title").textContent = item.name ? "编辑 Provider" : "新增 Provider";
@@ -349,6 +405,9 @@ function fillProviderForm(item = {}) {
   document.querySelector("#provider-tag").value = item.tag || "";
   document.querySelector("#provider-endpoint").value = item.endpoint || "";
   document.querySelector("#provider-auth-token").value = item.auth_token || "";
+  document.querySelector("#provider-auth-type").value = item.auth?.type || "";
+  document.querySelector("#provider-credential-ref").value = item.auth?.credential_ref || "";
+  syncProviderAuthFields();
   document.querySelector("#provider-test-model").value = "";
   document.querySelector("#provider-models-json").value = pretty(item.models || []);
   document.querySelector("#provider-quota-json").value = pretty(item.quota || { enabled: false, windows: [], cooldown: "10m", probe_interval: "1m" });
@@ -364,6 +423,14 @@ function fillProviderForm(item = {}) {
 
 function closeProviderModal() {
   document.querySelector("#provider-modal").classList.add("hidden");
+}
+
+function syncProviderAuthFields() {
+  const oauth = Boolean(value("#provider-auth-type"));
+  document.querySelector("#provider-auth-token-field").classList.toggle("hidden", oauth);
+  document.querySelector("#provider-credential-ref-field").classList.toggle("hidden", !oauth);
+  document.querySelector("#provider-endpoint").disabled = oauth;
+  if (oauth) document.querySelector("#provider-endpoint").value = "";
 }
 
 function providerPayload() {
@@ -384,7 +451,9 @@ function providerPayload() {
   const capabilities = { ...(activeProvider?.capabilities || {}) };
   capabilities.usage_estimation = document.querySelector("#provider-usage-estimation").checked;
   capabilities.usage_estimation_mode = capabilities.usage_estimation ? "heuristic" : "";
-  return { name: value("#provider-name"), protocol: value("#provider-protocol"), tag: value("#provider-tag"), endpoint: value("#provider-endpoint"), auth_token: value("#provider-auth-token"), enabled: activeProvider?.enabled !== false, models, capabilities, quota, proxy: { url: value("#provider-proxy-url") } };
+  const authType = value("#provider-auth-type");
+  const auth = authType ? { type: authType, credential_ref: value("#provider-credential-ref") } : {};
+  return { name: value("#provider-name"), protocol: value("#provider-protocol"), tag: value("#provider-tag"), endpoint: value("#provider-endpoint"), auth_token: authType ? "" : value("#provider-auth-token"), auth, enabled: activeProvider?.enabled !== false, models, capabilities, quota, proxy: { url: value("#provider-proxy-url") } };
 }
 
 function validateProviderDraft() {
@@ -392,15 +461,19 @@ function validateProviderDraft() {
   const issues = [];
   setInvalid("#provider-name", !payload.name);
   setInvalid("#provider-protocol", !payload.protocol);
-  const endpointInvalid = payload.protocol !== "mock" && !payload.endpoint;
+  const oauth = Boolean(payload.auth?.type);
+  const endpointInvalid = !oauth && payload.protocol !== "mock" && !payload.endpoint;
+  const credentialInvalid = oauth && !payload.auth.credential_ref;
   const modelsInvalid = !Array.isArray(payload.models) || payload.models.some((model) => !model || typeof model !== "object" || Array.isArray(model));
   const quotaInvalid = payload.quota === null || typeof payload.quota !== "object" || Array.isArray(payload.quota);
   setInvalid("#provider-endpoint", endpointInvalid);
+  setInvalid("#provider-credential-ref", credentialInvalid);
   setInvalid("#provider-models-json", modelsInvalid);
   setInvalid("#provider-quota-json", quotaInvalid);
   if (!payload.name) issues.push("name is required");
   if (!payload.protocol) issues.push("protocol is required");
-  if (endpointInvalid) issues.push("endpoint is required for non-mock providers");
+  if (endpointInvalid) issues.push("endpoint is required for non-mock API-key providers");
+  if (credentialInvalid) issues.push("OAuth credential ID is required");
   if (modelsInvalid) issues.push("models must be a valid JSON array; Core validates canonical names and aliases");
   if (quotaInvalid) issues.push("quota must be valid JSON object; Core validates its schema");
   const target = document.querySelector("#provider-validate-result");
@@ -941,6 +1014,7 @@ function switchPanel(target) {
   } else {
     stopSessionsRefresh();
   }
+  if (target === "oauth") refreshOAuthCredentials();
   if (target === "clients") refreshClients();
   if (target === "routes") refreshRoutes();
   if (target === "usage") refreshUsage();
@@ -977,6 +1051,11 @@ function bindEvents() {
   document.querySelector("#provider-search").addEventListener("input", renderFilteredProviders);
   document.querySelector("#provider-protocol-filter").addEventListener("change", renderFilteredProviders);
   document.querySelector("#provider-state-filter").addEventListener("change", renderFilteredProviders);
+  document.querySelector("#provider-auth-type").addEventListener("change", syncProviderAuthFields);
+  document.querySelector("#refresh-oauth").addEventListener("click", refreshOAuthCredentials);
+  document.querySelector("#start-claude-oauth").addEventListener("click", () => startOAuth("claude"));
+  document.querySelector("#start-codex-oauth").addEventListener("click", () => startOAuth("codex"));
+  document.querySelector("#oauth-credentials").addEventListener("click", (event) => { const button = event.target.closest("button[data-oauth-delete]"); if (button) deleteOAuthCredential(button.dataset.oauthDelete); });
   document.querySelector("#new-provider").addEventListener("click", () => fillProviderForm());
   document.querySelector("#close-provider-modal").addEventListener("click", closeProviderModal);
   document.querySelector("#test-provider-form").addEventListener("click", testProviderForm);

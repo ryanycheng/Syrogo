@@ -12,6 +12,7 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/gateway"
 	"github.com/ryanycheng/Syrogo/internal/latency"
 	"github.com/ryanycheng/Syrogo/internal/logging"
+	"github.com/ryanycheng/Syrogo/internal/oauth"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/router"
@@ -34,6 +35,7 @@ type App struct {
 	sessionStore         *sessions.Store
 	sessionSnapshotStore *sessions.SnapshotStore
 	sessionReaper        *sessions.Reaper
+	oauthManager         *oauth.Manager
 	cfg                  config.Config
 	configPath           string
 	reloadManager        *ReloadManager
@@ -63,7 +65,17 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	runtime, err := buildRuntime(cfg, store)
+	oauthDir := cfg.OAuth.Dir
+	if oauthDir == "" {
+		oauthDir = "./data/oauth"
+	}
+	oauthStore, err := oauth.NewStore(oauthDir)
+	if err != nil {
+		_ = store.Close(context.Background())
+		return nil, err
+	}
+	oauthManager := oauth.NewManager(oauthStore, nil)
+	runtime, err := buildRuntimeWithOAuth(cfg, store, oauthManager)
 	if err != nil {
 		_ = store.Close(context.Background())
 		return nil, err
@@ -89,6 +101,7 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 	listeners, bindings := buildListeners(runtime, cfg, opts.ConfigPath, sessionStore, slog.Default())
 	for _, binding := range bindings {
 		binding.handler.SetRecentLogs(opts.RecentLogs)
+		binding.handler.SetOAuthManager(oauthManager)
 	}
 	app := &App{
 		Server:               server.NewListeners(listeners),
@@ -102,6 +115,7 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 		sessionReaper:        sessions.NewReaper(sessionStore),
 		cfg:                  cfg,
 		configPath:           opts.ConfigPath,
+		oauthManager:         oauthManager,
 	}
 	app.reloadManager = NewReloadManager(app, bindings)
 	for _, binding := range bindings {
@@ -111,10 +125,18 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 }
 
 func buildRuntime(cfg config.Config, store accounting.Store) (appRuntime, error) {
-	return buildRuntimeWithTrackers(cfg, store, quota.NewTracker(nil), quota.NewClientTracker(nil), true)
+	return buildRuntimeWithOAuth(cfg, store, nil)
+}
+
+func buildRuntimeWithOAuth(cfg config.Config, store accounting.Store, oauthManager *oauth.Manager) (appRuntime, error) {
+	return buildRuntimeWithTrackersAndOAuth(cfg, store, quota.NewTracker(nil), quota.NewClientTracker(nil), true, oauthManager)
 }
 
 func buildRuntimeWithTrackers(cfg config.Config, store accounting.Store, outboundQuotaTracker, clientQuotaTracker *quota.Tracker, loadSnapshot bool) (appRuntime, error) {
+	return buildRuntimeWithTrackersAndOAuth(cfg, store, outboundQuotaTracker, clientQuotaTracker, loadSnapshot, nil)
+}
+
+func buildRuntimeWithTrackersAndOAuth(cfg config.Config, store accounting.Store, outboundQuotaTracker, clientQuotaTracker *quota.Tracker, loadSnapshot bool, oauthManager *oauth.Manager) (appRuntime, error) {
 	providers := make(map[string]provider.Provider, len(cfg.Outbounds))
 	registry := provider.DefaultFactoryRegistry()
 	for _, spec := range cfg.Outbounds {
@@ -125,7 +147,7 @@ func buildRuntimeWithTrackers(cfg config.Config, store accounting.Store, outboun
 		if err != nil {
 			return appRuntime{}, fmt.Errorf("create outbound %q http client: %w", spec.Name, err)
 		}
-		instance, err := registry.New(spec.Protocol, spec.Name, spec.Endpoint, spec.AuthToken, spec.Capabilities, httpClient)
+		instance, err := newProviderInstance(registry, spec, httpClient, oauthManager)
 		if err != nil {
 			return appRuntime{}, err
 		}
@@ -174,6 +196,27 @@ func buildRuntimeWithTrackers(cfg config.Config, store accounting.Store, outboun
 		latencyStore:         latencyStore,
 		quotaSnapshotStore:   quotaSnapshotStore,
 	}, nil
+}
+
+func newProviderInstance(registry *provider.FactoryRegistry, spec config.OutboundSpec, httpClient *http.Client, oauthManager *oauth.Manager) (provider.Provider, error) {
+	switch spec.Auth.Type {
+	case "":
+		return registry.New(spec.Protocol, spec.Name, spec.Endpoint, spec.AuthToken, spec.Capabilities, httpClient)
+	case "claude_consumer_oauth":
+		if oauthManager == nil {
+			return nil, fmt.Errorf("oauth manager is required for outbound %q", spec.Name)
+		}
+		source := provider.NewOAuthCredentialSource(oauthManager, spec.Auth.CredentialRef, oauth.ProviderClaude)
+		return provider.NewAnthropicMessagesOAuthCompatible(spec.Name, "https://api.anthropic.com/v1", source, spec.Capabilities, httpClient), nil
+	case "codex_consumer_oauth":
+		if oauthManager == nil {
+			return nil, fmt.Errorf("oauth manager is required for outbound %q", spec.Name)
+		}
+		source := provider.NewOAuthCredentialSource(oauthManager, spec.Auth.CredentialRef, oauth.ProviderCodex)
+		return provider.NewCodexConsumerProvider(spec.Name, source, httpClient), nil
+	default:
+		return nil, fmt.Errorf("outbound %q has unsupported auth type %q", spec.Name, spec.Auth.Type)
+	}
 }
 
 func enabledOutbounds(cfg config.Config) []config.OutboundSpec {

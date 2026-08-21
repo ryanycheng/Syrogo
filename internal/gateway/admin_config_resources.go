@@ -19,6 +19,7 @@ type providerResourceRequest struct {
 	Protocol     string                      `json:"protocol"`
 	Endpoint     string                      `json:"endpoint"`
 	AuthToken    string                      `json:"auth_token"`
+	Auth         config.OutboundAuthConfig   `json:"auth"`
 	Tag          string                      `json:"tag"`
 	Enabled      *bool                       `json:"enabled"`
 	Models       []config.OutboundModelSpec  `json:"models"`
@@ -101,6 +102,7 @@ type providerResourceResponse struct {
 	Protocol     string                      `json:"protocol"`
 	Endpoint     string                      `json:"endpoint"`
 	AuthToken    string                      `json:"auth_token"`
+	Auth         config.OutboundAuthConfig   `json:"auth"`
 	Tag          string                      `json:"tag"`
 	Enabled      bool                        `json:"enabled"`
 	Models       []config.OutboundModelSpec  `json:"models"`
@@ -216,6 +218,7 @@ func (h *Handler) handleConfigProviders(w http.ResponseWriter, r *http.Request) 
 			Protocol:     outbound.Protocol,
 			Endpoint:     outbound.Endpoint,
 			AuthToken:    outbound.AuthToken,
+			Auth:         outbound.Auth,
 			Tag:          outbound.Tag,
 			Enabled:      config.OutboundEnabled(outbound),
 			Models:       outbound.Models,
@@ -246,6 +249,7 @@ func (h *Handler) handleConfigProviderUpsert(w http.ResponseWriter, r *http.Requ
 			Protocol:     req.Protocol,
 			Endpoint:     req.Endpoint,
 			AuthToken:    req.AuthToken,
+			Auth:         req.Auth,
 			Tag:          req.Tag,
 			Enabled:      req.Enabled,
 			Models:       req.Models,

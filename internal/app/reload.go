@@ -156,7 +156,7 @@ func (m *ReloadManager) applyConfigLocked(_ context.Context, reason string) (Rel
 	if restartReason := restartRequiredReason(m.app.cfg, next); restartReason != "" {
 		return ReloadResult{OK: true, Applied: false, RestartRequired: true, Reason: restartReason}, nil
 	}
-	runtime, err := buildRuntimeWithTrackers(next, m.app.accountingStore, m.app.outboundQuotaTracker, m.app.clientQuotaTracker, false)
+	runtime, err := buildRuntimeWithTrackersAndOAuth(next, m.app.accountingStore, m.app.outboundQuotaTracker, m.app.clientQuotaTracker, false, m.app.oauthManager)
 	if err != nil {
 		return ReloadResult{}, err
 	}
@@ -204,7 +204,7 @@ func (m *ReloadManager) mutateConfig(_ context.Context, reason string, mutate ga
 	if restartReason := restartRequiredReason(m.app.cfg, next); restartReason != "" {
 		return ReloadResult{RestartRequired: true, Reason: restartReason}, fmt.Errorf("config mutation requires restart: %s", restartReason)
 	}
-	runtime, err := buildRuntimeWithTrackers(next, m.app.accountingStore, m.app.outboundQuotaTracker, m.app.clientQuotaTracker, false)
+	runtime, err := buildRuntimeWithTrackersAndOAuth(next, m.app.accountingStore, m.app.outboundQuotaTracker, m.app.clientQuotaTracker, false, m.app.oauthManager)
 	if err != nil {
 		return ReloadResult{}, err
 	}
@@ -283,6 +283,11 @@ func (m *ReloadManager) rollback(ctx context.Context, id string) (ReloadResult, 
 }
 
 func restartRequiredReason(current, next config.Config) string {
+	currentOAuth := effectiveOAuthConfig(current.OAuth)
+	nextOAuth := effectiveOAuthConfig(next.OAuth)
+	if currentOAuth.Dir != nextOAuth.Dir {
+		return "OAuth credential directory changed"
+	}
 	currentSessionSnapshot := effectiveSessionSnapshotConfig(current.Sessions.Snapshot)
 	nextSessionSnapshot := effectiveSessionSnapshotConfig(next.Sessions.Snapshot)
 	if currentSessionSnapshot.EnabledEffective() != nextSessionSnapshot.EnabledEffective() ||
@@ -310,6 +315,13 @@ func restartRequiredReason(current, next config.Config) string {
 		return "logging configuration changed"
 	}
 	return ""
+}
+
+func effectiveOAuthConfig(oauthConfig config.OAuthConfig) config.OAuthConfig {
+	if oauthConfig.Dir == "" {
+		oauthConfig.Dir = "./data/oauth"
+	}
+	return oauthConfig
 }
 
 func effectiveSessionSnapshotConfig(snapshot config.SessionSnapshotConfig) config.SessionSnapshotConfig {

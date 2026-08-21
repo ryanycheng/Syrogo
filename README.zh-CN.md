@@ -271,6 +271,12 @@ eval "$(syrogo activate codex --client responses-key)"
 - `activate` 会输出真实 shell `export` 语句供 `eval` 使用，不要把输出贴到日志里
 - 被启动的客户端仍在本地运行，Syrogo 负责承接它的模型 API 流量
 
+#### 上游 OAuth（实验性兼容）
+
+API key 是稳定的默认认证方式。Syrogo 也可通过 Admin UI 连接 Claude 或 Codex 的上游 OAuth 账户：Provider 的 `auth.type` 使用 `claude_consumer_oauth` 或 `codex_consumer_oauth`，并以 `credential_ref` 引用账户；access token 与 refresh token 不写入 `config.yaml` 或配置历史，而是保存到 `oauth.dir`（默认 `./data/oauth`，systemd 下为 `/opt/syrogo/data/oauth`）。目录权限为 `0700`，凭证文件为 `0600`，应与主机密钥同等保护并在卸载前备份。
+
+这两条链路复用消费端 OAuth 与私有兼容接口，并非官方稳定的第三方 OAuth 集成，必须在 Admin UI 中显式操作，并可能因上游协议或服务条款变化而失效。不要使用浏览器 cookie 或 `sessionKey`；Syrogo 不会自动扫描或导入本机 CLI 凭证。Claude 使用 PKCE 授权页和 callback URL 粘贴交接；Codex 使用 device flow。OAuth outbound 固定其兼容 endpoint，配置中不能覆盖 `endpoint`，避免把 Bearer token 发给任意地址。
+
 #### Session snapshot
 
 Session snapshot 默认启用；示例配置使用 `sessions.snapshot.dir: "./data/sessions"` 和 `flush_interval: "5s"`，可显式设置 `sessions.snapshot.enabled: false` 关闭。systemd 安装的 WorkingDirectory 为 `/opt/syrogo`，因此实际目录是 `/opt/syrogo/data/sessions`；目录权限为 `0700`，snapshot 文件为 `0600`。其中会保存 host、CWD、command、tmux 等敏感元数据，请限制访问并备份该目录。

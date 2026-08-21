@@ -16,6 +16,7 @@ import (
 	"github.com/ryanycheng/Syrogo/internal/execution"
 	"github.com/ryanycheng/Syrogo/internal/latency"
 	"github.com/ryanycheng/Syrogo/internal/logging"
+	"github.com/ryanycheng/Syrogo/internal/oauth"
 	"github.com/ryanycheng/Syrogo/internal/provider"
 	"github.com/ryanycheng/Syrogo/internal/quota"
 	"github.com/ryanycheng/Syrogo/internal/router"
@@ -34,6 +35,7 @@ type Handler struct {
 	admin        config.AdminConfig
 	configPath   string
 	sessionStore *sessions.Store
+	oauthManager *oauth.Manager
 }
 
 type ConfigMutation func(config.Config) (config.Config, error)
@@ -231,6 +233,10 @@ func (h *Handler) SetConfigReloader(reloader ConfigReloader) {
 	h.configReloader = reloader
 }
 
+func (h *Handler) SetOAuthManager(manager *oauth.Manager) {
+	h.oauthManager = manager
+}
+
 func (h *Handler) SetRecentLogs(recentLogs *logging.RecentBuffer) {
 	h.recentLogs = recentLogs
 }
@@ -256,6 +262,12 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/latency", h.withAdminAudit("latency", h.handleAdminLatency))
 	mux.HandleFunc("/admin/session", h.withAdminAudit("session", h.handleAdminSession))
 	mux.HandleFunc("/admin/sessions", h.withAdminAudit("sessions", h.handleAdminSessions))
+	mux.HandleFunc("/admin/oauth/credentials", h.withAdminAudit("oauth_credentials", h.handleOAuthCredentials))
+	mux.HandleFunc("/admin/oauth/claude/start", h.withAdminAudit("oauth_claude_start", h.handleOAuthClaudeStart))
+	mux.HandleFunc("/admin/oauth/claude/complete", h.withAdminAudit("oauth_claude_complete", h.handleOAuthClaudeComplete))
+	mux.HandleFunc("/admin/oauth/codex/start", h.withAdminAudit("oauth_codex_start", h.handleOAuthCodexStart))
+	mux.HandleFunc("/admin/oauth/codex/poll", h.withAdminAudit("oauth_codex_poll", h.handleOAuthCodexPoll))
+	mux.HandleFunc("/admin/oauth/credentials/delete", h.withAdminAudit("oauth_credential_delete", h.handleOAuthCredentialDelete))
 	mux.HandleFunc("/admin/config", h.withAdminAudit("config_read", h.handleAdminConfig))
 	mux.HandleFunc("/admin/config/options", h.withAdminAudit("config_options", h.handleConfigOptions))
 	mux.HandleFunc("/admin/config/providers", h.withAdminAudit("config_providers", h.handleConfigProviders))

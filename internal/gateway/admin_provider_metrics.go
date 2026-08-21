@@ -73,6 +73,7 @@ func (h *Handler) handleConfigProviderCheck(w http.ResponseWriter, r *http.Reque
 			Protocol:     req.Provider.Protocol,
 			Endpoint:     req.Provider.Endpoint,
 			AuthToken:    req.Provider.AuthToken,
+			Auth:         req.Provider.Auth,
 			Tag:          req.Provider.Tag,
 			Enabled:      req.Provider.Enabled,
 			Capabilities: req.Provider.Capabilities,
@@ -153,6 +154,7 @@ func (h *Handler) handleConfigProviderMetrics(w http.ResponseWriter, r *http.Req
 			Protocol:     outbound.Protocol,
 			Endpoint:     outbound.Endpoint,
 			AuthToken:    outbound.AuthToken,
+			Auth:         outbound.Auth,
 			Tag:          outbound.Tag,
 			Enabled:      config.OutboundEnabled(outbound),
 			Capabilities: outbound.Capabilities,
@@ -246,6 +248,9 @@ func checkProviderLive(parent context.Context, outbound config.OutboundSpec, mod
 	model = strings.TrimSpace(model)
 	if outbound.Protocol == "mock" && model == "" {
 		model = "syrogo-health-check"
+	}
+	if outbound.Auth.Type != "" {
+		return providerCheckResponse{Name: outbound.Name, OK: false, State: "unknown", CheckedAt: checkedAt, Error: "OAuth provider checks are unavailable; connect the credential and send a real request"}
 	}
 	if strings.TrimSpace(outbound.AuthToken) == config.RedactedValue {
 		return providerCheckResponse{Name: outbound.Name, OK: false, State: "unknown", CheckedAt: checkedAt, Error: "auth_token is redacted; load the active runtime provider or enter a token before testing"}

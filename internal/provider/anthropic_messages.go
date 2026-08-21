@@ -17,7 +17,7 @@ func (p *AnthropicMessagesProvider) ChatCompletion(ctx context.Context, req runt
 	if req.Model == "" {
 		return runtime.Response{}, fmt.Errorf("model is required")
 	}
-	if len(p.apiKeys) == 0 {
+	if len(p.apiKeys) == 0 && p.credentialSource == nil {
 		return runtime.Response{}, fmt.Errorf("api key is required")
 	}
 
@@ -27,7 +27,23 @@ func (p *AnthropicMessagesProvider) ChatCompletion(ctx context.Context, req runt
 		return runtime.Response{}, fmt.Errorf("marshal request: %w", err)
 	}
 
-	return p.completionWithAPIKey(ctx, req, encodedPayload, p.apiKeys[0])
+	if p.credentialSource != nil {
+		credential, err := p.credentialSource.Credential(ctx)
+		if err != nil {
+			return runtime.Response{}, err
+		}
+		response, err := p.completionWithCredential(ctx, req, encodedPayload, credential.Value, true)
+		if NormalizeError(err) != ErrorKindAuthFailed {
+			return response, err
+		}
+		p.credentialSource.Invalidate()
+		credential, refreshErr := p.credentialSource.Credential(ctx)
+		if refreshErr != nil {
+			return runtime.Response{}, refreshErr
+		}
+		return p.completionWithCredential(ctx, req, encodedPayload, credential.Value, true)
+	}
+	return p.completionWithCredential(ctx, req, encodedPayload, p.apiKeys[0], false)
 }
 
 func (p *AnthropicMessagesProvider) StreamCompletion(ctx context.Context, req runtime.Request) (<-chan runtime.StreamEvent, error) {
@@ -40,13 +56,17 @@ func (p *AnthropicMessagesProvider) StreamCompletion(ctx context.Context, req ru
 	return streamResponse(resp), nil
 }
 
-func (p *AnthropicMessagesProvider) completionWithAPIKey(ctx context.Context, req runtime.Request, payload []byte, apiKey string) (runtime.Response, error) {
+func (p *AnthropicMessagesProvider) completionWithCredential(ctx context.Context, req runtime.Request, payload []byte, credential string, oauth bool) (runtime.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/messages", bytes.NewReader(payload))
 	if err != nil {
 		return runtime.Response{}, fmt.Errorf("build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", apiKey)
+	if oauth {
+		httpReq.Header.Set("Authorization", "Bearer "+credential)
+	} else {
+		httpReq.Header.Set("x-api-key", credential)
+	}
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 	trace := providerTraceSnapshot{

@@ -38,11 +38,12 @@ type OpenAICompatibleProvider struct {
 }
 
 type AnthropicMessagesProvider struct {
-	providerName    string
-	baseURL         string
-	apiKeys         []string
-	httpClient      *http.Client
-	usageEstimation usageEstimationConfig
+	providerName     string
+	baseURL          string
+	apiKeys          []string
+	credentialSource CredentialSource
+	httpClient       *http.Client
+	usageEstimation  usageEstimationConfig
 }
 
 type openAIProtocolMode string
@@ -296,6 +297,12 @@ func NewAnthropicMessagesCompatible(name, baseURL string, apiKeys []string, http
 
 func NewAnthropicMessagesCompatibleWithCapabilities(name, baseURL string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) *AnthropicMessagesProvider {
 	return newAnthropicMessagesProvider(name, baseURL, apiKeys, capabilities, httpClient)
+}
+
+func NewAnthropicMessagesOAuthCompatible(name, baseURL string, source CredentialSource, capabilities config.OutboundCapabilities, httpClient *http.Client) *AnthropicMessagesProvider {
+	provider := newAnthropicMessagesProvider(name, baseURL, nil, capabilities, httpClient)
+	provider.credentialSource = source
+	return provider
 }
 
 func newAnthropicMessagesProvider(name, baseURL string, apiKeys []string, capabilities config.OutboundCapabilities, httpClient *http.Client) *AnthropicMessagesProvider {

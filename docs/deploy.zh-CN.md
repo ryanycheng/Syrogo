@@ -126,6 +126,8 @@ sessions:
 
 systemd 的 WorkingDirectory 是 `/opt/syrogo`，实际 snapshot 位于 `/opt/syrogo/data/sessions`；目录权限为 `0700`，snapshot 文件为 `0600`。文件包含 host、CWD、command、tmux 等敏感元数据，应限制访问并备份该目录。服务周期写 snapshot，正常关闭时再次 flush；崩溃最多丢失一个 flush interval。重启时原 active session 先变为 `unknown` 并标记 `recovery_pending`，等待 heartbeat 确认，45 秒无确认则转为 `stopped`。该能力仅用于单机本地恢复，不会接管旧 PID；不需要时可显式配置 `sessions.snapshot.enabled: false`。
 
+上游 OAuth 是实验性兼容能力，不替代稳定的 API key。通过 Admin UI 连接 Claude 或 Codex 后，配置只保留 `auth.type` 和 `credential_ref`；access token、refresh token 和 PKCE verifier 不进入 YAML、配置历史、日志或浏览器存储。凭证默认写入 `/opt/syrogo/data/oauth`，目录权限为 `0700`、文件为 `0600`。Claude 使用 PKCE callback URL 交接，Codex 使用 device flow。两条链路依赖消费端 OAuth 与私有兼容接口，并非官方第三方 OAuth 集成，可能受上游协议和服务条款影响；不要提供浏览器 cookie 或 `sessionKey`，也不要将 OAuth outbound 的 endpoint 改为自定义地址。Codex OAuth 不支持流式请求，Admin UI 的 Provider Test 也不会对 OAuth outbound 发起测试请求。
+
 检查服务：
 
 ```bash
@@ -148,7 +150,7 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads
   | sudo bash -s -- --version v0.16.3 --console-only
 ```
 
-升级前备份 `/opt/syrogo/config/config.yaml` 和 `/opt/syrogo/data/sessions`，升级后检查两个 `/healthz` 和一条真实模型请求。Core installer 会保留已有 `/opt/syrogo/data` 及其 mode；Console 的 `/etc/syrogo-console.env` 在普通升级中保持不变。
+升级前备份 `/opt/syrogo/config/config.yaml`、`/opt/syrogo/data/sessions` 和 `/opt/syrogo/data/oauth`，升级后检查两个 `/healthz` 和一条真实模型请求。Core installer 会保留已有 `/opt/syrogo/data` 及其 mode；Console 的 `/etc/syrogo-console.env` 在普通升级中保持不变。
 
 ## 8. 卸载
 
@@ -159,7 +161,7 @@ curl -fsSL https://raw.githubusercontent.com/ryanycheng/SyrogoConsole/refs/heads
   | sudo bash -s -- --uninstall
 ```
 
-单独卸载 Core 会删除 `/opt/syrogo` 及其中配置和 `/opt/syrogo/data/sessions`；如需保留 Session snapshot，请先备份：
+单独卸载 Core 会删除 `/opt/syrogo` 及其中配置、`/opt/syrogo/data/sessions` 和 `/opt/syrogo/data/oauth`；如需保留 Session snapshot 或 OAuth 凭证，请先备份：
 
 ```bash
 sudo bash ./scripts/install.sh --uninstall
