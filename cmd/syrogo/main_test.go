@@ -41,6 +41,51 @@ func TestSplitCommandArgsIgnoresServiceArgs(t *testing.T) {
 	}
 }
 
+func TestIsVersionCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "long flag", args: []string{"--version"}, want: true},
+		{name: "short flag", args: []string{"-version"}, want: true},
+		{name: "subcommand", args: []string{"version"}, want: true},
+		{name: "empty", args: nil},
+		{name: "service flags", args: []string{"--config", "config.yaml"}},
+		{name: "existing subcommand", args: []string{"run", "claude"}},
+		{name: "extra argument", args: []string{"version", "extra"}},
+		{name: "mixed flags", args: []string{"--config", "config.yaml", "--version"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isVersionCommand(test.args); got != test.want {
+				t.Fatalf("isVersionCommand(%q) = %t, want %t", test.args, got, test.want)
+			}
+		})
+	}
+}
+
+func TestFormatVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		want    string
+	}{
+		{name: "release", version: "v0.16.3", want: "syrogo v0.16.3"},
+		{name: "development", version: "dev", want: "syrogo dev"},
+		{name: "empty", want: "syrogo dev"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := formatVersion(test.version); got != test.want {
+				t.Fatalf("formatVersion(%q) = %q, want %q", test.version, got, test.want)
+			}
+		})
+	}
+}
+
 func TestBuildStartupBannerDefaults(t *testing.T) {
 	got := buildStartupBanner(startupBannerData{
 		Tagline: "AI Gateway / Semantic Router",

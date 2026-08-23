@@ -31,6 +31,10 @@ func main() {
 
 func runMain() int {
 	args := os.Args[1:]
+	if isVersionCommand(args) {
+		fmt.Fprintln(os.Stdout, formatVersion(version))
+		return 0
+	}
 	if command, commandArgs, ok := splitCommandArgs(args); ok {
 		switch command {
 		case "run":
@@ -72,6 +76,21 @@ func runMain() int {
 		return 1
 	}
 	return 0
+}
+
+func isVersionCommand(args []string) bool {
+	return len(args) == 1 && (args[0] == "--version" || args[0] == "-version" || args[0] == "version")
+}
+
+func formatVersion(buildVersion string) string {
+	return fmt.Sprintf("syrogo %s", normalizeVersion(buildVersion))
+}
+
+func normalizeVersion(buildVersion string) string {
+	if buildVersion == "" {
+		return "dev"
+	}
+	return buildVersion
 }
 
 func splitCommandArgs(args []string) (string, []string, bool) {
@@ -160,10 +179,7 @@ type startupBannerData struct {
 }
 
 func buildStartupBanner(data startupBannerData) string {
-	versionText := data.Version
-	if versionText == "" {
-		versionText = "dev"
-	}
+	versionText := normalizeVersion(data.Version)
 
 	listenText := "(none)"
 	if len(data.Listens) > 0 {
