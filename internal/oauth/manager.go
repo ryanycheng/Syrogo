@@ -239,7 +239,7 @@ func (m *Manager) exchangeCodexAuthorizationCode(ctx context.Context, flow Flow,
 	req.Header.Set("Accept", "application/json")
 	response, err := m.httpClient.Do(req)
 	if err != nil {
-		return Metadata{}, fmt.Errorf("Codex OAuth exchange request: %w", err)
+		return Metadata{}, fmt.Errorf("codex OAuth exchange request: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(response.Body, maxOAuthResponseBytes))
@@ -247,7 +247,7 @@ func (m *Manager) exchangeCodexAuthorizationCode(ctx context.Context, flow Flow,
 		return Metadata{}, fmt.Errorf("read Codex OAuth exchange response: %w", err)
 	}
 	if response.StatusCode != http.StatusOK {
-		return Metadata{}, fmt.Errorf("Codex OAuth exchange failed with status %d", response.StatusCode)
+		return Metadata{}, fmt.Errorf("codex OAuth exchange failed with status %d", response.StatusCode)
 	}
 	var token struct {
 		AccessToken  string `json:"access_token"`
@@ -259,7 +259,7 @@ func (m *Manager) exchangeCodexAuthorizationCode(ctx context.Context, flow Flow,
 		return Metadata{}, fmt.Errorf("decode Codex OAuth exchange response: %w", err)
 	}
 	if strings.TrimSpace(token.AccessToken) == "" || token.ExpiresIn <= 0 {
-		return Metadata{}, fmt.Errorf("Codex OAuth exchange response is invalid")
+		return Metadata{}, fmt.Errorf("codex OAuth exchange response is invalid")
 	}
 	credential := Credential{ID: flow.CredentialID, Provider: ProviderCodex, AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, ExpiresAt: m.now().Add(time.Duration(token.ExpiresIn) * time.Second), Scope: token.Scope}
 	if err := m.store.Save(credential); err != nil {

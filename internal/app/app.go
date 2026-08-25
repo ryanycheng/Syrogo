@@ -124,16 +124,8 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 	return app, nil
 }
 
-func buildRuntime(cfg config.Config, store accounting.Store) (appRuntime, error) {
-	return buildRuntimeWithOAuth(cfg, store, nil)
-}
-
 func buildRuntimeWithOAuth(cfg config.Config, store accounting.Store, oauthManager *oauth.Manager) (appRuntime, error) {
 	return buildRuntimeWithTrackersAndOAuth(cfg, store, quota.NewTracker(nil), quota.NewClientTracker(nil), true, oauthManager)
-}
-
-func buildRuntimeWithTrackers(cfg config.Config, store accounting.Store, outboundQuotaTracker, clientQuotaTracker *quota.Tracker, loadSnapshot bool) (appRuntime, error) {
-	return buildRuntimeWithTrackersAndOAuth(cfg, store, outboundQuotaTracker, clientQuotaTracker, loadSnapshot, nil)
 }
 
 func buildRuntimeWithTrackersAndOAuth(cfg config.Config, store accounting.Store, outboundQuotaTracker, clientQuotaTracker *quota.Tracker, loadSnapshot bool, oauthManager *oauth.Manager) (appRuntime, error) {

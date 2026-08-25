@@ -268,7 +268,7 @@ func writeSnapshotAtomic(dir string, snapshot sessionSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("open session snapshot dir: %w", err)
 	}
-	defer parent.Close()
+	defer func() { _ = parent.Close() }()
 	if err := parent.Sync(); err != nil {
 		return fmt.Errorf("sync session snapshot dir: %w", err)
 	}

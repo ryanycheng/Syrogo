@@ -36,7 +36,7 @@ func TestSnapshotStoreRoundTripAndRecoveryNormalization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close(context.Background())
+	defer func() { _ = reader.Close(context.Background()) }()
 
 	leased, ok := restoredStore.GetOwned("leased", "client", "inbound")
 	if !ok || leased.Status != StatusUnknown || !leased.RecoveryPending || leased.RecoveredAt == nil || !leased.RecoveredAt.Equal(recoveredAt) {

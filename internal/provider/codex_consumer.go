@@ -28,7 +28,7 @@ func (p *CodexConsumerProvider) Name() string { return p.providerName }
 
 func (p *CodexConsumerProvider) ChatCompletion(ctx context.Context, req runtime.Request) (runtime.Response, error) {
 	if p.source == nil {
-		return runtime.Response{}, fmt.Errorf("Codex OAuth credential is required")
+		return runtime.Response{}, fmt.Errorf("codex OAuth credential is required")
 	}
 	credential, err := p.source.Credential(ctx)
 	if err != nil {
@@ -49,5 +49,5 @@ func (p *CodexConsumerProvider) ChatCompletion(ctx context.Context, req runtime.
 }
 
 func (p *CodexConsumerProvider) StreamCompletion(ctx context.Context, req runtime.Request) (<-chan runtime.StreamEvent, error) {
-	return nil, fmt.Errorf("Codex OAuth streaming is not supported")
+	return nil, fmt.Errorf("codex OAuth streaming is not supported")
 }

@@ -32,7 +32,9 @@ func main() {
 func runMain() int {
 	args := os.Args[1:]
 	if isVersionCommand(args) {
-		fmt.Fprintln(os.Stdout, formatVersion(version))
+		if _, err := fmt.Fprintln(os.Stdout, formatVersion(version)); err != nil {
+			return 1
+		}
 		return 0
 	}
 	if command, commandArgs, ok := splitCommandArgs(args); ok {
