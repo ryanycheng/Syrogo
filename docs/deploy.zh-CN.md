@@ -126,6 +126,8 @@ sessions:
 
 systemd 的 WorkingDirectory 是 `/opt/syrogo`，实际 snapshot 位于 `/opt/syrogo/data/sessions`；目录权限为 `0700`，snapshot 文件为 `0600`。文件包含 host、CWD、command、tmux 等敏感元数据，应限制访问并备份该目录。服务周期写 snapshot，正常关闭时再次 flush；崩溃最多丢失一个 flush interval。重启时原 active session 先变为 `unknown` 并标记 `recovery_pending`，等待 heartbeat 确认，45 秒无确认则转为 `stopped`。该能力仅用于单机本地恢复，不会接管旧 PID；不需要时可显式配置 `sessions.snapshot.enabled: false`。
 
+启用 snapshot 时，一个 session 目录只能由一个 Core 使用；Core 会对该目录加排他锁，第二个实例会启动失败而不会覆盖 `latest.json`。若部署多个独立 Core，必须分别配置 listener、Admin 入口与 `sessions.snapshot.dir`，其会话列表不会自动聚合。排查缺失会话时，核对 Console 访问的 Base URL、`syrogo run claude` 日志中的 `base_url`、运行中的 Core 进程及其 session 目录是否一致。
+
 上游 OAuth 是实验性兼容能力，不替代稳定的 API key。通过 Admin UI 连接 Claude 或 Codex 后，配置只保留 `auth.type` 和 `credential_ref`；access token、refresh token 和 PKCE verifier 不进入 YAML、配置历史、日志或浏览器存储。凭证默认写入 `/opt/syrogo/data/oauth`，目录权限为 `0700`、文件为 `0600`。Claude 使用 PKCE callback URL 交接，Codex 使用 device flow。两条链路依赖消费端 OAuth 与私有兼容接口，并非官方第三方 OAuth 集成，可能受上游协议和服务条款影响；不要提供浏览器 cookie 或 `sessionKey`，也不要将 OAuth outbound 的 endpoint 改为自定义地址。Codex OAuth 不支持流式请求，Admin UI 的 Provider Test 也不会对 OAuth outbound 发起测试请求。
 
 检查服务：

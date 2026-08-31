@@ -263,6 +263,7 @@ outbounds:
     #   usage_estimation_mode: "heuristic"
 
 sessions:
+  # A snapshot directory belongs to one Core instance; session lists are not shared across Core instances.
   snapshot:
     enabled: true
     dir: "./data/sessions"

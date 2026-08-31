@@ -312,52 +312,83 @@ func launchClaudeAgent(opts launcherOptions, plan launchPlan) error {
 	reporter := startClaudeSessionReporter(opts, plan, sessionID, cmd.Process.Pid)
 
 	waitErr := cmd.Wait()
-	reporter.Close()
+	reporter.Close(opts, plan, sessionID, cmd.Process.Pid)
 	exitCode := 0
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 	if err := postSessionJSON(opts.BaseURL, "/session/stopped", plan.Client.Token, map[string]any{"session_id": sessionID, "inbound_name": plan.Client.InboundName, "exit_code": exitCode}); err != nil {
-		_, _ = fmt.Fprintf(opts.Stderr, "syrogo session stopped: %v\n", err)
+		logSessionReporterError(opts.Stderr, "stopped", opts, plan, sessionID, err)
 	}
 	return waitErr
 }
 
 type claudeSessionReporter struct {
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	startedAt  time.Time
+	registered bool
+	mu         sync.Mutex
 }
 
 func startClaudeSessionReporter(opts launcherOptions, plan launchPlan, sessionID string, pid int) *claudeSessionReporter {
 	ctx, cancel := context.WithCancel(context.Background())
-	reporter := &claudeSessionReporter{cancel: cancel}
 	startedAt := time.Now()
+	reporter := &claudeSessionReporter{cancel: cancel, startedAt: startedAt}
 	requestCtx, requestCancel := context.WithTimeout(ctx, sessionRequestTimeout)
 	err := registerClaudeSession(requestCtx, opts, plan, sessionID, pid, startedAt)
 	requestCancel()
 	registered := err == nil
+	reporter.setRegistered(registered)
 	if err != nil {
-		_, _ = fmt.Fprintf(opts.Stderr, "syrogo session register: %v\n", err)
+		logSessionReporterError(opts.Stderr, "initial register", opts, plan, sessionID, err)
 	}
 	reporter.wg.Add(1)
 	go func() {
 		defer reporter.wg.Done()
 		ticker := time.NewTicker(sessionHeartbeatInterval)
 		defer ticker.Stop()
-		runClaudeSessionReporter(ctx, opts, plan, sessionID, pid, startedAt, registered, ticker.C)
+		runClaudeSessionReporter(ctx, opts, plan, sessionID, pid, startedAt, reporter, ticker.C)
 	}()
 	return reporter
 }
 
-func (r *claudeSessionReporter) Close() {
+func (r *claudeSessionReporter) Close(opts launcherOptions, plan launchPlan, sessionID string, pid int) {
 	if r == nil {
 		return
 	}
 	r.cancel()
 	r.wg.Wait()
+	if r.isRegistered() {
+		return
+	}
+	requestCtx, cancel := context.WithTimeout(context.Background(), sessionRequestTimeout)
+	defer cancel()
+	if err := registerClaudeSession(requestCtx, opts, plan, sessionID, pid, r.startedAt); err != nil {
+		logSessionReporterError(opts.Stderr, "final register", opts, plan, sessionID, err)
+		return
+	}
+	r.setRegistered(true)
 }
 
-func runClaudeSessionReporter(ctx context.Context, opts launcherOptions, plan launchPlan, sessionID string, pid int, startedAt time.Time, registered bool, ticks <-chan time.Time) {
+func (r *claudeSessionReporter) setRegistered(registered bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.registered = registered
+}
+
+func (r *claudeSessionReporter) isRegistered() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.registered
+}
+
+func logSessionReporterError(stderr io.Writer, phase string, opts launcherOptions, plan launchPlan, sessionID string, err error) {
+	_, _ = fmt.Fprintf(stderr, "syrogo session %s failed: session_id=%s base_url=%s inbound_name=%s error=%v\n", phase, sessionID, opts.BaseURL, plan.Client.InboundName, err)
+}
+
+func runClaudeSessionReporter(ctx context.Context, opts launcherOptions, plan launchPlan, sessionID string, pid int, startedAt time.Time, reporter *claudeSessionReporter, ticks <-chan time.Time) {
+	registered := reporter.isRegistered()
 	for {
 		select {
 		case <-ticks:
@@ -371,8 +402,9 @@ func runClaudeSessionReporter(ctx context.Context, opts launcherOptions, plan la
 			cancel()
 			if err == nil {
 				registered = true
+				reporter.setRegistered(true)
 			} else if ctx.Err() == nil {
-				_, _ = fmt.Fprintf(opts.Stderr, "syrogo session register: %v\n", err)
+				logSessionReporterError(opts.Stderr, "retry register", opts, plan, sessionID, err)
 			}
 			continue
 		}
@@ -388,12 +420,13 @@ func runClaudeSessionReporter(ctx context.Context, opts launcherOptions, plan la
 			err = registerClaudeSession(requestCtx, opts, plan, sessionID, pid, startedAt)
 			cancel()
 			registered = err == nil
+			reporter.setRegistered(registered)
 			if err != nil && ctx.Err() == nil {
-				_, _ = fmt.Fprintf(opts.Stderr, "syrogo session register: %v\n", err)
+				logSessionReporterError(opts.Stderr, "retry register", opts, plan, sessionID, err)
 			}
 			continue
 		}
-		_, _ = fmt.Fprintf(opts.Stderr, "syrogo session heartbeat: %v\n", err)
+		logSessionReporterError(opts.Stderr, "heartbeat", opts, plan, sessionID, err)
 	}
 }
 

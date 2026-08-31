@@ -399,6 +399,52 @@ func TestDefaultLauncherConfigPathFallsBackToLocalConfigForDevelopment(t *testin
 	}
 }
 
+func TestLaunchAgentRegistersExitedClaudeAfterInitialFailure(t *testing.T) {
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registerCalls := 0
+	var sessionID, startedAt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		switch r.URL.Path {
+		case "/session/register":
+			registerCalls++
+			if registerCalls == 1 {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			sessionID, _ = body["session_id"].(string)
+			startedAt, _ = body["started_at"].(string)
+		case "/session/stopped":
+			if body["session_id"] != sessionID {
+				t.Fatalf("stopped session_id = %#v, want %q", body["session_id"], sessionID)
+			}
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stderr := &bytes.Buffer{}
+	if err := launchAgent(launcherOptions{BaseURL: server.URL, Inbound: "anthropic-entry", Token: "client-token", Args: []string{"claude"}, Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{}, Stderr: stderr}); err != nil {
+		t.Fatal(err)
+	}
+	if registerCalls != 2 || sessionID == "" || startedAt == "" {
+		t.Fatalf("registerCalls=%d sessionID=%q startedAt=%q", registerCalls, sessionID, startedAt)
+	}
+	if output := stderr.String(); !strings.Contains(output, "initial register") || !strings.Contains(output, "session_id=") || !strings.Contains(output, "base_url="+server.URL) || strings.Contains(output, "client-token") {
+		t.Fatalf("stderr = %q", output)
+	}
+}
+
 func TestLaunchAgentInjectsClaudeHooksWithSettingsOverlay(t *testing.T) {
 	binDir := t.TempDir()
 	capturePath := filepath.Join(t.TempDir(), "capture.txt")
@@ -520,9 +566,10 @@ func TestClaudeSessionReporterRetriesAndReregistersAfterNotFound(t *testing.T) {
 	ticks := make(chan time.Time)
 	done := make(chan struct{})
 	startedAt := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	reporter := &claudeSessionReporter{registered: false}
 	go func() {
 		defer close(done)
-		runClaudeSessionReporter(ctx, opts, plan, "session-1", 42, startedAt, false, ticks)
+		runClaudeSessionReporter(ctx, opts, plan, "session-1", 42, startedAt, reporter, ticks)
 	}()
 
 	ticks <- time.Now()

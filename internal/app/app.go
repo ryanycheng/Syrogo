@@ -34,6 +34,7 @@ type App struct {
 	quotaSnapshotStore   *quota.SnapshotStore
 	sessionStore         *sessions.Store
 	sessionSnapshotStore *sessions.SnapshotStore
+	sessionInstanceLock  *sessions.InstanceLock
 	sessionReaper        *sessions.Reaper
 	oauthManager         *oauth.Manager
 	cfg                  config.Config
@@ -88,12 +89,22 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 	if sessionSnapshotConfig.FlushInterval == "" {
 		sessionSnapshotConfig.FlushInterval = config.DurationValue("5s")
 	}
+	var sessionInstanceLock *sessions.InstanceLock
+	if sessionSnapshotConfig.EnabledEffective() {
+		sessionInstanceLock, err = sessions.AcquireInstanceLock(sessionSnapshotConfig.Dir)
+		if err != nil {
+			_ = runtime.dispatcher.Close(context.Background())
+			_ = runtime.quotaSnapshotStore.Close(context.Background())
+			return nil, fmt.Errorf("acquire session instance lock: %w", err)
+		}
+	}
 	sessionSnapshotStore, err := sessions.NewSnapshotStore(sessions.SnapshotConfig{
 		Enabled:       sessionSnapshotConfig.EnabledEffective(),
 		Dir:           sessionSnapshotConfig.Dir,
 		FlushInterval: sessionSnapshotConfig.FlushInterval.Duration(),
 	}, sessionStore)
 	if err != nil {
+		_ = sessionInstanceLock.Close()
 		_ = runtime.dispatcher.Close(context.Background())
 		_ = runtime.quotaSnapshotStore.Close(context.Background())
 		return nil, fmt.Errorf("create session snapshot store: %w", err)
@@ -112,6 +123,7 @@ func NewWithOptions(cfg config.Config, opts Options) (*App, error) {
 		quotaSnapshotStore:   runtime.quotaSnapshotStore,
 		sessionStore:         sessionStore,
 		sessionSnapshotStore: sessionSnapshotStore,
+		sessionInstanceLock:  sessionInstanceLock,
 		sessionReaper:        sessions.NewReaper(sessionStore),
 		cfg:                  cfg,
 		configPath:           opts.ConfigPath,
@@ -272,6 +284,9 @@ func (a *App) Close(ctx context.Context) error {
 		err = closeErr
 	}
 	if closeErr := a.sessionSnapshotStore.Close(ctx); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if closeErr := a.sessionInstanceLock.Close(); closeErr != nil && err == nil {
 		err = closeErr
 	}
 	if a.dispatcher != nil {

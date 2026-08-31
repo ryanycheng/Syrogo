@@ -3,12 +3,33 @@ package sessions
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestInstanceLockExcludesConcurrentCoreAndReleases(t *testing.T) {
+	dir := t.TempDir()
+	first, err := AcquireInstanceLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMode(t, filepath.Join(dir, "core.lock"), 0o600)
+	if second, err := AcquireInstanceLock(dir); !errors.Is(err, ErrInstanceLocked) || second != nil {
+		t.Fatalf("AcquireInstanceLock() = %#v, %v", second, err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := AcquireInstanceLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Close() }()
+}
 
 func TestSnapshotStoreRoundTripAndRecoveryNormalization(t *testing.T) {
 	dir := t.TempDir()
